@@ -1,0 +1,2032 @@
+import { initializeApp, getApps, getApp } from 'firebase/app';
+import {
+  getAuth,
+  signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
+  GoogleAuthProvider,
+  onAuthStateChanged,
+  setPersistence,
+  browserLocalPersistence,
+  User,
+  signOut,
+} from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
+import { loadDriveJsonCacheEntry, saveDriveJsonCacheEntry } from './fileStorage';
+import { IncrementalBackupEnvelope, isIncrementalBackupPayload } from './incrementalBackup';
+
+export const DRIVE_FOLDER_NAME = 'Central de Estudos - Materiais';
+export const DEFAULT_STUDY_FOLDER_ID = '1mSxRKoC7cOt8ivkcR7zhGZflMwUe_eWB';
+export const DRIVE_SCOPES = [
+  'https://www.googleapis.com/auth/drive.file',
+  'https://www.googleapis.com/auth/drive.metadata.readonly',
+] as const;
+export const DRIVE_SCOPE = DRIVE_SCOPES[0];
+export const CLOUD_SYNC_FILENAME = 'central_estudos_sync_latest.json';
+const DRIVE_FOLDER_PREF_KEY = 'central_estudos_drive_folder_pref_v1';
+const KNOWN_DRIVE_ROOTS_KEY = 'central_estudos_known_drive_roots_v1';
+
+const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
+export const auth = getAuth(app);
+void setPersistence(auth, browserLocalPersistence).catch(() => {});
+
+const provider = new GoogleAuthProvider();
+DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
+provider.setCustomParameters({ prompt: 'select_account' });
+
+// In-memory access token cache (never persisted to localStorage/sessionStorage)
+let cachedAccessToken: string | null = null;
+let cachedAccessTokenExpiresAt = 0;
+let isSigningIn = false;
+let cachedFolderId: string | null = null;
+let cachedFolderLink: string | null = null;
+let cachedFolderName: string | null = null;
+let inflightStudyFolderPromise: Promise<{ id: string; name: string; webViewLink?: string }> | null = null;
+const cachedSubFolderIds: Record<string, string> = {};
+const inflightSubFolderPromises = new Map<string, Promise<string>>();
+
+export interface DriveFolderPreference {
+  id: string | null;
+  name: string;
+}
+
+export function getKnownStudyDriveFolderNames(): string[] {
+  const result = new Set<string>([DRIVE_FOLDER_NAME, 'central-de-estudos-sigma.verce']);
+  try {
+    const raw = localStorage.getItem(KNOWN_DRIVE_ROOTS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        parsed.forEach((n) => {
+          if (typeof n === 'string' && n.trim()) result.add(n.trim());
+        });
+      }
+    }
+    const prefRaw = localStorage.getItem(DRIVE_FOLDER_PREF_KEY);
+    if (prefRaw) {
+      const prefParsed = JSON.parse(prefRaw) as Partial<DriveFolderPreference>;
+      if (typeof prefParsed?.name === 'string' && prefParsed.name.trim()) {
+        result.add(prefParsed.name.trim());
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return Array.from(result);
+}
+
+export function rememberKnownStudyDriveFolderName(name?: string | null): void {
+  const clean = typeof name === 'string' ? name.trim() : '';
+  if (!clean) return;
+  try {
+    const existing = getKnownStudyDriveFolderNames();
+    if (!existing.some((x) => x.toLowerCase() === clean.toLowerCase())) {
+      localStorage.setItem(KNOWN_DRIVE_ROOTS_KEY, JSON.stringify([...existing, clean]));
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getPreferredStudyFolder(): DriveFolderPreference {
+  try {
+    const raw = localStorage.getItem(DRIVE_FOLDER_PREF_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<DriveFolderPreference>;
+      const name = typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : DRIVE_FOLDER_NAME;
+      const id =
+        typeof parsed?.id === 'string' && parsed.id.trim()
+          ? parsed.id.trim()
+          : DEFAULT_STUDY_FOLDER_ID;
+      return { id, name };
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return { id: DEFAULT_STUDY_FOLDER_ID, name: DRIVE_FOLDER_NAME };
+}
+
+export function setPreferredStudyFolder(pref: { id?: string | null; name?: string | null }): DriveFolderPreference {
+  const next: DriveFolderPreference = {
+    id: pref.id?.trim() || null,
+    name: pref.name?.trim() || DRIVE_FOLDER_NAME,
+  };
+  rememberKnownStudyDriveFolderName(next.name);
+  try {
+    localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+  cachedFolderId = null;
+  cachedFolderLink = null;
+  cachedFolderName = null;
+  inflightStudyFolderPromise = null;
+  inflightSubFolderPromises.clear();
+  for (const key of Object.keys(cachedSubFolderIds)) {
+    delete cachedSubFolderIds[key];
+  }
+  return next;
+}
+
+export function extractDriveFolderId(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  const folderUrlMatch = trimmed.match(/\/folders\/([a-zA-Z0-9_-]{10,})/);
+  if (folderUrlMatch?.[1]) return folderUrlMatch[1];
+  const idParamMatch = trimmed.match(/[?&]id=([a-zA-Z0-9_-]{10,})/);
+  if (idParamMatch?.[1]) return idParamMatch[1];
+  if (/^[a-zA-Z0-9_-]{15,}$/.test(trimmed) && !trimmed.includes(' ')) {
+    return trimmed;
+  }
+  return null;
+}
+
+export function clearAccessTokenOnly(): void {
+  cachedAccessToken = null;
+  cachedAccessTokenExpiresAt = 0;
+}
+
+export function isDriveAccessTokenExpiringSoon(bufferMs = 5 * 60 * 1000): boolean {
+  if (!cachedAccessToken) return true;
+  if (!cachedAccessTokenExpiresAt) return false;
+  return Date.now() >= cachedAccessTokenExpiresAt - bufferMs;
+}
+
+export function resetDriveCache(): void {
+  clearAccessTokenOnly();
+  cachedFolderId = null;
+  cachedFolderLink = null;
+  cachedFolderName = null;
+  inflightStudyFolderPromise = null;
+  inflightSubFolderPromises.clear();
+  for (const key of Object.keys(cachedSubFolderIds)) {
+    delete cachedSubFolderIds[key];
+  }
+}
+
+export interface DriveFileInfo {
+  id: string;
+  name: string;
+  mimeType: string;
+  size?: string;
+  webViewLink?: string;
+  createdTime?: string;
+  modifiedTime?: string;
+  parents?: string[];
+  ancestorFolderIds?: string[];
+  subfolderName?: string;
+  folderPath?: string;
+  isInStudyFolder?: boolean;
+  isInActiveFolder?: boolean;
+}
+
+export interface DriveFolderSummary {
+  id: string;
+  name: string;
+  fullPath: string;
+  webViewLink?: string;
+  isStudyRoot: boolean;
+  isInsideStudyRoot: boolean;
+  fileCount: number;
+  studyFileCount: number;
+  files: DriveFileInfo[];
+}
+
+interface RawDriveFolder {
+  id: string;
+  name: string;
+  parents?: string[];
+  webViewLink?: string;
+}
+
+const CANONICAL_SUBFOLDER_NAMES = [
+  'Backups',
+  'PDFs Pessoais',
+  'Lei Seca',
+  'Provas e Gabaritos',
+  'Resumos e Mapas',
+  'Discursivas',
+  'Cronogramas',
+  'Editais',
+  'Datas e Locais',
+];
+
+async function driveFetchWithRetry(
+  url: string,
+  init: RequestInit,
+  retries = 2,
+): Promise<Response> {
+  let lastRes: Response | null = null;
+  let lastErr: unknown = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const res = await fetch(url, init);
+      if (res.ok || (res.status !== 500 && res.status !== 502 && res.status !== 503 && res.status !== 504 && res.status !== 429)) {
+        return res;
+      }
+      lastRes = res;
+    } catch (err) {
+      lastErr = err;
+    }
+    if (attempt < retries) {
+      const delayMs = 350 * Math.pow(2, attempt) + Math.floor(Math.random() * 150);
+      await new Promise((resolve) => window.setTimeout(resolve, delayMs));
+    }
+  }
+
+  if (lastRes) return lastRes;
+  throw lastErr instanceof Error ? lastErr : new Error('Falha de rede ao acessar Google Drive.');
+}
+
+function parseGoogleDriveErrorMessage(rawText: string): string {
+  try {
+    const parsed = JSON.parse(rawText);
+    const msg = parsed?.error?.message;
+    const code = parsed?.error?.code;
+    if (msg) {
+      return code ? `${msg} (HTTP ${code})` : String(msg);
+    }
+  } catch {
+    // raw text not JSON
+  }
+  return rawText;
+}
+
+async function fetchDriveFilesList(
+  token: string,
+  opts: {
+    q: string;
+    fields: string;
+    fallbackFields?: string;
+    pageSize?: number;
+    orderBy?: string;
+    pageToken?: string;
+  },
+): Promise<Response> {
+  const baseParams = new URLSearchParams({
+    q: opts.q,
+    fields: opts.fields,
+    pageSize: String(opts.pageSize || 100),
+    includeItemsFromAllDrives: 'true',
+    supportsAllDrives: 'true',
+  });
+  if (opts.orderBy) baseParams.set('orderBy', opts.orderBy);
+  if (opts.pageToken) baseParams.set('pageToken', opts.pageToken);
+
+  const primaryRes = await driveFetchWithRetry(
+    `https://www.googleapis.com/drive/v3/files?${baseParams.toString()}`,
+    { headers: { Authorization: `Bearer ${token}` } },
+    2,
+  );
+
+  if (primaryRes.ok || primaryRes.status === 401 || primaryRes.status === 403) {
+    return primaryRes;
+  }
+
+  // Fallback for Drive v3 500 Internal Error caused by allDrives / complex fields / orderBy
+  if (primaryRes.status >= 500) {
+    const fallbackParams = new URLSearchParams({
+      q: opts.q,
+      fields: opts.fallbackFields || opts.fields,
+      pageSize: String(Math.min(opts.pageSize || 100, 50)),
+      corpora: 'user',
+    });
+    if (opts.pageToken) fallbackParams.set('pageToken', opts.pageToken);
+
+    const fallbackRes = await driveFetchWithRetry(
+      `https://www.googleapis.com/drive/v3/files?${fallbackParams.toString()}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      1,
+    );
+    if (fallbackRes.ok || fallbackRes.status === 401 || fallbackRes.status === 403) {
+      return fallbackRes;
+    }
+    return fallbackRes;
+  }
+
+  return primaryRes;
+}
+
+async function throwDriveResponseError(res: Response, context: string): Promise<never> {
+  if (res.status === 401) {
+    clearAccessTokenOnly();
+    throw new Error('TOKEN_EXPIRED: Sua sessão do Google Drive expirou. Reconecte sua conta Google.');
+  }
+  const err = await res.text();
+  if (
+    res.status === 403 &&
+    (err.includes('insufficientFilePermissions') ||
+      err.includes('appNotAuthorizedToFile') ||
+      err.includes('forbidden'))
+  ) {
+    throw new Error(
+      'DRIVE_FOLDER_PERMISSION: O aplicativo não tem permissão de escrita na pasta selecionada do Google Drive. Selecione ou autorize essa pasta pelo seletor oficial do Google Drive.',
+    );
+  }
+  throw new Error(`${context}: ${parseGoogleDriveErrorMessage(err)}`);
+}
+
+export function formatGoogleAuthError(error: any): string {
+  const code = String(error?.code || '');
+  const msg = String(error?.message || '');
+  const host = typeof window !== 'undefined' ? window.location.hostname : '';
+
+  if (code === 'auth/unauthorized-domain' || msg.includes('auth/unauthorized-domain')) {
+    return `Domínio "${host}" não autorizado no Firebase Authentication (${code}). Adicione este domínio em Firebase Console > Authentication > Settings > Authorized Domains ou use o Modo Local.`;
+  }
+  if (code === 'auth/popup-blocked' || msg.includes('auth/popup-blocked')) {
+    return 'O navegador bloqueou a janela popup de login do Google. Libere pop-ups para este site (ou abra o aplicativo em uma nova aba) e tente novamente.';
+  }
+  if (code === 'auth/popup-closed-by-user' || msg.includes('auth/popup-closed-by-user')) {
+    return 'A janela de login do Google foi fechada antes de concluir a autenticação. Tente novamente e conclua a seleção da conta.';
+  }
+  if (code === 'auth/cancelled-popup-request') {
+    return 'Solicitação de login substituída ou cancelada. Clique novamente em "Continuar com o Google".';
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return 'Login com Google não está habilitado no projeto Firebase atual (auth/operation-not-allowed).';
+  }
+  if (code === 'auth/network-request-failed') {
+    return 'Falha de rede ao conectar com o Google. Verifique sua conexão e tente novamente.';
+  }
+  const codeSuffix = code ? ` (${code})` : '';
+  return msg ? `${msg}${codeSuffix}` : `Não foi possível concluir o login com o Google${codeSuffix}.`;
+}
+
+export const initDriveAuth = (
+  onAuthSuccess?: (user: User, token: string | null) => void,
+  onAuthFailure?: () => void,
+) => {
+  try {
+    void getRedirectResult(auth)
+      .then((result) => {
+        if (result?.user) {
+          const cred = GoogleAuthProvider.credentialFromResult(result);
+          if (cred?.accessToken) {
+            cachedAccessToken = cred.accessToken;
+            cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
+            if (onAuthSuccess) {
+              onAuthSuccess(result.user, cachedAccessToken);
+            }
+          }
+        }
+      })
+      .catch((err) => {
+        console.warn('Redirect auth result:', err);
+      });
+
+    return onAuthStateChanged(auth, (user: User | null) => {
+      if (user) {
+        // Never disconnect an authenticated user if the in-memory Drive OAuth token
+        // cleared on reload or expired by time limit — keep the account active.
+        if (onAuthSuccess) {
+          onAuthSuccess(user, cachedAccessToken);
+        }
+      } else {
+        resetDriveCache();
+        if (onAuthFailure) onAuthFailure();
+      }
+    });
+  } catch (err) {
+    console.warn('Auth initialization unavailable in offline/restricted mode:', err);
+    resetDriveCache();
+    if (onAuthFailure) onAuthFailure();
+    return () => {};
+  }
+};
+
+export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
+  try {
+    isSigningIn = true;
+    const result = await signInWithPopup(auth, provider);
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (!credential?.accessToken) {
+      throw new Error('Falha ao obter token de acesso do Google Drive.');
+    }
+
+    cachedAccessToken = credential.accessToken;
+    cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
+    cachedFolderId = null;
+    cachedFolderLink = null;
+    for (const key of Object.keys(cachedSubFolderIds)) {
+      delete cachedSubFolderIds[key];
+    }
+
+    return { user: result.user, accessToken: cachedAccessToken };
+  } catch (error: any) {
+    const code = String(error?.code || '');
+    if (
+      (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') &&
+      typeof window !== 'undefined' &&
+      window.self === window.top
+    ) {
+      await signInWithRedirect(auth, provider);
+      return null;
+    }
+    console.error('Erro de login no Google Drive:', error);
+    const formatted = new Error(formatGoogleAuthError(error)) as Error & { code?: string };
+    formatted.code = error?.code;
+    throw formatted;
+  } finally {
+    isSigningIn = false;
+  }
+};
+
+export const getAccessToken = async (): Promise<string | null> => {
+  return cachedAccessToken;
+};
+
+export const googleSignOut = async (): Promise<void> => {
+  await signOut(auth);
+  resetDriveCache();
+};
+
+/**
+ * Fetches all non-trashed folders visible in the user's Google Drive account and builds path maps.
+ */
+interface DriveFolderGraphResult {
+  foldersById: Map<string, RawDriveFolder>;
+  fullPathById: Map<string, string>;
+  ancestorIdsByFolderId: Map<string, string[]>;
+  studyRootIds: Set<string>;
+  studyDescendantIds: Set<string>;
+  canonicalCategoryByFolderId: Map<string, string>;
+}
+
+const inflightFolderGraphByToken = new Map<string, Promise<DriveFolderGraphResult>>();
+
+async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphResult> {
+  const inflight = inflightFolderGraphByToken.get(token);
+  if (inflight) return inflight;
+
+  const task = (async (): Promise<DriveFolderGraphResult> => {
+    const foldersById = new Map<string, RawDriveFolder>();
+    const folderQuery = `mimeType = 'application/vnd.google-apps.folder' and trashed = false`;
+
+    let pageToken = '';
+    let pages = 0;
+
+    try {
+      do {
+        const res = await fetchDriveFilesList(token, {
+          q: folderQuery,
+          fields: 'nextPageToken,files(id,name,parents,webViewLink)',
+          fallbackFields: 'nextPageToken,files(id,name,parents)',
+          pageSize: 100,
+          pageToken: pageToken || undefined,
+        });
+
+        if (!res.ok) {
+          if (res.status === 401) {
+            await throwDriveResponseError(res, 'Sessão expirada ao listar pastas do Google Drive');
+          }
+          // Non-fatal fallback: try loading only study folder root + immediate subfolders below
+          console.warn('Listagem global de pastas no Drive falhou com status', res.status);
+          break;
+        }
+
+        const data = await res.json();
+        const list = (data.files || []) as RawDriveFolder[];
+        list.forEach((f) => {
+          foldersById.set(f.id, f);
+        });
+        pageToken = data.nextPageToken || '';
+        pages += 1;
+      } while (pageToken && pages < 10);
+    } catch (err: any) {
+      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+        throw err;
+      }
+      console.warn('Falha ao mapear todas as pastas do Drive, usando pasta de estudo ativa:', err);
+    }
+
+    // Fallback: ensure active study folder and its subfolders are present if global folder listing failed/partial
+    if (foldersById.size === 0) {
+      try {
+        const root = await getOrCreateStudyFolder(token);
+        foldersById.set(root.id, {
+          id: root.id,
+          name: root.name,
+          webViewLink: root.webViewLink,
+        });
+        const childRes = await fetchDriveFilesList(token, {
+          q: `mimeType = 'application/vnd.google-apps.folder' and '${root.id}' in parents and trashed = false`,
+          fields: 'files(id,name,parents,webViewLink)',
+          fallbackFields: 'files(id,name,parents)',
+          pageSize: 50,
+        });
+        if (childRes.ok) {
+          const childData = await childRes.json();
+          ((childData.files || []) as RawDriveFolder[]).forEach((f) => {
+            foldersById.set(f.id, f);
+          });
+        }
+      } catch (innerErr: any) {
+        if (String(innerErr?.message || '').includes('TOKEN_EXPIRED')) {
+          throw innerErr;
+        }
+      }
+    }
+
+  const fullPathById = new Map<string, string>();
+  const ancestorIdsByFolderId = new Map<string, string[]>();
+  const studyRootIds = new Set<string>();
+  const studyDescendantIds = new Set<string>();
+  const canonicalCategoryByFolderId = new Map<string, string>();
+
+  const pref = getPreferredStudyFolder();
+  const normalizedDefaultName = DRIVE_FOLDER_NAME.toLowerCase();
+  const normalizedPrefName = pref.name.toLowerCase();
+  const canonicalLowerMap = new Map(CANONICAL_SUBFOLDER_NAMES.map((n) => [n.toLowerCase(), n]));
+
+  for (const folder of foldersById.values()) {
+    const lower = folder.name.trim().toLowerCase();
+    if (
+      (pref.id && folder.id === pref.id) ||
+      lower === normalizedPrefName ||
+      lower === normalizedDefaultName
+    ) {
+      studyRootIds.add(folder.id);
+    }
+  }
+
+  const resolveInfo = (folderId: string) => {
+    const segments: string[] = [];
+    const ancestors: string[] = [];
+    const visited = new Set<string>();
+    let cursorId: string | undefined = folderId;
+    let isInsideStudy = false;
+    let canonicalCat: string | undefined;
+
+    while (cursorId && !visited.has(cursorId)) {
+      visited.add(cursorId);
+      ancestors.push(cursorId);
+      const node = foldersById.get(cursorId);
+      if (!node) break;
+      segments.unshift(node.name);
+      if (studyRootIds.has(node.id)) {
+        isInsideStudy = true;
+      }
+      const lower = node.name.trim().toLowerCase();
+      if (!canonicalCat && canonicalLowerMap.has(lower)) {
+        canonicalCat = canonicalLowerMap.get(lower);
+      }
+      cursorId = node.parents?.[0];
+    }
+
+    const path = segments.join(' / ');
+    fullPathById.set(folderId, path);
+    ancestorIdsByFolderId.set(folderId, ancestors);
+    if (isInsideStudy) {
+      studyDescendantIds.add(folderId);
+      if (canonicalCat) {
+        canonicalCategoryByFolderId.set(folderId, canonicalCat);
+      }
+    }
+  };
+
+  for (const folderId of foldersById.keys()) {
+    resolveInfo(folderId);
+  }
+
+  return {
+    foldersById,
+    fullPathById,
+    ancestorIdsByFolderId,
+    studyRootIds,
+    studyDescendantIds,
+    canonicalCategoryByFolderId,
+  };
+  })();
+
+  inflightFolderGraphByToken.set(token, task);
+  try {
+    return await task;
+  } finally {
+    inflightFolderGraphByToken.delete(token);
+  }
+}
+
+/**
+ * Fetches metadata for a specific Google Drive folder by ID or URL.
+ */
+export async function getDriveFolderMetadata(
+  folderIdOrUrl: string,
+  token?: string,
+): Promise<{ id: string; name: string; webViewLink?: string } | null> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google primeiro.');
+  }
+
+  const extractedId = extractDriveFolderId(folderIdOrUrl);
+  if (!extractedId) return null;
+
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(extractedId)}?fields=id,name,mimeType,webViewLink,trashed&supportsAllDrives=true`,
+    {
+      headers: { Authorization: `Bearer ${activeToken}` },
+    },
+  );
+
+  if (res.status === 401) {
+    await throwDriveResponseError(res, 'Sessão expirada ao consultar pasta do Drive');
+  }
+  if (!res.ok) return null;
+
+  const data = (await res.json()) as {
+    id: string;
+    name: string;
+    mimeType?: string;
+    webViewLink?: string;
+    trashed?: boolean;
+  };
+  if (data.trashed || data.mimeType !== 'application/vnd.google-apps.folder') {
+    return null;
+  }
+  return { id: data.id, name: data.name, webViewLink: data.webViewLink };
+}
+
+/**
+ * Verifies whether the OAuth token currently has drive.file write permission inside `folderId`.
+ * Creates and immediately removes a 0-byte probe file to test actual API write permission.
+ */
+export async function verifyDriveFolderWritable(folderId: string, token?: string): Promise<boolean> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google primeiro.');
+  }
+
+  const res = await fetch(
+    'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${activeToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        name: '.central_estudos_write_check',
+        mimeType: 'text/plain',
+        parents: [folderId],
+      }),
+    },
+  );
+
+  if (res.status === 401) {
+    await throwDriveResponseError(res, 'Sessão expirada ao testar permissão da pasta');
+  }
+  if (res.status === 403) {
+    return false;
+  }
+  if (!res.ok) {
+    return false;
+  }
+
+  try {
+    const created = (await res.json()) as { id?: string };
+    if (created?.id) {
+      await fetch(
+        `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(created.id)}?supportsAllDrives=true`,
+        {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${activeToken}` },
+        },
+      ).catch(() => {});
+    }
+  } catch {
+    // ignore cleanup failures
+  }
+  return true;
+}
+
+/**
+ * Finds or creates the active dedicated study folder in user's Google Drive.
+ * Respects user-selected folder preference when configured; falls back to "Central de Estudos - Materiais".
+ */
+export async function getOrCreateStudyFolder(token?: string): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('Usuário não autenticado no Google.');
+  }
+
+  const pref = getPreferredStudyFolder();
+
+  if (cachedFolderId) {
+    return {
+      id: cachedFolderId,
+      name: cachedFolderName || pref.name,
+      webViewLink: cachedFolderLink || undefined,
+    };
+  }
+
+  if (inflightStudyFolderPromise) {
+    return inflightStudyFolderPromise;
+  }
+
+  const task = (async (): Promise<{ id: string; name: string; webViewLink?: string }> => {
+    if (pref.id) {
+      const byId = await getDriveFolderMetadata(pref.id, activeToken);
+      if (byId) {
+        const link = byId.webViewLink || `https://drive.google.com/drive/folders/${byId.id}`;
+        cachedFolderId = byId.id;
+        cachedFolderLink = link;
+        cachedFolderName = byId.name;
+        rememberKnownStudyDriveFolderName(byId.name);
+        if (byId.name && byId.name !== pref.name) {
+          try {
+            localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: byId.id, name: byId.name }));
+          } catch {
+            // ignore storage errors
+          }
+        }
+        return { id: byId.id, name: byId.name, webViewLink: link };
+      }
+    }
+
+    const targetName = pref.name || DRIVE_FOLDER_NAME;
+    const escapedName = targetName.replace(/'/g, "\\'");
+    const searchRes = await fetchDriveFilesList(activeToken, {
+      q: `mimeType = 'application/vnd.google-apps.folder' and name = '${escapedName}' and trashed = false`,
+      fields: 'files(id,name,webViewLink,createdTime)',
+      fallbackFields: 'files(id,name,createdTime)',
+      orderBy: 'createdTime asc',
+      pageSize: 20,
+    });
+
+    if (!searchRes.ok) {
+      await throwDriveResponseError(searchRes, 'Falha ao buscar pasta no Drive');
+    }
+
+    const searchData = await searchRes.json();
+    const matches = (searchData.files || []) as Array<{ id: string; name: string; webViewLink?: string }>;
+    const writableMatches: Array<{ id: string; name: string; webViewLink?: string }> = [];
+    for (const folder of matches) {
+      const writable = await verifyDriveFolderWritable(folder.id, activeToken);
+      if (writable) {
+        writableMatches.push(folder);
+      }
+    }
+
+    if (writableMatches.length > 0) {
+      let chosen = writableMatches[0];
+      if (writableMatches.length > 1) {
+        // Prefer the matching writable folder that already holds canonical sync or Backups JSON files
+        for (const candidate of writableMatches) {
+          const backupsCheckRes = await fetchDriveFilesList(activeToken, {
+            q: `mimeType = 'application/vnd.google-apps.folder' and name = 'Backups' and '${candidate.id}' in parents and trashed = false`,
+            fields: 'files(id,name)',
+            pageSize: 5,
+          });
+          if (backupsCheckRes.ok) {
+            const bData = await backupsCheckRes.json();
+            const bFolder = bData.files?.[0];
+            if (bFolder?.id) {
+              const syncCheckRes = await fetchDriveFilesList(activeToken, {
+                q: `'${bFolder.id}' in parents and (name = '${CLOUD_SYNC_FILENAME}' or name contains 'backup_incremental_central_estudos' or name contains 'backup_central_estudos') and trashed = false`,
+                fields: 'files(id,name)',
+                pageSize: 10,
+              });
+              if (syncCheckRes.ok) {
+                const sData = await syncCheckRes.json();
+                const filesInBackups = (sData.files || []) as Array<{ id: string; name?: string }>;
+                if (filesInBackups.some((f) => f.name === CLOUD_SYNC_FILENAME)) {
+                  chosen = candidate;
+                  break;
+                }
+                if (filesInBackups.length > 0) {
+                  chosen = candidate;
+                }
+              }
+              if (chosen === writableMatches[0]) {
+                chosen = candidate;
+              }
+            }
+          }
+        }
+      }
+
+      const link = chosen.webViewLink || `https://drive.google.com/drive/folders/${chosen.id}`;
+      cachedFolderId = chosen.id;
+      cachedFolderLink = link;
+      return { id: chosen.id, name: chosen.name, webViewLink: link };
+    }
+
+    const createRes = await fetch(
+      'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${activeToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: targetName,
+          mimeType: 'application/vnd.google-apps.folder',
+          description: 'Pasta do acervo de estudos e materiais da Central de Estudos.',
+        }),
+      },
+    );
+
+    if (!createRes.ok) {
+      await throwDriveResponseError(createRes, 'Falha ao criar pasta no Drive');
+    }
+
+    const newFolder = (await createRes.json()) as { id: string; name?: string; webViewLink?: string };
+    const link = newFolder.webViewLink || `https://drive.google.com/drive/folders/${newFolder.id}`;
+    cachedFolderId = newFolder.id;
+    cachedFolderLink = link;
+    return { id: newFolder.id, name: newFolder.name || targetName, webViewLink: link };
+  })();
+
+  inflightStudyFolderPromise = task;
+  try {
+    return await task;
+  } finally {
+    inflightStudyFolderPromise = null;
+  }
+}
+
+async function getOrCreateSingleSubFolder(
+  parentId: string,
+  segmentName: string,
+  activeToken: string,
+): Promise<string> {
+  const cleanSegment = segmentName.trim();
+  if (!cleanSegment) return parentId;
+
+  const cacheKey = `${parentId}::${cleanSegment.toLowerCase()}`;
+  if (cachedSubFolderIds[cacheKey]) {
+    return cachedSubFolderIds[cacheKey];
+  }
+
+  const inflight = inflightSubFolderPromises.get(cacheKey);
+  if (inflight) {
+    return inflight;
+  }
+
+  const task = (async () => {
+    const escapedSegment = cleanSegment.replace(/'/g, "\\'");
+    const query = encodeURIComponent(
+      `mimeType = 'application/vnd.google-apps.folder' and name = '${escapedSegment}' and '${parentId}' in parents and trashed = false`,
+    );
+    const searchRes = await fetch(
+      `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=createdTime asc&pageSize=10`,
+      {
+        headers: { Authorization: `Bearer ${activeToken}` },
+      },
+    );
+
+    if (searchRes.ok) {
+      const searchData = await searchRes.json();
+      if (searchData.files && searchData.files.length > 0) {
+        const subId = searchData.files[0].id as string;
+        cachedSubFolderIds[cacheKey] = subId;
+        return subId;
+      }
+    } else if (searchRes.status === 401) {
+      await throwDriveResponseError(searchRes, 'Sessão expirada ao buscar subpasta');
+    }
+
+    const createRes = await fetch(
+      'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name',
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${activeToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          name: cleanSegment,
+          mimeType: 'application/vnd.google-apps.folder',
+          parents: [parentId],
+        }),
+      },
+    );
+
+    if (!createRes.ok) {
+      await throwDriveResponseError(createRes, `Falha ao criar subpasta "${cleanSegment}" no Drive`);
+    }
+
+    const newSub = await createRes.json();
+    cachedSubFolderIds[cacheKey] = newSub.id;
+    return newSub.id as string;
+  })();
+
+  inflightSubFolderPromises.set(cacheKey, task);
+  try {
+    return await task;
+  } finally {
+    inflightSubFolderPromises.delete(cacheKey);
+  }
+}
+
+/**
+ * Finds or creates a subfolder (or nested subfolder path) inside Central de Estudos folder.
+ */
+export async function getOrCreateStudySubFolder(
+  parentId: string,
+  subfolderName: string | string[],
+  token?: string,
+): Promise<string> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) throw new Error('Usuário não autenticado no Google.');
+
+  const segments = (Array.isArray(subfolderName) ? subfolderName : [subfolderName])
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  let currentParentId = parentId;
+  for (const seg of segments) {
+    currentParentId = await getOrCreateSingleSubFolder(currentParentId, seg, activeToken);
+  }
+  return currentParentId;
+}
+
+/**
+ * Synchronizes all canonical study subfolders inside the active Drive folder in minimal API calls,
+ * caching existing folder IDs and creating any missing canonical subfolders.
+ */
+export async function syncStudySubFoldersInDrive(
+  parentId: string,
+  token?: string,
+): Promise<Record<string, string>> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) throw new Error('Usuário não autenticado no Google.');
+
+  const result: Record<string, string> = {};
+  const listRes = await fetchDriveFilesList(activeToken, {
+    q: `'${parentId}' in parents and mimeType = 'application/vnd.google-apps.folder' and trashed = false`,
+    fields: 'files(id,name)',
+    pageSize: 50,
+  });
+
+  if (listRes.ok) {
+    const data = await listRes.json();
+    const existing = (data.files || []) as Array<{ id: string; name: string }>;
+    for (const f of existing) {
+      const clean = f.name.trim();
+      if (!clean) continue;
+      cachedSubFolderIds[`${parentId}::${clean.toLowerCase()}`] = f.id;
+      result[clean] = f.id;
+    }
+  } else if (listRes.status === 401) {
+    await throwDriveResponseError(listRes, 'Sessão expirada ao sincronizar pastas do Drive');
+  }
+
+  for (const name of CANONICAL_SUBFOLDER_NAMES) {
+    if (!result[name]) {
+      try {
+        const subId = await getOrCreateSingleSubFolder(parentId, name, activeToken);
+        result[name] = subId;
+      } catch (err: any) {
+        if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+          throw err;
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Uploads a file (PDF, TXT, JSON, etc.) to the dedicated Google Drive folder or subfolder using multipart upload.
+ */
+export async function uploadFileToDrive(
+  fileOrBlob: File | Blob,
+  filename: string,
+  token?: string,
+  subfolderName?: string | string[],
+): Promise<DriveFileInfo> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
+  }
+
+  const parentFolder = await getOrCreateStudyFolder(activeToken);
+  let targetFolderId = parentFolder.id;
+
+  if (subfolderName && (Array.isArray(subfolderName) ? subfolderName.length > 0 : Boolean(subfolderName.trim()))) {
+    targetFolderId = await getOrCreateStudySubFolder(parentFolder.id, subfolderName, activeToken);
+  }
+
+  const metadata = {
+    name: filename,
+    parents: [targetFolderId],
+    description: `Arquivo sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+  };
+
+  const boundary = '-------314159265358979323846';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+
+  const mimeType = fileOrBlob.type || 'application/pdf';
+  const buffer = await fileOrBlob.arrayBuffer();
+
+  const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(
+    metadata,
+  )}`;
+  const mediaHeader = `${delimiter}Content-Type: ${mimeType}\r\n\r\n`;
+
+  const enc = new TextEncoder();
+  const part1 = enc.encode(metadataPart);
+  const part2 = enc.encode(mediaHeader);
+  const part3 = enc.encode(closeDelimiter);
+
+  const fullPayload = new Uint8Array(part1.length + part2.length + buffer.byteLength + part3.length);
+  fullPayload.set(part1, 0);
+  fullPayload.set(part2, part1.length);
+  fullPayload.set(new Uint8Array(buffer), part1.length + part2.length);
+  fullPayload.set(part3, part1.length + part2.length + buffer.byteLength);
+
+  const res = await fetch(
+    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents',
+    {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${activeToken}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body: fullPayload,
+    },
+  );
+
+  if (!res.ok) {
+    await throwDriveResponseError(res, 'Falha no upload para o Google Drive');
+  }
+
+  return (await res.json()) as DriveFileInfo;
+}
+
+/**
+ * Creates or updates (upserts) a UTF-8 .txt file inside a specific study subfolder in Google Drive,
+ * avoiding duplicate files when a weekly schedule, contest registration, or edital .txt is updated.
+ */
+export async function upsertTextFileInDriveSubFolder(
+  content: string,
+  filename: string,
+  subfolderName: string | string[],
+  token?: string,
+): Promise<DriveFileInfo> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
+  }
+
+  const parentFolder = await getOrCreateStudyFolder(activeToken);
+  const targetFolderId = await getOrCreateStudySubFolder(parentFolder.id, subfolderName, activeToken);
+
+  const escapedName = filename.replace(/'/g, "\\'");
+  const searchRes = await fetchDriveFilesList(activeToken, {
+    q: `'${targetFolderId}' in parents and name = '${escapedName}' and trashed = false`,
+    fields: 'files(id,name,modifiedTime)',
+    pageSize: 5,
+  });
+
+  let existingFileId: string | null = null;
+  if (searchRes.ok) {
+    const searchData = await searchRes.json();
+    existingFileId = searchData.files?.[0]?.id || null;
+  }
+
+  const boundary = '-------314159265358979323846TxtUpsert';
+  const delimiter = `\r\n--${boundary}\r\n`;
+  const closeDelimiter = `\r\n--${boundary}--`;
+
+  const metadata: Record<string, any> = {
+    name: filename,
+    mimeType: 'text/plain',
+    description: `Arquivo TXT sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+  };
+  if (!existingFileId) {
+    metadata.parents = [targetFolderId];
+  }
+
+  const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(
+    metadata,
+  )}`;
+  const mediaPart = `${delimiter}Content-Type: text/plain; charset=UTF-8\r\n\r\n${content}${closeDelimiter}`;
+  const multipartBody = metadataPart + mediaPart;
+
+  const url = existingFileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents';
+
+  const res = await driveFetchWithRetry(url, {
+    method: existingFileId ? 'PATCH' : 'POST',
+    headers: {
+      Authorization: `Bearer ${activeToken}`,
+      'Content-Type': `multipart/related; boundary=${boundary}`,
+    },
+    body: multipartBody,
+  });
+
+  if (!res.ok) {
+    await throwDriveResponseError(res, `Falha ao salvar arquivo TXT "${filename}" no Google Drive`);
+  }
+
+  return (await res.json()) as DriveFileInfo;
+}
+
+/**
+ * Lists ALL non-trashed files visible across the user's Google Drive (all study folders, nested subfolders, and account folders).
+ * Throws TOKEN_EXPIRED on 401 so callers can reconnect cleanly instead of assuming Drive is empty.
+ */
+export async function listAllStudyFilesInDrive(
+  token?: string,
+  prefetchedGraph?: DriveFolderGraphResult,
+): Promise<DriveFileInfo[]> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para listar os arquivos do Drive.');
+  }
+
+  const graph = prefetchedGraph || (await fetchDriveFolderGraph(activeToken));
+  const filesQuery = `mimeType != 'application/vnd.google-apps.folder' and mimeType != 'application/vnd.google-apps.shortcut' and trashed = false`;
+
+  const allFiles: DriveFileInfo[] = [];
+  let pageToken = '';
+  let pages = 0;
+
+  const appendFiles = (files: DriveFileInfo[]) => {
+    const existingIds = new Set(allFiles.map((item) => item.id));
+    files.forEach((f) => {
+      if (existingIds.has(f.id)) return;
+      existingIds.add(f.id);
+      const parentId = f.parents?.[0];
+      const parentFolder = parentId ? graph.foldersById.get(parentId) : undefined;
+      const folderPath = parentId ? graph.fullPathById.get(parentId) || parentFolder?.name : 'Meu Drive (Raiz)';
+      const isInStudyFolder = Boolean(parentId && graph.studyDescendantIds.has(parentId));
+      const canonicalCat = parentId ? graph.canonicalCategoryByFolderId.get(parentId) : undefined;
+      const ancestorFolderIds = parentId ? graph.ancestorIdsByFolderId.get(parentId) || [parentId] : [];
+
+      allFiles.push({
+        ...f,
+        ancestorFolderIds,
+        subfolderName: canonicalCat || parentFolder?.name,
+        folderPath,
+        isInStudyFolder,
+      });
+    });
+  };
+
+  let globalQueryFailed5xx = false;
+
+  do {
+    const res = await fetchDriveFilesList(activeToken, {
+      q: filesQuery,
+      fields: 'nextPageToken,files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+      fallbackFields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
+      orderBy: 'modifiedTime desc',
+      pageSize: 100,
+      pageToken: pageToken || undefined,
+    });
+
+    if (!res.ok) {
+      if (res.status >= 500 && graph.foldersById.size > 0) {
+        console.warn('Listagem global de arquivos retornou 5xx; usando busca por pastas de estudo.');
+        globalQueryFailed5xx = true;
+        break;
+      }
+      await throwDriveResponseError(res, 'Falha ao listar arquivos do Google Drive');
+    }
+
+    const data = await res.json();
+    appendFiles((data.files || []) as DriveFileInfo[]);
+
+    pageToken = data.nextPageToken || '';
+    pages += 1;
+  } while (pageToken && pages < 10);
+
+  if (globalQueryFailed5xx) {
+    const targetFolderIds = graph.studyDescendantIds.size > 0
+      ? Array.from(graph.studyDescendantIds)
+      : Array.from(graph.foldersById.keys()).slice(0, 20);
+
+    for (const folderId of targetFolderIds) {
+      const folderRes = await fetchDriveFilesList(activeToken, {
+        q: `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`,
+        fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+        fallbackFields: 'files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
+        pageSize: 100,
+      });
+      if (folderRes.ok) {
+        const folderData = await folderRes.json();
+        appendFiles((folderData.files || []) as DriveFileInfo[]);
+      }
+    }
+  }
+
+  return allFiles;
+}
+
+/**
+ * Inspects all folders associated with the user's Google Drive account along with their contained files.
+ */
+export async function listDriveFoldersOverview(token?: string): Promise<DriveFolderSummary[]> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para verificar as pastas do Drive.');
+  }
+
+  const graph = await fetchDriveFolderGraph(activeToken);
+  const files = await listAllStudyFilesInDrive(activeToken, graph);
+
+  const filesByParent = new Map<string, DriveFileInfo[]>();
+  const rootFiles: DriveFileInfo[] = [];
+
+  for (const f of files) {
+    const parentId = f.parents?.[0];
+    if (parentId && graph.foldersById.has(parentId)) {
+      const arr = filesByParent.get(parentId) || [];
+      arr.push(f);
+      filesByParent.set(parentId, arr);
+    } else {
+      rootFiles.push(f);
+    }
+  }
+
+  const isStudyCandidateFile = (f: DriveFileInfo) =>
+    f.mimeType === 'application/pdf' ||
+    f.mimeType === 'application/vnd.google-apps.document' ||
+    f.mimeType.startsWith('text/') ||
+    /\.(pdf|txt|docx?|md|json)$/i.test(f.name);
+
+  const summaries: DriveFolderSummary[] = [];
+  for (const folder of graph.foldersById.values()) {
+    const folderFiles = filesByParent.get(folder.id) || [];
+    summaries.push({
+      id: folder.id,
+      name: folder.name,
+      fullPath: graph.fullPathById.get(folder.id) || folder.name,
+      webViewLink: folder.webViewLink,
+      isStudyRoot: graph.studyRootIds.has(folder.id),
+      isInsideStudyRoot: graph.studyDescendantIds.has(folder.id),
+      fileCount: folderFiles.length,
+      studyFileCount: folderFiles.filter(isStudyCandidateFile).length,
+      files: folderFiles,
+    });
+  }
+
+  if (rootFiles.length > 0) {
+    summaries.push({
+      id: 'root',
+      name: 'Meu Drive (Raiz)',
+      fullPath: 'Meu Drive (Raiz)',
+      isStudyRoot: false,
+      isInsideStudyRoot: false,
+      fileCount: rootFiles.length,
+      studyFileCount: rootFiles.filter(isStudyCandidateFile).length,
+      files: rootFiles,
+    });
+  }
+
+  return summaries.sort((a, b) => {
+    if (a.isStudyRoot !== b.isStudyRoot) return a.isStudyRoot ? -1 : 1;
+    if (a.isInsideStudyRoot !== b.isInsideStudyRoot) return a.isInsideStudyRoot ? -1 : 1;
+    if (a.fileCount !== b.fileCount) return b.fileCount - a.fileCount;
+    return a.fullPath.localeCompare(b.fullPath, 'pt-BR');
+  });
+}
+
+/**
+ * Lists all study files currently in the user's Google Drive.
+ */
+export async function listStudyFilesFromDrive(token?: string): Promise<DriveFileInfo[]> {
+  return listAllStudyFilesInDrive(token);
+}
+
+/**
+ * Saves or updates the canonical cloud sync JSON snapshot in Google Drive ("Backups/central_estudos_sync_latest.json").
+ */
+export async function saveCloudSyncSnapshot(
+  payload: unknown,
+  token?: string,
+): Promise<DriveFileInfo> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('Usuário não autenticado no Google Drive.');
+  }
+
+  const jsonString = JSON.stringify(payload);
+  const blob = new Blob([jsonString], { type: 'application/json' });
+
+  const parentFolder = await getOrCreateStudyFolder(activeToken);
+  const backupsFolderId = await getOrCreateStudySubFolder(parentFolder.id, 'Backups', activeToken);
+
+  const searchQuery = encodeURIComponent(
+    `'${backupsFolderId}' in parents and name = '${CLOUD_SYNC_FILENAME}' and trashed = false`,
+  );
+  const searchRes = await fetch(
+    `https://www.googleapis.com/drive/v3/files?q=${searchQuery}&fields=files(id,name,modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=modifiedTime desc&pageSize=10`,
+    {
+      headers: { Authorization: `Bearer ${activeToken}` },
+    },
+  );
+
+  if (searchRes.ok) {
+    const searchData = await searchRes.json();
+    const existingList = (searchData.files || []) as Array<{ id: string }>;
+    const existing = existingList[0];
+    if (existing?.id) {
+      const patchRes = await fetch(
+        `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`,
+        {
+          method: 'PATCH',
+          headers: {
+            Authorization: `Bearer ${activeToken}`,
+            'Content-Type': 'application/json; charset=UTF-8',
+          },
+          body: blob,
+        },
+      );
+      if (patchRes.ok) {
+        // Remove any duplicate canonical sync files in the same Backups folder so only 1 remains
+        for (const dup of existingList.slice(1)) {
+          if (dup?.id) {
+            void deleteFileFromDrive(dup.id, activeToken).catch(() => {});
+          }
+        }
+        return (await patchRes.json()) as DriveFileInfo;
+      }
+      if (patchRes.status === 401) {
+        await throwDriveResponseError(patchRes, 'Sessão expirada ao sincronizar Drive');
+      }
+    }
+  } else if (searchRes.status === 401) {
+    await throwDriveResponseError(searchRes, 'Sessão expirada ao buscar sincronização no Drive');
+  }
+
+  return await uploadFileToDrive(blob, CLOUD_SYNC_FILENAME, activeToken, 'Backups');
+}
+
+/**
+ * Saves a timestamped database JSON backup snapshot (incremental or base) directly to Google Drive Backups folder.
+ * Always creates a new timestamped file and never overwrites existing backup files.
+ */
+export async function saveDatabaseBackupToDrive(
+  dbSnapshot: unknown,
+  token?: string,
+): Promise<DriveFileInfo> {
+  const jsonString = JSON.stringify(dbSnapshot, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json' });
+  const now = new Date();
+  const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+  const timeStr = `${String(now.getHours()).padStart(2, '0')}h${String(now.getMinutes()).padStart(2, '0')}m${String(now.getSeconds()).padStart(2, '0')}s`;
+  const isIncremental = isIncrementalBackupPayload(dbSnapshot);
+  const prefix = isIncremental ? 'backup_incremental_central_estudos' : 'backup_central_estudos';
+  const filename = `${prefix}_${dateStr}_${timeStr}.json`;
+  return await uploadFileToDrive(blob, filename, token, 'Backups');
+}
+
+/**
+ * Lists JSON backups in Google Drive enriched with their folder path and active-folder flag.
+ */
+export async function listDatabaseBackupsFromDrive(
+  token?: string,
+  options?: { activeFolderId?: string; onlyActiveFolder?: boolean },
+): Promise<DriveFileInfo[]> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para listar backups.');
+  }
+
+  const query = `(name contains 'backup_central_estudos' or name contains 'backup_incremental_central_estudos' or name contains 'central_estudos_sync') and mimeType != 'application/vnd.google-apps.folder' and trashed = false`;
+  const [res, graph] = await Promise.all([
+    fetchDriveFilesList(activeToken, {
+      q: query,
+      fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+      fallbackFields: 'files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
+      orderBy: 'modifiedTime desc',
+      pageSize: 100,
+    }),
+    fetchDriveFolderGraph(activeToken).catch(() => null),
+  ]);
+
+  if (!res.ok) {
+    await throwDriveResponseError(res, 'Falha ao listar backups no Google Drive');
+  }
+
+  const data = await res.json();
+  const files = (data.files || []) as DriveFileInfo[];
+  const activeId = options?.activeFolderId || cachedFolderId || getPreferredStudyFolder().id || undefined;
+
+  const enriched = files.map((f) => {
+    const parentId = f.parents?.[0];
+    const parentFolder = parentId ? graph?.foldersById.get(parentId) : undefined;
+    const folderPath = parentId
+      ? graph?.fullPathById.get(parentId) || parentFolder?.name || undefined
+      : 'Meu Drive (Raiz)';
+    const ancestorFolderIds = parentId
+      ? graph?.ancestorIdsByFolderId.get(parentId) || [parentId]
+      : [];
+    const isInStudyFolder = Boolean(parentId && graph?.studyDescendantIds.has(parentId));
+    const isInActiveFolder = Boolean(
+      activeId &&
+        (f.parents?.includes(activeId) || ancestorFolderIds.includes(activeId)),
+    );
+
+    return {
+      ...f,
+      folderPath,
+      ancestorFolderIds,
+      isInStudyFolder,
+      isInActiveFolder,
+    };
+  });
+
+  const filtered =
+    options?.onlyActiveFolder && activeId
+      ? enriched.filter((b) => b.isInActiveFolder)
+      : enriched;
+
+  return filtered.sort((a, b) => {
+    const tA = Date.parse(a.modifiedTime || a.createdTime || '') || 0;
+    const tB = Date.parse(b.modifiedTime || b.createdTime || '') || 0;
+    return tB - tA;
+  });
+}
+
+/**
+ * Keeps at most `maxKeep` timestamped backup snapshots in Google Drive when explicitly invoked by user.
+ * Never deletes the canonical `central_estudos_sync_latest.json` file.
+ */
+export async function pruneOldDatabaseBackupsFromDrive(
+  token?: string,
+  maxKeep = 25,
+): Promise<{ deleted: number; kept: number }> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) return { deleted: 0, kept: 0 };
+
+  const activeFolder = await getOrCreateStudyFolder(activeToken).catch(() => null);
+  const allBackups = await listDatabaseBackupsFromDrive(activeToken, {
+    activeFolderId: activeFolder?.id,
+    onlyActiveFolder: Boolean(activeFolder?.id),
+  });
+  const datedBackups = allBackups.filter(
+    (b) =>
+      b.name !== CLOUD_SYNC_FILENAME &&
+      (b.name.startsWith('backup_central_estudos_') ||
+        b.name.startsWith('backup_incremental_central_estudos_')),
+  );
+
+  if (datedBackups.length <= maxKeep) {
+    return { deleted: 0, kept: datedBackups.length };
+  }
+
+  const toDelete = datedBackups.slice(maxKeep);
+  let deleted = 0;
+  for (const oldFile of toDelete) {
+    try {
+      await deleteFileFromDrive(oldFile.id, activeToken);
+      deleted += 1;
+    } catch {
+      // Ignore individual deletion failure so backup flow never breaks
+    }
+  }
+  return { deleted, kept: maxKeep };
+}
+
+/**
+ * Builds a deterministic signature map (fileId -> versionStamp) from a list of Drive files.
+ */
+export function buildDriveSignatureMap(files: DriveFileInfo[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const f of files) {
+    if (!f?.id) continue;
+    const parent = f.parents?.[0] || '';
+    map[f.id] = `${f.modifiedTime || f.createdTime || ''}:${f.size || ''}:${parent}`;
+  }
+  return map;
+}
+
+export function serializeDriveSignatureMap(map: Record<string, string>): string {
+  return Object.keys(map)
+    .sort()
+    .map((id) => `${id}=${map[id]}`)
+    .join('|');
+}
+
+export function selectScopedBackupList(
+  backups: DriveFileInfo[],
+  opts?: { onlyFolderId?: string; activeFolderId?: string; strictFolder?: boolean },
+): DriveFileInfo[] {
+  if (!backups.length) return [];
+  if (opts?.onlyFolderId) {
+    if (opts.onlyFolderId === 'root') {
+      return backups.filter((b) => !b.parents || b.parents.length === 0);
+    }
+    return backups.filter(
+      (b) =>
+        b.parents?.includes(opts.onlyFolderId!) ||
+        b.ancestorFolderIds?.includes(opts.onlyFolderId!),
+    );
+  }
+  if (opts?.activeFolderId) {
+    const activeBackups = backups.filter((b) => b.isInActiveFolder);
+    const studyFolderBackups = opts.strictFolder
+      ? []
+      : backups.filter((b) => !b.isInActiveFolder && b.isInStudyFolder);
+    const otherBackups = opts.strictFolder
+      ? []
+      : backups.filter((b) => !b.isInActiveFolder && !b.isInStudyFolder);
+    return activeBackups.length > 0
+      ? activeBackups
+      : studyFolderBackups.length > 0
+      ? studyFolderBackups
+      : otherBackups;
+  }
+  return backups;
+}
+
+/**
+ * Downloads a JSON backup file content from Google Drive, using IndexedDB cache when versionStamp matches.
+ */
+export async function downloadBackupFileFromDrive(
+  fileId: string,
+  token?: string,
+  cacheOptions?: { versionStamp?: string; bypassCache?: boolean },
+): Promise<any> {
+  if (cacheOptions?.versionStamp && !cacheOptions.bypassCache) {
+    const cached = await loadDriveJsonCacheEntry(fileId, cacheOptions.versionStamp);
+    if (cached !== null) {
+      return cached;
+    }
+  }
+
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) throw new Error('TOKEN_EXPIRED: Não autenticado no Google.');
+
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
+    {
+      headers: { Authorization: `Bearer ${activeToken}` },
+    },
+  );
+
+  if (!res.ok) {
+    await throwDriveResponseError(res, 'Falha ao baixar backup do Google Drive');
+  }
+
+  const json = await res.json();
+  if (cacheOptions?.versionStamp && json && typeof json === 'object') {
+    void saveDriveJsonCacheEntry(fileId, cacheOptions.versionStamp, json);
+  }
+  return json;
+}
+
+export interface DownloadLatestCloudSyncOptions {
+  onlyFolderId?: string;
+  activeFolderId?: string;
+  expectedEmail?: string;
+  strictFolder?: boolean;
+  prefetchedBackups?: DriveFileInfo[];
+  bypassCache?: boolean;
+}
+
+function orderBackupCandidates(list: DriveFileInfo[]): DriveFileInfo[] {
+  if (list.length <= 1) return list;
+  const canonical = list.find((b) => b.name === CLOUD_SYNC_FILENAME);
+  const newest = list[0];
+  const canonicalMs = canonical
+    ? Date.parse(canonical.modifiedTime || canonical.createdTime || '') || 0
+    : 0;
+  const newestMs = newest
+    ? Date.parse(newest.modifiedTime || newest.createdTime || '') || 0
+    : 0;
+  const primary = canonical && canonicalMs >= newestMs - 1000 ? canonical : newest;
+  return [primary, ...list.filter((b) => b.id !== primary.id)];
+}
+
+function backupMatchesExpectedEmail(payload: any, expectedEmail?: string): boolean {
+  if (!payload || typeof payload !== 'object') return false;
+  if (!expectedEmail) return true;
+  const payloadEmail =
+    typeof payload.userEmail === 'string' ? payload.userEmail.trim().toLowerCase() : '';
+  if (!payloadEmail) return true;
+  return payloadEmail === expectedEmail.trim().toLowerCase();
+}
+
+function isDrivePermissionError(err: unknown): boolean {
+  const msg = String((err as any)?.message || err || '');
+  return (
+    msg.includes('insufficientFilePermissions') ||
+    msg.includes('appNotAuthorizedToFile') ||
+    msg.includes('DRIVE_FOLDER_PERMISSION') ||
+    msg.includes('PICKER_FILE_PERMISSION') ||
+    msg.includes('cannotDownloadFile') ||
+    msg.includes('HTTP 403')
+  );
+}
+
+/**
+ * Finds and downloads the latest valid cloud sync snapshot (plus any newer incremental deltas).
+ * Prioritizes backups inside the active study folder and validates payload ownership email.
+ */
+export async function downloadLatestCloudSync(
+  token?: string,
+  optionsOrFolderId?: string | DownloadLatestCloudSyncOptions,
+): Promise<{
+  file: DriveFileInfo;
+  payload: any;
+  incrementalDeltas: IncrementalBackupEnvelope[];
+  fromActiveFolder: boolean;
+  folderPath?: string;
+  scopedBackups: DriveFileInfo[];
+  permissionBlockedCount?: number;
+  permissionBlockedFolderId?: string;
+} | null> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para restaurar backup.');
+  }
+
+  const opts: DownloadLatestCloudSyncOptions =
+    typeof optionsOrFolderId === 'string'
+      ? { onlyFolderId: optionsOrFolderId, strictFolder: true }
+      : optionsOrFolderId || {};
+
+  const targetActiveId = opts.onlyFolderId || opts.activeFolderId;
+  const backups =
+    opts.prefetchedBackups ||
+    (await listDatabaseBackupsFromDrive(activeToken, {
+      activeFolderId: targetActiveId,
+    }));
+  if (!backups.length) return null;
+
+  const scopedList = selectScopedBackupList(backups, opts);
+  if (!scopedList.length) return null;
+
+  const fullCandidates = orderBackupCandidates(
+    scopedList.filter((b) => !b.name.startsWith('backup_incremental_central_estudos_')),
+  );
+  const incrementalCandidates = scopedList
+    .filter((b) => b.name.startsWith('backup_incremental_central_estudos_'))
+    .sort((a, b) => {
+      const tA = Date.parse(a.modifiedTime || a.createdTime || '') || 0;
+      const tB = Date.parse(b.modifiedTime || b.createdTime || '') || 0;
+      return tA - tB; // oldest -> newest for chronological replay
+    });
+
+  const permissionBlockedFiles: DriveFileInfo[] = [];
+
+  let baseResult: { file: DriveFileInfo; payload: any } | null = null;
+  for (const candidate of fullCandidates) {
+    try {
+      const versionStamp = `${candidate.modifiedTime || candidate.createdTime || ''}:${candidate.size || ''}`;
+      const payload = await downloadBackupFileFromDrive(candidate.id, activeToken, {
+        versionStamp,
+        bypassCache: opts.bypassCache,
+      });
+      if (!backupMatchesExpectedEmail(payload, opts.expectedEmail)) {
+        continue;
+      }
+      if (isIncrementalBackupPayload(payload)) {
+        continue;
+      }
+      baseResult = { file: candidate, payload };
+      break;
+    } catch (err: any) {
+      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+        throw err;
+      }
+      if (isDrivePermissionError(err)) {
+        permissionBlockedFiles.push(candidate);
+      }
+    }
+  }
+
+  const baseMs = baseResult
+    ? Math.max(
+        Date.parse(baseResult.payload?.updatedAt || baseResult.payload?.exportedAt || '') || 0,
+        Date.parse(baseResult.file.modifiedTime || baseResult.file.createdTime || '') || 0,
+      )
+    : 0;
+  const baseHash =
+    typeof baseResult?.payload?.contentHash === 'string' ? baseResult.payload.contentHash : '';
+
+  const incrementalDeltas: IncrementalBackupEnvelope[] = [];
+  let newestIncFile: DriveFileInfo | null = null;
+
+  for (const incFile of incrementalCandidates) {
+    const fileMs = Date.parse(incFile.modifiedTime || incFile.createdTime || '') || 0;
+    if (baseResult && fileMs < baseMs - 2000) continue;
+    try {
+      const versionStamp = `${incFile.modifiedTime || incFile.createdTime || ''}:${incFile.size || ''}`;
+      const incPayload = await downloadBackupFileFromDrive(incFile.id, activeToken, {
+        versionStamp,
+        bypassCache: opts.bypassCache,
+      });
+      if (!backupMatchesExpectedEmail(incPayload, opts.expectedEmail)) {
+        continue;
+      }
+      if (isIncrementalBackupPayload(incPayload)) {
+        const payloadMs = Date.parse(incPayload.updatedAt || '') || fileMs;
+        const incHash = typeof incPayload.contentHash === 'string' ? incPayload.contentHash : '';
+        if (baseHash && incHash && baseHash === incHash) {
+          continue;
+        }
+        if (!baseResult || payloadMs > baseMs || (baseHash && incHash && payloadMs >= baseMs - 2000)) {
+          incrementalDeltas.push(incPayload);
+          newestIncFile = incFile;
+        }
+      }
+    } catch (err: any) {
+      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+        throw err;
+      }
+      if (isDrivePermissionError(err)) {
+        permissionBlockedFiles.push(incFile);
+      }
+    }
+  }
+
+  if (baseResult) {
+    return {
+      file: newestIncFile || baseResult.file,
+      payload: baseResult.payload,
+      incrementalDeltas,
+      fromActiveFolder: Boolean((newestIncFile || baseResult.file).isInActiveFolder),
+      folderPath: (newestIncFile || baseResult.file).folderPath,
+      scopedBackups: scopedList,
+      ...(permissionBlockedFiles.length > 0
+        ? {
+            permissionBlockedCount: permissionBlockedFiles.length,
+            permissionBlockedFolderId: permissionBlockedFiles[0].parents?.[0] || targetActiveId,
+          }
+        : {}),
+    };
+  }
+
+  if (incrementalDeltas.length > 0 && newestIncFile) {
+    return {
+      file: newestIncFile,
+      payload: null,
+      incrementalDeltas,
+      fromActiveFolder: Boolean(newestIncFile.isInActiveFolder),
+      folderPath: newestIncFile.folderPath,
+      scopedBackups: scopedList,
+      ...(permissionBlockedFiles.length > 0
+        ? {
+            permissionBlockedCount: permissionBlockedFiles.length,
+            permissionBlockedFolderId: permissionBlockedFiles[0].parents?.[0] || targetActiveId,
+          }
+        : {}),
+    };
+  }
+
+  if (permissionBlockedFiles.length > 0) {
+    return {
+      file: permissionBlockedFiles[0],
+      payload: null,
+      incrementalDeltas: [],
+      fromActiveFolder: Boolean(permissionBlockedFiles[0].isInActiveFolder),
+      folderPath: permissionBlockedFiles[0].folderPath,
+      scopedBackups: scopedList,
+      permissionBlockedCount: permissionBlockedFiles.length,
+      permissionBlockedFolderId: permissionBlockedFiles[0].parents?.[0] || targetActiveId,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Downloads binary content of a file stored in Google Drive as a Blob.
+ * Automatically exports native Google Workspace files (Docs, Sheets, Slides) as PDF.
+ */
+export async function downloadDriveFileBlob(
+  fileId: string,
+  token?: string,
+  fallbackMime?: string,
+): Promise<Blob> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) throw new Error('TOKEN_EXPIRED: Não autenticado no Google.');
+
+  const isWorkspaceDoc =
+    fallbackMime &&
+    fallbackMime.startsWith('application/vnd.google-apps.') &&
+    fallbackMime !== 'application/vnd.google-apps.folder';
+
+  const url = isWorkspaceDoc
+    ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf`
+    : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${activeToken}` },
+  });
+
+  if (!res.ok) {
+    if (res.status === 403) {
+      const errText = await res.text();
+      if (
+        errText.includes('insufficientFilePermissions') ||
+        errText.includes('appNotAuthorizedToFile') ||
+        errText.includes('cannotDownloadFile')
+      ) {
+        throw new Error(
+          'PICKER_FILE_PERMISSION: Selecione os arquivos pelo seletor oficial do Google Drive para liberar o download.',
+        );
+      }
+      throw new Error(`Falha ao baixar arquivo do Google Drive: ${errText}`);
+    }
+    await throwDriveResponseError(res, 'Falha ao baixar arquivo do Google Drive');
+  }
+
+  const blob = await res.blob();
+  if (!blob.type && fallbackMime && !isWorkspaceDoc) {
+    return new Blob([blob], { type: fallbackMime });
+  }
+  return blob;
+}
+
+/**
+ * Deletes a file from Google Drive.
+ */
+export async function deleteFileFromDrive(fileId: string, token?: string): Promise<void> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) return;
+
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${activeToken}` },
+  });
+
+  if (!res.ok && res.status === 401) {
+    clearAccessTokenOnly();
+  }
+}
+
+export interface DrivePickerPickedItem {
+  id: string;
+  name: string;
+  mimeType: string;
+  url?: string;
+}
+
+export interface DrivePickerResult {
+  folders: DrivePickerPickedItem[];
+  files: DrivePickerPickedItem[];
+}
+
+let pickerLoadPromise: Promise<void> | null = null;
+
+function loadGooglePickerApi(): Promise<void> {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('Google Picker disponível apenas no navegador.'));
+  }
+  const win = window as any;
+  if (win.google?.picker?.PickerBuilder) {
+    return Promise.resolve();
+  }
+  if (pickerLoadPromise) return pickerLoadPromise;
+
+  pickerLoadPromise = new Promise<void>((resolve, reject) => {
+    const initPickerLib = () => {
+      try {
+        win.gapi.load('picker', {
+          callback: () => resolve(),
+          onerror: () => {
+            pickerLoadPromise = null;
+            reject(new Error('Falha ao carregar biblioteca Google Picker.'));
+          },
+        });
+      } catch (err) {
+        pickerLoadPromise = null;
+        reject(err);
+      }
+    };
+
+    if (win.gapi?.load) {
+      initPickerLib();
+      return;
+    }
+
+    const existingScript = document.querySelector<HTMLScriptElement>(
+      'script[src="https://apis.google.com/js/api.js"]',
+    );
+    if (existingScript) {
+      existingScript.addEventListener('load', initPickerLib, { once: true });
+      existingScript.addEventListener(
+        'error',
+        () => {
+          pickerLoadPromise = null;
+          reject(new Error('Falha ao carregar script do Google Picker.'));
+        },
+        { once: true },
+      );
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://apis.google.com/js/api.js';
+    script.async = true;
+    script.defer = true;
+    script.onload = initPickerLib;
+    script.onerror = () => {
+      pickerLoadPromise = null;
+      reject(new Error('Falha ao carregar script https://apis.google.com/js/api.js.'));
+    };
+    document.head.appendChild(script);
+  });
+
+  return pickerLoadPromise;
+}
+
+/**
+ * Opens Google Picker UI allowing the user to browse Google Drive and select a folder and/or files.
+ * Follows the client-side Google Picker pattern (no developer key, dynamic ancestorOrigins support).
+ */
+export async function openDrivePicker(options?: {
+  token?: string;
+  parentFolderId?: string;
+  mode?: 'folders-and-files' | 'files-only' | 'folders-only';
+  title?: string;
+}): Promise<DrivePickerResult | null> {
+  const activeToken = options?.token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google antes de abrir o seletor do Drive.');
+  }
+
+  await loadGooglePickerApi();
+
+  const win = window as any;
+  const pickerNs = win.google?.picker;
+  if (!pickerNs?.PickerBuilder) {
+    throw new Error('Google Picker não pôde ser inicializado.');
+  }
+
+  const pickerOrigin =
+    window.location.ancestorOrigins && window.location.ancestorOrigins.length > 0
+      ? window.location.ancestorOrigins[window.location.ancestorOrigins.length - 1]
+      : window.location.origin;
+
+  return await new Promise<DrivePickerResult | null>((resolve) => {
+    const builder = new pickerNs.PickerBuilder()
+      .setOAuthToken(activeToken)
+      .setOrigin(pickerOrigin)
+      .setLocale('pt-BR')
+      .setTitle(
+        options?.title ||
+          (options?.mode === 'files-only'
+            ? 'Selecione os arquivos dentro da pasta para importar'
+            : options?.mode === 'folders-only'
+              ? 'Selecione a pasta do Google Drive onde salvar seus dados e arquivos'
+              : 'Selecione uma pasta ou arquivos no Google Drive'),
+      );
+
+    if (options?.mode !== 'folders-only') {
+      builder.enableFeature(pickerNs.Feature.MULTISELECT_ENABLED);
+    }
+
+    if (options?.mode !== 'files-only') {
+      const foldersView = new pickerNs.DocsView(pickerNs.ViewId.FOLDERS)
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(true)
+        .setMimeTypes('application/vnd.google-apps.folder');
+      if (options?.parentFolderId && options.parentFolderId !== 'root') {
+        foldersView.setParent(options.parentFolderId);
+      }
+      builder.addView(foldersView);
+    }
+
+    if (options?.mode !== 'folders-only') {
+      const docsView = new pickerNs.DocsView(pickerNs.ViewId.DOCS)
+        .setIncludeFolders(true)
+        .setSelectFolderEnabled(options?.mode !== 'files-only');
+      if (options?.parentFolderId && options.parentFolderId !== 'root') {
+        docsView.setParent(options.parentFolderId);
+      }
+      builder.addView(docsView);
+    }
+
+    builder.setCallback((data: any) => {
+      if (data.action === pickerNs.Action.PICKED) {
+        const docs = (data.docs || []) as Array<any>;
+        const folders: DrivePickerPickedItem[] = [];
+        const files: DrivePickerPickedItem[] = [];
+        for (const d of docs) {
+          const item: DrivePickerPickedItem = {
+            id: d.id,
+            name: d.name || 'Sem nome',
+            mimeType: d.mimeType || '',
+            url: d.url,
+          };
+          if (item.mimeType === 'application/vnd.google-apps.folder') {
+            folders.push(item);
+          } else {
+            files.push(item);
+          }
+        }
+        resolve({ folders, files });
+      } else if (data.action === pickerNs.Action.CANCEL) {
+        resolve(null);
+      }
+    });
+
+    const picker = builder.build();
+    picker.setVisible(true);
+  });
+}

@@ -1,0 +1,8 @@
+{
+  "name": "Remix Central de Estudos",
+  "description": "Plataforma completa de preparação para concursos e provas: treino diário, simulados fechados com quadro branco, monitor de desempenho, cronograma semanal, lei seca com grifos, matriz de incidência, caderno de erros e biblioteca de PDFs. como se fosse uma parodia do site do governo federal para ajudar os estudantes",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

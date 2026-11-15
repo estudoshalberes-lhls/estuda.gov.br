@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="pt-BR" data-theme="black-red">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0e0e0e">
+  <title>Central de Estudos</title>
+  <link rel="stylesheet" href="/static/styles.css?v=20261111-0955-collapsed-modules">
+  <script src="/static/app.js?v=20261111-1605-reopen-goals" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <a class="brand" href="#" data-page="Início" aria-label="Central de Estudos">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 48 48" role="img"><path d="m5 17 19-9 19 9-19 9L5 17Z" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linejoin="round"/><path d="M13 22v8c6 5 16 5 22 0v-8M42 18v12" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="42" cy="33" r="2" fill="currentColor"/></svg>
+        </span>
+        <span class="brand-copy"><strong>Central de Estudos</strong><small>FOCO • CONSTÂNCIA • APROVAÇÃO</small></span>
+      </a>
+      <div class="sidebar-timer">
+        <span>CRONÔMETRO</span>
+        <strong id="sidebar-timer">00:00:00</strong>
+        <div class="timer-controls">
+          <button type="button" class="timer-button" data-action="toggle-timer">Iniciar</button>
+          <button type="button" class="timer-button" data-action="reset-timer" aria-label="Zerar cronômetro">Zerar</button>
+        </div>
+      </div>
+      <div class="nav-caption">MÓDULOS</div>
+      <nav class="module-nav" id="module-nav" aria-label="Módulos"></nav>
+      <div class="sidebar-bottom">
+        <button class="nav-link" data-page="Configurações"><span class="nav-icon"><svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="m19.4 15 .1.1 1.2 1-1.5 2.6-1.5-.6a7.5 7.5 0 0 1-1.4.8l-.3 1.6h-3l-.3-1.6a7.5 7.5 0 0 1-1.4-.8l-1.5.6-1.5-2.6 1.2-1a7.6 7.6 0 0 1 0-1.6l-1.2-1 1.5-2.6 1.5.6a7.5 7.5 0 0 1 1.4-.8l.3-1.6h3l.3 1.6a7.5 7.5 0 0 1 1.4.8l1.5-.6 1.5 2.6-1.2 1a7.6 7.6 0 0 1 0 1.6Z"/></svg></span><span>Configurações</span></button>
+        <div class="sidebar-status"><i></i><span>DADOS LOCAIS · V0.1</span></div>
+      </div>
+    </aside>
+    <main class="main-shell">
+      <header class="topbar">
+        <button class="mobile-menu" id="mobile-menu" type="button" aria-label="Abrir menu"><svg class="icon-svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+        <div><div class="eyebrow">CENTRAL DE ESTUDOS</div><h1 id="page-title">Início</h1></div>
+        <div class="topbar-actions">
+          <div class="header-focus">
+            <span>FOCO DO DIA</span>
+            <div class="header-focus-content">
+              <strong id="header-focus" aria-live="polite">Carregando frase…</strong>
+              <button type="button" class="icon-button focus-refresh" data-action="change-focus-quote" aria-label="Alterar frase do foco do dia" title="Alterar frase do foco do dia">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M5.5 9a7 7 0 0 1 11.7-2L20 12M4 12l2.8 5a7 7 0 0 0 11.7-2"/></svg>
+              </button>
+            </div>
+          </div>
+          <div class="time-widget" aria-label="Relógio e cronômetro">
+            <div class="time-readout"><span>HORÁRIO</span><strong id="live-clock">--:--:--</strong></div>
+            <div class="time-readout timer-readout"><span>ESTUDO</span><strong id="top-timer">00:00:00</strong></div>
+            <button type="button" class="timer-button" data-action="toggle-timer">Iniciar</button>
+            <button type="button" class="timer-button timer-reset" data-action="reset-timer" aria-label="Zerar cronômetro" title="Zerar cronômetro">↺</button>
+          </div>
+        </div>
+      </header>
+      <div class="top-module-shell" id="top-module-shell">
+        <div class="nav-caption">MÓDULOS</div>
+        <nav class="module-nav top-module-nav" id="top-module-nav" aria-label="Módulos"></nav>
+      </div>
+      <section class="page-content" id="page-content" aria-live="polite">
+        <div class="loading-card">Carregando seus dados de estudo…</div>
+      </section>
+      <footer class="app-footer">CENTRAL DE ESTUDOS <span>•</span> SEUS DADOS PERMANECEM NESTE COMPUTADOR</footer>
+    </main>
+  </div>
+  <div class="toast-region" id="toast-region" aria-live="polite"></div>
+  <div class="mobile-backdrop" id="mobile-backdrop"></div>
+</body>
+</html>

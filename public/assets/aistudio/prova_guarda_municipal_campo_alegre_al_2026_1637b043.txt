@@ -1,0 +1,806 @@
+Questão 1
+Leia o período:
+"Os guardas localizaram os responsáveis pelos veículos e lhes solicitaram os documentos, que foram conferidos antes da liberação da via."
+Assinale a alternativa que apresenta análise CORRETA dos elementos pronominais.
+[A] O pronome "lhes" retoma "os responsáveis pelos veículos", enquanto o pronome relativo "que" retoma "os documentos".
+[B] O pronome "lhes" retoma "os veículos", enquanto o pronome relativo "que" retoma "os responsáveis".
+[C] O pronome "lhes" retoma "a via", enquanto o pronome relativo "que" retoma "os guardas".
+[D] O pronome "lhes" retoma "os guardas", enquanto o pronome relativo "que" retoma "a liberação da via".
+[E] O pronome "lhes" retoma "os documentos", enquanto o pronome relativo "que" retoma "os veículos".
+Gabarito: A
+
+Questão 2
+Assinale a alternativa em que a concordância verbal está de acordo com a norma-padrão.
+[A] Havia diversos veículos estacionados irregularmente, mas ainda faltava informações sobre os respectivos condutores.
+[B] Haviam diversos veículos estacionados irregularmente, mas ainda faltavam informações sobre os respectivos condutores.
+[C] Havia diversos veículos estacionados irregularmente, mas ainda faltavam informações sobre os respectivos condutores.
+[D] Havia diversos veículos estacionados irregularmente, mas ainda faltou informações sobre os respectivos condutores.
+[E] Haviam diversos veículos estacionados irregularmente, mas ainda faltava informações sobre os respectivos condutores.
+Gabarito: C
+
+Questão 3
+Assinale a alternativa redigida de acordo com a norma-padrão quanto à regência dos verbos empregados.
+[A] Os agentes obedeceram pelas determinações da central e procederam na identificação dos envolvidos na ocorrência.
+[B] Os agentes obedeceram com as determinações da central e procederam à identificação dos envolvidos na ocorrência.
+[C] Os agentes obedeceram as determinações da central e procederam a identificação dos envolvidos na ocorrência.
+[D] Os agentes obedeceram às determinações da central e procederam com à identificação dos envolvidos na ocorrência.
+[E] Os agentes obedeceram às determinações da central e procederam à identificação dos envolvidos na ocorrência.
+Gabarito: E
+
+Questão 4
+Assinale a alternativa em que o emprego do acento indicativo de crase está de acordo com a norma-padrão da língua portuguesa.
+[A] A equipe retornou à base após atender à ocorrência registrada nas proximidades da praça central.
+[B] A equipe retornou à base após atender a ocorrência registrada nas proximidades da praça central.
+[C] A equipe retornou a base após atender à ocorrência registrada nas proximidades da praça central.
+[D] A equipe retornou à base após atender para à ocorrência registrada nas proximidades da praça central.
+[E] A equipe retornou para à base após atender à ocorrência registrada nas proximidades da praça central.
+Gabarito: A
+
+Questão 5
+Leia o trecho:
+"Os agentes chegaram rapidamente ao local. A via permanecia bloqueada por um veículo acidentado. Por essa razão, foi necessário desviar o tráfego para uma rua paralela."
+Assinale a alternativa que analisa corretamente a coerência do trecho.
+[A] O texto apresenta ruptura temática, pois a informação sobre o acidente não se relaciona com a atuação dos agentes no local.
+[B] O texto apresenta incoerência causal, pois o bloqueio da via não possui relação lógica com a alteração do fluxo de veículos.
+[C] O texto apresenta incoerência temporal, pois a chegada dos agentes ocorre antes da identificação do veículo que causou o bloqueio.
+[D] O texto apresenta progressão lógica, pois a presença do veículo bloqueando a via fundamenta a necessidade de desvio do tráfego.
+[E] O texto apresenta contradição interna, pois a rapidez da chegada dos agentes impede que a via permanecesse bloqueada no momento da atuação.
+Gabarito: D
+
+Questão 6
+Assinale a alternativa redigida de acordo com a norma-padrão quanto à regência nominal.
+[A] Os agentes permaneceram atentos às orientações da central e conscientes da responsabilidade decorrente da ocorrência.
+[B] Os agentes permaneceram atentos sobre as orientações da central e conscientes à responsabilidade decorrente da ocorrência.
+[C] Os agentes permaneceram atentos pelas orientações da central e conscientes pela responsabilidade decorrente da ocorrência.
+[D] Os agentes permaneceram atentos nas orientações da central e conscientes com a responsabilidade decorrente da ocorrência.
+[E] Os agentes permaneceram atentos com as orientações da central e conscientes à responsabilidade decorrente da ocorrência.
+Gabarito: A
+
+Questão 7
+Assinale a alternativa em que todas as palavras estão acentuadas de acordo com a norma-padrão da língua portuguesa.
+[A] trânsito, ocorrência, veículo, município, emergência.
+[B] trânsito, ocorrência, veículo, municipio, emergência.
+[C] trânsito, ocorrência, veiculo, município, emergência.
+[D] trânsito, ocorrencia, veículo, município, emergência.
+[E] transito, ocorrência, veículo, município, emergência.
+Gabarito: A
+
+Questão 8
+Assinale a alternativa em que a pontuação está de acordo com a norma-padrão.
+[A] O comandante da equipe, servidor responsável pela operação determinou, a reorganização do patrulhamento na região.
+[B] O comandante da equipe, servidor responsável pela operação, determinou a reorganização do patrulhamento na região.
+[C] O comandante, da equipe servidor responsável pela operação, determinou a reorganização do patrulhamento na região.
+[D] O comandante da equipe servidor responsável, pela operação determinou a reorganização do patrulhamento na região.
+[E] O comandante da equipe servidor responsável pela operação, determinou a reorganização do patrulhamento na região.
+Gabarito: B
+
+Questão 9
+Assinale a alternativa em que todas as palavras estão grafadas de acordo com a ortografia oficial vigente.
+[A] fiscalização, exceção, ocorrência, perseguição, segurança.
+[B] fiscalisação, exceção, ocorrência, perseguição, segurança.
+[C] fiscalização, excessão, ocorrência, perseguição, segurança.
+[D] fiscalização, exceção, ocorrência, perseguição, segurança.
+[E] fiscalização, exceção, ocorrência, perseguição, seguransa.
+Gabarito: D
+
+Questão 10
+Considere o trecho:
+"COMUNICADO
+Em razão da interdição parcial da Avenida Central, recomenda-se aos condutores que utilizem as vias alternativas indicadas pelos agentes de trânsito até a normalização do fluxo."
+Quanto à finalidade e à organização predominante do texto, assinale a alternativa CORRETA.
+[A] Trata-se de comunicado com predominância injuntivo-informativa, pois apresenta uma situação objetiva e orienta o comportamento dos destinatários.
+[B] Trata-se de exposição conceitual, pois explica o funcionamento do trânsito urbano e os efeitos administrativos de uma interdição.
+[C] Trata-se de narrativa com predominância descritiva, pois relata um acontecimento e apresenta características da avenida interditada.
+[D] Trata-se de texto argumentativo, pois busca convencer os condutores da conveniência de aderir à orientação apresentada.
+[E] Trata-se de descrição técnica, pois caracteriza as condições de circulação e detalha os elementos físicos da via interditada.
+Gabarito: A
+
+Questão 11
+Em uma estação da Guarda Municipal, um agente abriu anexo recebido por correio eletrônico com o nome de planilha de escala. Horas depois, os arquivos de documentos e imagens da estação passaram a exibir extensão desconhecida e deixaram de abrir, e uma janela em segundo plano informa que o acesso será restituído mediante pagamento em moeda virtual. Verificou-se que a pasta compartilhada da rede setorial, à qual a estação tinha acesso de gravação, apresenta os arquivos no mesmo estado.
+Com base no caso apresentado, assinale a alternativa que identifica CORRETAMENTE o código malicioso e a providência adequada.
+[A] Ransomware; convém isolar a estação da rede e restaurar os arquivos a partir de cópia de segurança preservada fora do ambiente atingido.
+[B] Rootkit; convém aplicar as atualizações pendentes do sistema, medida que reverte as alterações feitas nos arquivos do compartilhamento.
+[C] Worm; convém reinstalar o sistema operacional da estação atingida, providência que recupera os arquivos cifrados no compartilhamento de rede.
+[D] Spyware; convém executar varredura com antivírus atualizado e alterar as senhas, o que reverte a cifragem aplicada aos arquivos atingidos.
+[E] Cavalo de troia; convém remover o programa suspeito pelo Painel de Controle, o que desfaz a cifragem e restabelece os arquivos originais.
+Gabarito: A
+
+Questão 12
+Após incidente envolvendo acesso indevido a contas institucionais, a Guarda Municipal editou orientação sobre credenciais de acesso dirigida aos agentes. O documento trata da composição das senhas, dos mecanismos adicionais de verificação e dos meios de recuperação de conta. Sobre o tema, analise as afirmativas a seguir.
+I. A verificação em duas etapas combina fatores de categorias distintas, como uma senha memorizada e um código gerado por aplicativo instalado no dispositivo do usuário.
+II. O gerenciador de senhas permite adotar credenciais longas e distintas para cada serviço, ficando o acesso ao cofre condicionado a uma senha mestra sob guarda do usuário.
+III. A troca de letras por algarismos visualmente semelhantes em palavras de dicionário, como usar zero no lugar da letra o, torna a senha resistente a ataques apoiados em listas de variações.
+IV. A resposta a perguntas de recuperação baseadas em dados pessoais divulgados em redes sociais constitui fator de autenticação de robustez equivalente à do código gerado por aplicativo.
+Está CORRETO o que se afirma em:
+[A] II e IV, apenas.
+[B] I, II e IV, apenas.
+[C] I e II, apenas.
+[D] I e III, apenas.
+[E] I, II e III, apenas.
+Gabarito: C
+
+Questão 13
+Um agente utiliza estação compartilhada do posto de atendimento e abre uma janela de navegação privativa no navegador para consultar sítios de interesse do serviço, na suposição de que a medida garante sigilo integral da atividade. Sobre o alcance e os limites desse recurso, julgue as afirmativas a seguir em verdadeiras (V) ou falsas (F).
+( ) A janela de navegação privativa deixa de gravar no dispositivo o histórico e os cookies da sessão, descartando-os quando a última janela desse tipo é encerrada.
+( ) A navegação privativa impede que o provedor de acesso e o administrador da rede corporativa identifiquem os endereços visitados pelo usuário durante a sessão.
+( ) Os arquivos baixados durante a sessão privativa permanecem gravados no dispositivo após o encerramento da janela, embora a entrada correspondente na lista de downloads seja descartada.
+( ) Os favoritos criados durante a sessão privativa são descartados junto com os cookies no momento em que a janela privativa é encerrada.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] V, F, F, V.
+[B] F, V, V, F.
+[C] V, V, F, V.
+[D] V, F, V, F.
+[E] F, F, V, V.
+Gabarito: D
+
+Questão 14
+A política de cópias de segurança do setor de tecnologia da Guarda Municipal prevê backup completo aos domingos e backup incremental de segunda a sexta-feira, sempre ao fim do expediente. Na tarde de sexta-feira, o volume de produção sofreu falha física e precisa ser reconstruído com o maior volume de dados possível, a partir dos conjuntos gravados até a quinta-feira. Ordene as etapas do procedimento de restauração.
+I. Restaurar o conjunto incremental gravado na quinta-feira.
+II. Restaurar o backup completo gravado no domingo.
+III. Restaurar os conjuntos incrementais gravados na segunda, na terça e na quarta-feira, em ordem cronológica.
+IV. Verificar a integridade das mídias e a data do último conjunto válido antes de iniciar a gravação sobre o volume reconstruído.
+Assinale a alternativa que apresenta a sequência CORRETA das etapas.
+[A] IV, III, I, II.
+[B] II, IV, III, I.
+[C] IV, II, III, I.
+[D] II, III, I, IV.
+[E] IV, I, III, II.
+Gabarito: C
+
+Questão 15
+Um agente utiliza, em sua estação de trabalho, uma pasta de serviço de armazenamento em nuvem configurada com sincronização ativa e com o recurso de arquivos sob demanda habilitado, de modo que parte dos itens exibe ícone de nuvem e parte exibe círculo verde preenchido. Ao concluir o relatório trimestral, ele seleciona um arquivo antigo dentro dessa pasta local e o exclui pelo Explorador de Arquivos.
+Assinale a alternativa que descreve CORRETAMENTE o efeito dessa exclusão.
+[A] O arquivo é removido da máquina local e mantido na nuvem, pois a exclusão local rompe o vínculo de sincronização daquele item.
+[B] O arquivo é mantido na máquina local e removido da nuvem, pois a exclusão sinaliza ao serviço a liberação do espaço contratado.
+[C] O arquivo é removido da nuvem e dos demais dispositivos sincronizados, e a operação é registrada como definitiva, sem passagem pela lixeira do serviço.
+[D] O arquivo passa à condição de item disponível online, liberando espaço na máquina local e preservando a cópia mantida no servidor.
+[E] O arquivo é removido da nuvem e dos demais dispositivos sincronizados, ficando retido por prazo determinado na lixeira do serviço.
+Gabarito: E
+
+Questão 16
+Considere como domínio todos os servidores de uma instituição. Sabe-se que todo auditor certificado ocupa função de gestão e que existe pelo menos um auditor que não possui certificação. Com base exclusivamente nessas informações, assinale a alternativa CORRETA.
+[A] Existe necessariamente auditor certificado na instituição.
+[B] Todo auditor que ocupa função de gestão possui certificação.
+[C] Nenhum auditor sem certificação ocupa função de gestão.
+[D] Pode haver auditor sem certificação que ocupe função de gestão.
+[E] Todo servidor que possui certificação ocupa função de gestão.
+Gabarito: D
+
+Questão 17
+Considere o argumento: "Se a inspeção detectou falha, então o equipamento foi bloqueado. Se o equipamento foi bloqueado, então houve registro no sistema. Não houve registro no sistema. Logo, a inspeção não detectou falha." Analise as assertivas e classifique-as como verdadeiras (V) ou falsas (F).
+( ) A conclusão decorre validamente das premissas.
+( ) Das duas primeiras premissas pode-se obter "Se a inspeção detectou falha, então houve registro no sistema".
+( ) A terceira premissa permite concluir diretamente que o equipamento foi bloqueado.
+( ) O argumento utiliza uma cadeia de implicações seguida de raciocínio por contraposição.
+( ) Se a terceira premissa fosse retirada, a conclusão ainda seria consequência necessária das duas primeiras.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo:
+[A] V, V, F, F, V.
+[B] V, V, F, V, F.
+[C] V, F, V, V, F.
+[D] F, F, V, V, F.
+[E] F, V, F, V, V.
+Gabarito: B
+
+Questão 18
+Considere as proposições:
+A: Todo relatório urgente foi revisado.
+B: Algum parecer técnico foi rejeitado.
+C: Nenhum processo pendente foi arquivado.
+D: Pelo menos um relatório revisado não apresentou inconsistência.
+Sabe-se que a proposição analisada possui a estrutura $(A \vee B) \rightarrow (C \wedge D)$. Assinale a alternativa CORRETA para sua negação lógica.
+[A] $(\neg A \vee \neg B) \wedge (C \vee D)$.
+[B] $(\neg A \wedge \neg B) \wedge (\neg C \vee \neg D)$.
+[C] $(A \vee B) \wedge (\neg C \vee \neg D)$.
+[D] $(A \wedge B) \wedge (\neg C \vee \neg D)$.
+[E] $(A \vee B) \wedge (\neg C \wedge \neg D)$.
+Gabarito: C
+
+Questão 19
+Em um sistema automatizado de controle de acesso, três condições são representadas pelas proposições p, q e r. Durante a verificação das regras lógicas configuradas no sistema, constatou-se que a implicação $p \rightarrow q$ é falsa e que a bicondicional $(q \vee r) \leftrightarrow \neg p$ é verdadeira. Assinale a alternativa CORRETA para os valores lógicos de p, q e r, nessa ordem.
+[A] F, F, V.
+[B] V, F, V.
+[C] V, V, F.
+[D] V, F, F.
+[E] F, V, F.
+Gabarito: D
+
+Questão 20
+Três caixas, identificadas por A, B e C, contêm, cada uma, um único documento. Exatamente um dos documentos é sigiloso. Sabe-se que exatamente duas das afirmações seguintes são verdadeiras: "O documento sigiloso está na caixa A"; "O documento sigiloso não está na caixa B"; "O documento sigiloso não está na caixa A". Assinale a alternativa CORRETA.
+[A] O documento sigiloso pode estar na caixa A ou na caixa C.
+[B] O documento sigiloso está necessariamente na caixa C.
+[C] As três caixas são igualmente compatíveis com as afirmações.
+[D] O documento sigiloso está necessariamente na caixa B.
+[E] O documento sigiloso está necessariamente na caixa A.
+Gabarito: A
+
+Questão 21
+Antes da emancipação, Campo Alegre (também chamada Mosquito) era distrito de São Miguel dos Campos, e diversas melhorias urbanas e referências administrativas da localidade estão associadas a gestores daquele município. Os registros jornalísticos e historiográficos permitem vincular cada gestor a um fato específico.
+Relacione a Coluna I à Coluna II.
+Coluna I
+(1) Alcides Sá.
+(2) Otacílio Marques de Sá.
+(3) José de Medeiros Apratto.
+(4) Pedro Fernandes da Costa.
+Coluna II
+( ) Prefeito de São Miguel dos Campos quando da reportagem de Oswaldo Souto, publicada em 1940.
+( ) Prefeito quando foi instalada a iluminação elétrica, gerada por motor Diesel de 30 hp.
+( ) Ex-prefeito que dá nome à escola rural erguida em parceria com os governos Federal e Estadual.
+( ) Prefeito quando se construíram o matadouro público e a estrada de 5 km até Junqueiro.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] 1, 4, 2, 3.
+[B] 2, 3, 1, 4.
+[C] 4, 2, 3, 1.
+[D] 2, 4, 1, 3.
+[E] 1, 3, 2, 4.
+Gabarito: D
+
+Questão 22
+Durante décadas, os nomes Mosquito e Campo Alegre conviveram nos registros oficiais e no uso popular. Em reportagem publicada na Gazeta de Alagoas em 12 de novembro de 1940, Oswaldo Souto apresentou uma explicação para o antigo nome da vila.
+Assinale a alternativa que apresenta, CORRETAMENTE, a informação registrada nessa reportagem sobre a origem da denominação Mosquito.
+[A] O nome pertencia a um velho engenho situado nos arredores da vila, o qual, à época da reportagem, já se chamava Barra.
+[B] O nome decorria da grande quantidade de pernilongos existente às margens dos riachos que circundam a vila.
+[C] O nome pertencia a um velho engenho situado nos arredores da vila, o qual, à época da reportagem, já se chamava Porto Rico.
+[D] O nome derivava do povoado Mosquitinho, com cerca de 60 casas, situado antes da entrada da vila.
+[E] O nome foi adotado em homenagem a um frade que substituiu a imagem de Nossa Senhora da Conceição na igreja da vila.
+Gabarito: A
+
+Questão 23
+Um servidor municipal elabora ficha técnica de apresentação do município para um relatório de planejamento territorial, utilizando os dados de situação geográfica, limites e área divulgados pela Assembleia Legislativa de Alagoas e pelo IBGE para Campo Alegre/AL. Antes da publicação, as informações são conferidas.
+Julgue as afirmativas a seguir em verdadeiras (V) ou falsas (F).
+( ) Na divisão em meso e microrregiões, Campo Alegre integra a Mesorregião do Leste Alagoano e a Microrregião de São Miguel dos Campos.
+( ) Anadia, Limoeiro de Anadia e Junqueiro figuram entre os municípios limítrofes de Campo Alegre.
+( ) Arapiraca e Penedo figuram entre os municípios que fazem limite com o território de Campo Alegre.
+( ) A área territorial registrada para o município de Campo Alegre corresponde a mais de $300\text{ km}^2$.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] V, V, F, V.
+[B] V, V, F, F.
+[C] V, F, F, V.
+[D] F, V, V, F.
+[E] V, F, V, F.
+Gabarito: A
+
+Questão 24
+Reportagem publicada na Gazeta de Alagoas, em 1940, descreve a posição da então vila de Campo Alegre em relação aos cursos d'água que a circundam, informação relevante para a compreensão da rede hidrográfica local.
+Leia o fragmento a seguir.
+"A vila de Campo Alegre fica no centro de dois riachos: ao sul, o ________ e, ao norte, o ________, sendo margeada ainda pela ribeira denominada ________." (Souto, 1940 apud Ticianeli, 2026, adaptado).
+Assinale a alternativa que preenche, CORRETA e respectivamente, as lacunas.
+[A] Jequiá, Mosquito, Coruripe
+[B] Coruripe, Mosquito, Jequiá
+[C] Coruripe, Jequiá, Mosquito
+[D] Jequiá, Coruripe, Mosquito
+[E] Mosquito, Jequiá, Coruripe
+Gabarito: C
+
+Questão 25
+O histórico municipal divulgado com base no Instituto Brasileiro de Geografia e Estatística (IBGE) atribui ao Padre Júlio de Albuquerque a troca do nome Mosquito por Campo Alegre. Pesquisa histórica posterior, apoiada em almanaques e jornais do fim do século XIX, contesta essa autoria. Assinale a alternativa que apresenta, de forma CORRETA, o argumento documental utilizado para contestar a autoria atribuída ao padre.
+[A] O padre foi ordenado em 1891, mesmo ano em que o Almanak citou o povoado de Mosquito.
+[B] A forma Campo Alegre só surgiu em 1936, quando o distrito abandonou o termo Mosquito.
+[C] A forma Campo Alegre do Mosquito já constava em 1891, e o padre só foi ordenado em 1907.
+[D] A forma Campo Alegre do Mosquito só surgiu em 1911, quatro anos após a ordenação do padre, ocorrida em 1907.
+[E] A forma Campo Alegre só surgiu em 1952, quando a Lei nº 1.637 restaurou o nome do distrito.
+Gabarito: C
+
+Questão 26
+Durante apoio a uma fiscalização municipal, um guarda adotou determinada providência com fundamento na interpretação que fez da norma aplicável à ocorrência. A decisão foi registrada e acompanhada das razões consideradas pelo agente naquele momento. Em revisão administrativa posterior, a chefia concluiu que o mesmo dispositivo deveria ter sido interpretado de maneira diferente, embora a análise recaísse sobre os mesmos fatos e documentos disponíveis durante o atendimento. Constatou-se ainda que o guarda não possuía relação pessoal anterior com os envolvidos e havia utilizado critério semelhante em outras situações equivalentes. Diante da divergência surgida na revisão, deve-se avaliar se as circunstâncias apresentadas são suficientes para caracterizar crime de abuso de autoridade.
+Com base exclusivamente na Lei Federal nº 13.869/2019, Lei de Abuso de Autoridade, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A divergência de interpretação ou de avaliação dos fatos, nas circunstâncias narradas, não configura abuso de autoridade, ausente também finalidade específica legalmente exigida.
+[B] A divergência entre interpretações jurídicas pode configurar abuso de autoridade quando a conclusão posterior da chefia demonstrar que a primeira aplicação da norma estava equivocada.
+[C] A revisão administrativa posterior permite reconhecer abuso de autoridade quando a interpretação adotada pelo agente divergir daquela posteriormente considerada adequada pela chefia responsável.
+[D] A finalidade específica exigida pela lei varia conforme o vínculo funcional do agente, sendo aplicável de modo distinto aos servidores efetivos e temporários.
+[E] A responsabilização por abuso de autoridade independe da finalidade específica quando o agente público fundamenta sua decisão em interpretação posteriormente afastada pela administração.
+Gabarito: A
+
+Questão 27
+Um Município possui Guarda Municipal composta por 42 servidores e autorizada a utilizar arma de fogo nos termos da legislação aplicável. Durante a revisão de sua estrutura administrativa, a gestão municipal passou a avaliar a organização dos mecanismos responsáveis pela fiscalização das atividades da corporação, pela apuração de infrações disciplinares e pelo recebimento de manifestações relacionadas à atuação de seus dirigentes e integrantes. A análise deverá considerar as regras estabelecidas pelo Estatuto Geral das Guardas Municipais para os controles interno e externo da instituição.
+Com base exclusivamente na Lei Federal nº 13.022/2014, que institui o Estatuto Geral das Guardas Municipais, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) A utilização de arma de fogo pela Guarda Municipal torna necessária a existência de corregedoria para o exercício do controle interno.
+( ) A ouvidoria responsável pelo controle externo deve ser independente em relação à direção da respectiva Guarda Municipal.
+( ) A corregedoria possui atribuição relacionada à apuração das infrações disciplinares cometidas pelos integrantes do quadro da Guarda Municipal.
+( ) A ouvidoria exerce o controle externo mediante aplicação de sanções disciplinares aos integrantes da Guarda Municipal quando acolhe denúncia.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] V, V, F, V.
+[B] F, V, F, V.
+[C] F, F, V, V.
+[D] V, V, V, F.
+[E] V, F, V, F.
+Gabarito: D
+
+Questão 28
+Após realizar uma captura legal em situação de flagrante, uma equipe da Guarda Municipal permaneceu com o preso enquanto aguardava a continuidade do atendimento. Nesse período, o capturado solicitou a identificação do guarda responsável por sua detenção. O agente ocultou sua identificação funcional e recusou-se a informar seus dados ao preso. Para fins da questão, considere preenchidos os requisitos gerais exigidos pela Lei de Abuso de Autoridade para eventual responsabilização penal. A equipe deve avaliar o tratamento jurídico atribuído pela legislação à conduta praticada naquele momento da ocorrência.
+Com base exclusivamente na Lei Federal nº 13.869/2019, Lei de Abuso de Autoridade, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A recusa de identificação durante a captura constitui irregularidade funcional, pois a consequência penal prevista na lei está relacionada à atribuição de identidade, cargo ou função falsos.
+[B] A recusa de identificação durante a captura fica submetida à disciplina do interrogatório formal, pois o dever de identificar-se surge com a formalização do procedimento investigatório.
+[C] A legalidade da captura impede o enquadramento da recusa de identificação, pois a norma vincula essa conduta à irregularidade da própria privação de liberdade realizada pelo agente.
+[D] A recusa de identificação ao preso por ocasião da captura corresponde à conduta prevista na Lei de Abuso de Autoridade, presentes os requisitos gerais de responsabilização.
+[E] A recusa de identificação corresponde à falsa identificação, ainda que o agente não tenha fornecido nome, cargo ou função diversos daqueles que efetivamente possui perante o preso.
+Gabarito: D
+
+Questão 29
+Em apoio a uma fiscalização municipal regularmente realizada em estabelecimento comercial, uma equipe da Guarda Municipal encontrou arma de fogo de uso permitido no escritório utilizado pelo proprietário do comércio. Para fins da questão, considere comprovado que o homem é o titular e responsável legal pelo estabelecimento e que mantinha a arma naquele local de trabalho em desacordo com determinação legal ou regulamentar. Diante da situação constatada, a equipe precisa identificar corretamente a natureza da conduta para registrar e encaminhar a ocorrência à autoridade competente.
+Com base exclusivamente na Lei Federal nº 10.826/2003, que dispõe sobre registro, posse e comercialização de armas de fogo e munição e sobre o Sistema Nacional de Armas (Sinarm), sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA que qualifica a conduta descrita.
+[A] Configura porte ilegal de arma de fogo de uso permitido, pois a condição de titular do estabelecimento não altera a natureza da conduta praticada.
+[B] Configura posse irregular de arma de fogo de uso permitido, desde que o estabelecimento estivesse fechado ao público quando a arma foi encontrada.
+[C] Configura posse irregular de arma de fogo de uso permitido, pois ela estava no local de trabalho do titular ou responsável legal.
+[D] Configura omissão de cautela, pois a manutenção irregular da arma no local de trabalho corresponde à falta de cautela prevista para o proprietário.
+[E] Configura porte ilegal de arma de fogo de uso permitido, porque a manutenção da arma no local de trabalho não caracteriza posse quando o estabelecimento exerce atividade comercial.
+Gabarito: C
+
+Questão 30
+Durante patrulhamento preventivo nas proximidades de uma escola pública municipal, uma equipe da Guarda Municipal atendeu uma ocorrência na calçada imediatamente em frente ao estabelecimento. Após as providências cabíveis, ficou comprovada, para fins da questão, a prática do crime de tráfico de drogas naquele local. Diante da situação, os integrantes da equipe precisam compreender a consequência que a Lei de Drogas atribui à circunstância espacial em que a infração foi praticada, considerando o enquadramento legal do fato.
+Com base exclusivamente na Lei Federal nº 11.343/2006, Lei de Drogas, sem considerar jurisprudência ou doutrina, analise as asserções e a relação proposta entre elas.
+I. A prática do crime nas imediações do estabelecimento de ensino está entre as situações para as quais a Lei de Drogas prevê aumento de pena.
+PORQUE
+II. A Lei de Drogas inclui expressamente as dependências ou imediações de estabelecimentos de ensino entre os locais considerados para essa causa de aumento.
+Assinale a alternativa CORRETA.
+[A] As asserções I e II são falsas, razão pela qual não existe relação justificadora válida entre as proposições apresentadas.
+[B] As asserções I e II são verdadeiras, mas a segunda não apresenta fundamento capaz de justificar corretamente a primeira.
+[C] A asserção I é verdadeira, enquanto a asserção II é falsa, não existindo relação justificadora válida entre as duas proposições.
+[D] As asserções I e II são verdadeiras, e a segunda apresenta fundamento que justifica corretamente a primeira.
+[E] A asserção I é falsa, enquanto a asserção II é verdadeira, não existindo relação justificadora válida entre as duas proposições.
+Gabarito: D
+
+Questão 31
+Durante capacitação destinada ao atendimento inicial de ocorrências patrimoniais, guardas municipais analisaram quatro registros de roubo encaminhados posteriormente à autoridade policial. Em cada situação, já estava definida a ocorrência do crime de roubo, cabendo à equipe reconhecer se a circunstância descrita fazia a modalidade integrar o rol dos crimes hediondos. Para fins da questão, considere apenas os elementos expressamente informados em cada ocorrência, sem acrescentar circunstâncias não narradas.
+Com base exclusivamente na Lei Federal nº 8.072/1990, Lei dos Crimes Hediondos, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) Em ocorrência na qual o autor restringiu a liberdade da vítima durante o roubo, a modalidade integra o rol dos crimes hediondos.
+( ) Em roubo praticado com emprego de arma branca, sem outra circunstância prevista no rol legal, a modalidade integra o rol dos crimes hediondos.
+( ) Em roubo do qual resultou lesão corporal grave na vítima, a modalidade integra o rol dos crimes hediondos.
+( ) Em roubo praticado em concurso de pessoas, sem outra circunstância prevista no rol legal, a modalidade integra o rol dos crimes hediondos.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] V, F, F, V.
+[B] F, F, V, V.
+[C] V, V, F, F.
+[D] F, V, V, F.
+[E] V, F, V, F.
+Gabarito: E
+
+Questão 32
+Em uma manhã de grande circulação no centro da cidade, fiscais municipais identificaram bancas, mercadorias e estruturas instaladas irregularmente em áreas destinadas à passagem de pedestres, além de outras situações submetidas às posturas e ao ordenamento urbano do Município. A Secretaria responsável organizou uma ação conjunta em diferentes pontos do logradouro e solicitou a participação da Guarda Municipal para auxiliar na execução segura das medidas administrativas cabíveis. Na reunião operacional, surgiu dúvida quanto ao alcance da competência da corporação nessa espécie de fiscalização e quanto à relação que deve manter com os órgãos municipais responsáveis pelas providências administrativas. O comandante deverá definir a atuação da equipe de acordo com a competência estabelecida no Estatuto Geral das Guardas Municipais.
+Com base exclusivamente na Lei Federal nº 13.022/2014, Estatuto Geral das Guardas Municipais, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] Integrar-se aos órgãos de poder de polícia administrativa, condicionando essa participação à celebração prévia de convênio específico para cada ação de fiscalização municipal.
+[B] Integrar-se aos órgãos de poder de polícia administrativa, assumindo os atos de fiscalização e sanção atribuídos aos fiscais municipais durante a operação conjunta.
+[C] Integrar-se aos demais órgãos de poder de polícia administrativa, contribuindo para a normatização e a fiscalização das posturas e do ordenamento urbano municipal.
+[D] Integrar-se aos órgãos municipais de trânsito, utilizando as competências viárias como fundamento para fiscalizar as posturas e o ordenamento urbano durante a ação.
+[E] Integrar-se aos órgãos de políticas sociais do Município, atribuindo a essa articulação a função de conduzir a fiscalização das posturas e do ordenamento urbano.
+Gabarito: C
+
+Questão 33
+A Guarda Municipal participará de uma operação conjunta destinada ao enfrentamento de ocorrências que exigem atuação coordenada de diferentes integrantes do Sistema Único de Segurança Pública (Susp). Durante a preparação da atividade, surgiram dúvidas quanto às formas de integração admitidas pela legislação, às características que uma operação combinada pode assumir, à responsabilidade pelo planejamento e pela coordenação e à participação de órgãos que não estejam diretamente vinculados à segurança pública e à defesa social.
+Com base exclusivamente na Lei Federal nº 13.675/2018, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. Operações com planejamento e execução integrados constituem uma das formas previstas para integração e coordenação dos órgãos integrantes do Susp.
+II. Operações combinadas, planejadas e desencadeadas em equipe, podem apresentar natureza ostensiva, investigativa, de inteligência ou mista.
+III. O planejamento e a coordenação das operações combinadas são exercidos conjuntamente pelos participantes envolvidos na respectiva atuação.
+IV. A participação de outros órgãos dos sistemas federal, estadual, distrital ou municipal fica condicionada à vinculação direta aos órgãos de segurança pública e defesa social.
+Estão CORRETAS as assertivas:
+[A] II, III e IV, apenas.
+[B] I, II e IV, apenas.
+[C] I, II, III e IV.
+[D] I, III e IV, apenas.
+[E] I, II e III, apenas.
+Gabarito: E
+
+Questão 34
+Durante atendimento a uma ocorrência, uma equipe da Guarda Municipal localizou, no interior de um veículo, uma arma de fogo tecnicamente classificada como de uso permitido. O condutor transportava, em uma bolsa, o armamento, cuja numeração havia sido raspada, circunstância posteriormente confirmada na verificação realizada. Os elementos disponíveis demonstravam o transporte da arma nessas condições, mas não indicavam que o próprio condutor tivesse realizado a raspagem. A equipe precisava identificar corretamente a conduta constatada para efetuar o encaminhamento da ocorrência.
+Com base exclusivamente na Lei Federal nº 10.826/2003, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A conduta corresponde à posse ou ao porte de arma de uso restrito, porque a raspagem do sinal identificador modifica a classificação jurídica originalmente atribuída ao armamento.
+[B] A conduta corresponde à supressão ou à alteração do sinal identificador, pois o transporte da arma com numeração raspada permite atribuir ao portador a própria modificação realizada.
+[C] A conduta corresponde à hipótese legal de portar ou transportar arma de fogo com sinal de identificação raspado, prevista especificamente no Estatuto do Desarmamento.
+[D] A conduta corresponde ao porte ilegal de arma de uso permitido, porque a classificação original do armamento prevalece apesar da raspagem de sua numeração.
+[E] A conduta corresponde ao porte ilegal de arma de uso permitido com aumento de pena, pois a raspagem funciona como circunstância agravadora dessa figura.
+Gabarito: C
+
+Questão 35
+Durante a elaboração de protocolos operacionais para a Guarda Municipal, uma equipe técnica analisou medidas relacionadas à prevenção de conflitos, ao emprego da força, ao atendimento de pessoas em situação de vulnerabilidade e ao tratamento das informações de segurança pública. Na discussão, surgiu a necessidade de distinguir os princípios que orientam a Política Nacional de Segurança Pública e Defesa Social (PNSPDS) das diretrizes previstas para sua implementação, a fim de classificar corretamente as medidas propostas.
+Com base exclusivamente na Lei Federal nº 13.675/2018, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) A resolução pacífica de conflitos e o uso comedido e proporcional da força integram os princípios que orientam a PNSPDS.
+( ) O atendimento prioritário, qualificado e humanizado às pessoas em situação de vulnerabilidade integra as diretrizes da PNSPDS.
+( ) A sistematização e o compartilhamento das informações de segurança pública são classificados pela lei como princípios da PNSPDS.
+( ) O planejamento estratégico e sistêmico integra as diretrizes estabelecidas para a PNSPDS.
+Assinale a sequência CORRETA, de cima para baixo.
+[A] V, V, F, V.
+[B] V, F, V, V.
+[C] F, V, F, V.
+[D] F, F, V, V.
+[E] V, V, V, F.
+Gabarito: A
+
+Questão 36
+Uma equipe da Guarda Municipal foi acionada para atender uma ocorrência em uma residência. No local, constatou-se que um adolescente de dezesseis anos havia retirado, sem autorização, uma arma de fogo pertencente ao responsável pelo imóvel. A arma ficava guardada em uma gaveta destrancada de móvel de uso comum da residência e estava sob a posse de seu proprietário. Após controlar a situação e impedir o acesso do adolescente ao armamento, a equipe precisou identificar a natureza da conduta atribuída ao responsável pela arma para realizar o encaminhamento da ocorrência.
+Com base exclusivamente na Lei Federal nº 10.826/2003, que dispõe sobre registro, posse e comercialização de armas de fogo e munição, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] Configura porte ilegal de arma de fogo, porque o apoderamento pelo adolescente descaracteriza a posse exercida pelo proprietário e altera a natureza jurídica da conduta.
+[B] Configura posse irregular de arma de fogo, pois a forma de armazenamento utilizada na residência converte a falta de cautela do proprietário em manutenção irregular do armamento.
+[C] Configura hipótese de extravio de arma sob guarda, pois o apoderamento pelo adolescente afasta a vigilância do responsável e produz a situação prevista para perda do armamento.
+[D] Configura posse irregular de arma de fogo, porque o armazenamento em local acessível ao adolescente torna irregular a posse mantida pelo proprietário no interior da residência.
+[E] Configura omissão de cautela, pois o responsável não adotou cuidados suficientes para impedir que menor de dezoito anos se apoderasse da arma sob sua posse.
+Gabarito: E
+
+Questão 37
+Após uma captura regularmente efetuada, uma equipe da Guarda Municipal permaneceu responsável pela custódia de um homem enquanto aguardava a continuidade do atendimento. Nesse período, surgiram dúvidas entre os integrantes da equipe sobre os limites legais de medidas coercitivas dirigidas a pessoas presas ou detidas e sobre as circunstâncias em que determinados constrangimentos podem caracterizar abuso de autoridade. O responsável pela equipe orientou os agentes a observar tanto as condutas especificamente previstas na legislação quanto os requisitos gerais necessários à responsabilização penal.
+Com base exclusivamente na Lei Federal nº 13.869/2019, Lei de Abuso de Autoridade, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. Constranger preso ou detento, mediante grave ameaça, a exibir-se ou ter seu corpo exposto à curiosidade pública corresponde a conduta prevista na lei.
+II. A submissão do preso a situação vexatória não autorizada em lei depende de sua exposição à curiosidade pública para caracterizar a conduta prevista.
+III. Constranger preso ou detento, mediante redução de sua capacidade de resistência, a produzir prova contra si ou contra terceiro corresponde a conduta prevista.
+IV. A finalidade específica exigida pela Lei de Abuso de Autoridade deixa de ser necessária quando o constrangimento é praticado mediante grave ameaça.
+Está CORRETO o que se afirma em:
+[A] II e IV, apenas.
+[B] I e II, apenas.
+[C] I, II e IV, apenas.
+[D] I e III, apenas.
+[E] II, III e IV, apenas.
+Gabarito: D
+
+Questão 38
+Durante patrulhamento em uma praça municipal, uma equipe da Guarda Municipal observou dois homens consumindo droga. A apuração realizada no local indicou que eles eram amigos havia vários anos e que um deles, naquele encontro, retirou pequena porção da substância que trazia consigo e a entregou ao outro para que ambos a consumissem ali. Não houve pagamento, promessa de vantagem ou qualquer contraprestação pela entrega, e os elementos constatados indicavam que o episódio ocorreu naquela ocasião específica. Diante dessas circunstâncias, a equipe precisa identificar corretamente a figura prevista na legislação para registrar e encaminhar a ocorrência.
+Com base exclusivamente na Lei Federal nº 11.343/2006, Lei de Drogas, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A situação corresponde à posse para consumo pessoal dos envolvidos, porque a intenção de consumir junto descaracteriza a relevância penal da oferta realizada entre eles.
+[B] A situação configura a figura específica de oferta eventual de droga a pessoa do relacionamento do agente, sem lucro, para consumo conjunto pelos envolvidos.
+[C] A situação configura auxílio ao uso indevido de droga, pois a entrega da substância a outra pessoa corresponde à figura legal de induzir, instigar ou auxiliar.
+[D] A situação configura fornecimento gratuito previsto no tráfico, pois a inexistência de pagamento não afasta, por si, a figura geral de entrega de droga.
+[E] A situação configura associação para o tráfico, pois a participação conjunta de duas pessoas na posse e no consumo da droga caracteriza a finalidade associativa exigida.
+Gabarito: B
+
+Questão 39
+Após apoiar uma ocorrência posteriormente enquadrada pela autoridade competente em crime abrangido pela Lei dos Crimes Hediondos, integrantes da Guarda Municipal participaram de capacitação sobre consequências legais aplicáveis a essas infrações. Na atividade, foram discutidas restrições previstas pela legislação, a possibilidade de o condenado recorrer em liberdade e as condições relacionadas à duração da prisão temporária. Diante das diferentes afirmações apresentadas pelo instrutor, os guardas deverão identificar quais correspondem efetivamente à redação vigente da lei.
+Com base exclusivamente na Lei Federal nº 8.072/1990, Lei dos Crimes Hediondos, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. Os crimes hediondos, a prática da tortura, o tráfico ilícito de entorpecentes e drogas afins e o terrorismo são insuscetíveis de anistia, graça e indulto.
+II. Os crimes e condutas abrangidos pela regra legal são insuscetíveis de fiança e de liberdade provisória.
+III. Em caso de sentença condenatória, o juiz decidirá fundamentadamente se o réu poderá apelar em liberdade.
+IV. A prisão temporária possui prazo de trinta dias e pode ser prorrogada por igual período quando persistirem os fundamentos iniciais, ainda que não demonstrada extrema e comprovada necessidade.
+Estão CORRETAS as assertivas:
+[A] I e III, apenas.
+[B] II e IV, apenas.
+[C] III e IV, apenas.
+[D] I e II, apenas.
+[E] II, III e IV, apenas.
+Gabarito: A
+
+Questão 40
+Durante capacitação destinada ao atendimento inicial de ocorrências relacionadas ao tráfico de drogas, guardas municipais analisaram diferentes formas de participação previstas na legislação. Em três situações independentes, foram identificadas atuações distintas: pessoas que mantinham vínculo para a prática dos crimes previstos na Lei de Drogas, indivíduo que fornecia recursos destinados à realização dessas atividades e pessoa que transmitia informações úteis a grupo envolvido na prática criminosa. A equipe deverá distinguir corretamente as figuras legais aplicáveis a cada situação.
+Com base exclusivamente na Lei Federal nº 11.343/2006, Lei de Drogas, sem considerar jurisprudência ou doutrina, associe as situações às respectivas figuras legais.
+Coluna 1
+1. Associação para a prática dos crimes previstos na Lei de Drogas.
+2. Financiamento ou custeio da prática dos crimes previstos na Lei de Drogas.
+3. Colaboração como informante de grupo, organização ou associação.
+Coluna 2
+( ) Um indivíduo repassa ao grupo informações sobre horários e deslocamentos das equipes de segurança para favorecer a prática dos crimes previstos na lei.
+( ) Uma pessoa fornece recursos financeiros destinados às despesas necessárias à realização das atividades ilícitas desenvolvidas pelos envolvidos.
+( ) Duas pessoas estabelecem vínculo entre si com a finalidade de praticar as condutas criminosas abrangidas pela figura legal correspondente.
+Assinale a alternativa que apresenta a sequência CORRETA, de cima para baixo.
+[A] 1, 2, 3.
+[B] 3, 1, 2.
+[C] 2, 3, 1.
+[D] 2, 1, 3.
+[E] 3, 2, 1.
+Gabarito: E
+
+Questão 41
+Durante o planejamento de uma ação integrada de segurança pública, representantes municipais discutiram a participação de diferentes órgãos e agentes na atividade. Surgiram dúvidas quanto à posição institucional ocupada pela Guarda Municipal, pelos agentes de trânsito, pelos entes federativos e pelos conselhos responsáveis pela segurança pública e defesa social. Para organizar adequadamente a atuação conjunta, a equipe precisa distinguir quais desses integrantes são classificados pela legislação como estratégicos e quais são classificados como operacionais.
+Com base exclusivamente na Lei Federal nº 13.675/2018, que institui o Sistema Único de Segurança Pública (Susp), sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. As guardas municipais integram o grupo dos integrantes operacionais do Sistema Único de Segurança Pública.
+II. União, Estados, Distrito Federal e Municípios, por intermédio dos respectivos Poderes Executivos, integram o grupo dos integrantes estratégicos.
+III. Os agentes de trânsito integram o grupo dos integrantes operacionais do Sistema Único de Segurança Pública.
+IV. Os Conselhos de Segurança Pública e Defesa Social integram o grupo dos integrantes operacionais do Sistema Único de Segurança Pública.
+Assinale a alternativa que apresenta apenas as assertivas CORRETAS.
+[A] II e IV, apenas.
+[B] II, III e IV, apenas.
+[C] I, II e III, apenas.
+[D] I, II e IV, apenas.
+[E] I, III e IV, apenas.
+Gabarito: C
+
+Questão 42
+Durante patrulhamento noturno, uma equipe da Guarda Municipal transitava por uma rua residencial quando observou um homem apontar uma arma de fogo para cima e acionar o gatilho, provocando a saída de um projétil. Havia diversas residências ocupadas nas proximidades e circulação de pessoas na região. A apuração realizada no local indicou que o ato ocorreu em contexto de comemoração e não estava relacionado à ameaça, à agressão ou à prática de outra infração penal. Diante das circunstâncias constatadas, a equipe precisa identificar corretamente o enquadramento da conduta para encaminhar a ocorrência à autoridade competente.
+Com base exclusivamente na Lei Federal nº 10.826/2003, que dispõe sobre registro, posse e comercialização de armas de fogo e munição, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] O enquadramento como disparo de arma de fogo depende de a arma ser classificada como de uso permitido e estar sem registro válido.
+[B] A conduta caracteriza disparo de arma de fogo, pois ocorreu em área habitada e não estava direcionada à prática de outro crime.
+[C] O enquadramento como disparo de arma de fogo depende da demonstração de porte não autorizado, além da realização do acionamento em área habitada.
+[D] A ausência de vítima atingida impede o enquadramento como disparo de arma de fogo, pois a infração exige resultado lesivo decorrente do projétil.
+[E] A finalidade comemorativa afasta o enquadramento como disparo de arma de fogo, pois a infração exige propósito de intimidar pessoa determinada no local.
+Gabarito: B
+
+Questão 43
+Durante patrulhamento noturno em área residencial, guardas municipais ouviram gritos vindos do interior de uma casa e perceberam grande quantidade de fumaça saindo pelas janelas. Como ninguém respondeu aos chamados feitos do lado externo e havia sinais de que pessoas permaneciam dentro do imóvel, os agentes forçaram a entrada e retiraram dois moradores que apresentavam dificuldade para respirar. A equipe não possuía mandado judicial e não havia obtido autorização prévia dos ocupantes para ingressar na residência. Posteriormente, surgiu questionamento quanto à compatibilidade da conduta com a Lei de Abuso de Autoridade.
+Com base exclusivamente na Lei Federal nº 13.869/2019, Lei de Abuso de Autoridade, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] O ingresso não configura o crime previsto na lei, pois a retirada de pessoas expostas a perigo no imóvel caracteriza hipótese legal de socorro.
+[B] O ingresso depende da caracterização de desastre para afastar o crime, pois a retirada de moradores em risco não constitui fundamento autônomo previsto na lei.
+[C] O ingresso deixa de configurar abuso de autoridade quando houver posterior confirmação judicial da necessidade da entrada realizada pelos agentes no imóvel.
+[D] O ingresso configura abuso de autoridade, pois a entrada noturna sem mandado depende da prévia constatação de flagrante delito no interior do imóvel.
+[E] O ingresso configura abuso de autoridade quando inexistir consentimento prévio do ocupante, ainda que a atuação tenha ocorrido diante de pessoas expostas a perigo.
+Gabarito: A
+
+Questão 44
+Uma escola municipal passou a registrar conflitos recorrentes nos horários de entrada e saída dos alunos, inclusive em áreas próximas à unidade. Diante da situação, a direção solicitou apoio da Guarda Municipal para colaborar com medidas voltadas à segurança da comunidade escolar. Durante o planejamento, surgiram dúvidas sobre a extensão das competências legalmente atribuídas à corporação nesse contexto, especialmente quanto à atuação preventiva e à participação dos guardas em iniciativas relacionadas ao ambiente escolar.
+Com base exclusivamente na Lei Federal nº 13.022/2014, que institui o Estatuto Geral das Guardas Municipais, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. A Guarda Municipal pode atuar mediante ações preventivas na segurança escolar.
+II. O zelo pelo entorno das unidades municipais de ensino integra as competências da Guarda Municipal.
+III. A Guarda Municipal pode participar de ações educativas com o corpo discente e docente, colaborando com a implantação da cultura de paz na comunidade local.
+IV. A participação da Guarda Municipal em ações educativas depende, como condição prevista na lei, de solicitação formal da direção da unidade de ensino.
+Assinale a alternativa que apresenta apenas as assertivas CORRETAS.
+[A] I, II e III.
+[B] I, II e IV.
+[C] I e III.
+[D] II, III e IV.
+[E] I, III e IV.
+Gabarito: A
+
+Questão 45
+No início da noite, uma equipe da Guarda Municipal realizava patrulhamento preventivo em praça pertencente ao Município quando presenciou um homem danificando intencionalmente equipamentos públicos e, em seguida, agredindo uma pessoa que tentou impedi-lo. A situação foi imediatamente caracterizada como flagrante delito. Os guardas interromperam a ação, controlaram o autor e adotaram as providências iniciais relacionadas à ocorrência. Poucos minutos depois, uma equipe policial competente compareceu ao local. Diante dessas circunstâncias, o encarregado da guarnição municipal precisa definir como deverá prosseguir a atuação da equipe.
+Com base exclusivamente na Lei Federal nº 13.022/2014, que institui o Estatuto Geral das Guardas Municipais, sem considerar jurisprudência ou doutrina, assinale a alternativa que apresenta a conduta CORRETA a ser adotada pela guarnição municipal.
+[A] Encaminhar o autor ao delegado, preservar o local quando possível e necessário e apoiar a continuidade do atendimento após a chegada da equipe competente.
+[B] Encaminhar o autor ao delegado de polícia, preservar o local quando possível e encerrar sua atuação após repassar à equipe competente as informações já obtidas.
+[C] Registrar os danos ao patrimônio municipal, preservar o local e solicitar à equipe policial que realize o encaminhamento do autor ao delegado quando assumir a ocorrência.
+[D] Manter o autor sob custódia da equipe municipal no local, preservar os vestígios existentes e aguardar que a autoridade policial determine a forma de encaminhamento.
+[E] Encaminhar o autor ao delegado, preservar o local da ocorrência e permanecer responsável pela condução do atendimento mesmo após a chegada da equipe policial competente.
+Gabarito: A
+
+Questão 46
+Em patrulhamento por uma avenida, guardas municipais encontraram um motociclista caído próximo a fios energizados após colisão contra um poste. Antes da chegada da equipe, um pedestre havia percebido que o homem estava ferido e necessitava de auxílio. A aproximação física aos fios apresentava risco concreto ao pedestre, razão pela qual não seria seguro tentar retirar pessoalmente a vítima. Apesar disso, ele possuía telefone em funcionamento, encontrava-se em local com sinal e poderia solicitar atendimento de emergência sem qualquer risco pessoal. Optou, entretanto, por seguir caminho e não comunicou a situação a nenhuma autoridade ou serviço público. Para fins da questão, considere que o pedestre tinha plena percepção da situação da vítima.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A existência de risco na aproximação física afasta qualquer dever penalmente relevante, inclusive o de solicitar socorro público por meio seguro disponível ao pedestre.
+[B] A conduta não possui relevância penal porque o dever de pedir socorro pertence aos familiares da vítima ou a profissionais previamente encarregados do atendimento.
+[C] A conduta somente poderia caracterizar omissão de socorro se ficasse comprovado que a falta de auxílio provocou lesão corporal grave ou morte.
+[D] A conduta pode caracterizar omissão de socorro porque, embora a assistência direta envolvesse risco pessoal, era possível pedir socorro da autoridade pública com segurança.
+[E] A conduta caracteriza omissão porque o pedestre deveria ter ingressado na área perigosa e prestado assistência direta, ainda que houvesse risco pessoal concreto.
+Gabarito: D
+
+Questão 47
+Ao atender ocorrência em uma praça, uma equipe da Guarda Municipal tomou conhecimento de ofensas dirigidas pessoalmente a um comerciante por causa de sua raça. Testemunhas relataram que as palavras foram proferidas para atingir sua dignidade e seu decoro. Na capacitação posterior à ocorrência, os agentes discutiram como a Lei nº 7.716/1989 disciplina essa modalidade de ofensa, quais fatores podem repercutir na pena e se o tratamento normativo é idêntico quando a motivação da ofensa é religiosa. Também foi debatida a situação em que os crimes previstos na lei são praticados por funcionário público valendo-se de sua função. Para evitar confusão entre figuras próximas, cada afirmação deve ser examinada conforme a redação legal vigente.
+Com base exclusivamente na Lei Federal nº 7.716/1989, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. Ofender a dignidade ou o decoro de alguém em razão de raça, cor, etnia ou procedência nacional constitui figura expressamente prevista na lei.
+II. Se as ofensas fossem praticadas conjuntamente por duas ou mais pessoas, a pena aplicável à conduta teria aumento variável de um terço até a metade.
+III. Se, em situação semelhante, as ofensas fossem dirigidas ao comerciante exclusivamente em razão de sua religião, seria aplicável a mesma figura legal de ofensa à dignidade ou ao decoro descrita no caso.
+IV. A prática das figuras legalmente indicadas por funcionário público, no exercício das funções ou a pretexto de exercê-las, pode acarretar aumento de pena.
+Assinale a alternativa que apresenta apenas as assertivas CORRETAS.
+[A] II e III, apenas.
+[B] I e IV, apenas.
+[C] I, III e IV, apenas.
+[D] II, III e IV, apenas.
+[E] I e II, apenas.
+Gabarito: B
+
+Questão 48
+Em atendimento integrado a uma mulher que relatava diversas condutas praticadas pelo companheiro, guardas municipais registraram fatos de naturezas distintas. Segundo o relato, ele havia destruído seu computador de trabalho e retido seu cartão bancário; controlava seus deslocamentos e contatos, humilhando-a para interferir em suas decisões; divulgara perante vizinhos falsa acusação de prática criminosa; e, em outro momento, a constrangera mediante ameaça a manter relação sexual não desejada. Para organizar o encaminhamento e compreender o alcance da Lei Maria da Penha, a equipe precisa distinguir as formas de violência doméstica e familiar envolvidas, sem confundir o meio empregado com a categoria jurídica correspondente.
+Com base exclusivamente na Lei Federal nº 11.340/2006, sem considerar jurisprudência ou doutrina, associe as situações às respectivas formas de violência.
+Coluna 1
+1. Violência psicológica.
+2. Violência sexual.
+3. Violência patrimonial.
+4. Violência moral.
+Coluna 2
+( ) Destruição do equipamento profissional e retenção do cartão bancário.
+( ) Controle de deslocamentos, contatos e decisões mediante humilhação e manipulação.
+( ) Imputação perante terceiros de fato definido como crime.
+( ) Constrangimento mediante ameaça para participação em relação sexual não desejada.
+A sequência CORRETA, de cima para baixo, é:
+[A] 3, 2, 4, 1.
+[B] 1, 3, 4, 2.
+[C] 4, 1, 3, 2.
+[D] 3, 4, 1, 2.
+[E] 3, 1, 4, 2.
+Gabarito: E
+
+Questão 49
+Na preparação de uma grande programação cultural municipal, a Guarda Municipal recebeu orientação sobre ocorrências discriminatórias que poderiam surgir tanto presencialmente quanto na internet. Foram discutidos três cenários independentes: publicação em rede social destinada a induzir discriminação racial; prática discriminatória ocorrida no contexto de atividade cultural aberta ao público; e emprego de violência para impedir determinada prática religiosa. O responsável pela capacitação ressaltou que a Lei nº 7.716/1989 atribui consequências específicas a cada hipótese, razão pela qual a equipe não deve tratar todos os casos como se possuíssem idêntica estrutura normativa.
+Com base exclusivamente na Lei Federal nº 7.716/1989, sem considerar jurisprudência ou doutrina, associe as situações às respectivas consequências legais.
+Coluna 1
+1. Discriminação praticada por publicação em rede social.
+2. Discriminação praticada no contexto de atividade cultural destinada ao público.
+3. Violência empregada para obstar manifestação ou prática religiosa.
+Coluna 2
+( ) Incidência da disciplina específica para uso de meios de comunicação social, redes sociais ou rede mundial de computadores.
+( ) Aplicação das penas correspondentes à figura legal, sem prejuízo da pena relativa à violência praticada.
+( ) Incidência da disciplina própria das atividades destinadas ao público, com consequência adicional relacionada à frequência a determinados locais.
+A sequência CORRETA, de cima para baixo, é:
+[A] 2, 3, 1.
+[B] 2, 1, 3.
+[C] 1, 3, 2.
+[D] 1, 2, 3.
+[E] 3, 1, 2.
+Gabarito: C
+
+Questão 50
+Uma equipe da Guarda Municipal foi acionada por moradores após observar adolescentes recebendo bebidas e outros produtos em um estabelecimento próximo a uma praça. No local, constatou-se que o comerciante havia servido gratuitamente bebida alcoólica a um adolescente e entregado, sem justificativa, outro produto cujos componentes poderiam causar dependência física ou psíquica. Na elaboração do relatório, surgiu dúvida sobre o alcance da figura penal prevista no Estatuto da Criança e do Adolescente, especialmente quanto à gratuidade, à exigência de justa causa e à distinção entre crime e mera infração administrativa. O comandante decidiu utilizar a ocorrência como exemplo em capacitação posterior.
+Com base exclusivamente na Lei Federal nº 8.069/1990, considerando apenas seu Título VII, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) Servir bebida alcoólica a criança ou adolescente pode integrar a figura criminal mesmo quando o fornecimento é gratuito.
+( ) No caso específico de bebida alcoólica, a configuração da figura exige que o fornecimento tenha ocorrido sem justa causa.
+( ) A ausência de justa causa é expressamente relevante para outros produtos cujos componentes possam causar dependência física ou psíquica.
+( ) A gratuidade converte o fornecimento de bebida alcoólica em infração administrativa, afastando a figura criminal prevista no Estatuto.
+A sequência CORRETA, de cima para baixo, é:
+[A] V, F, F, V.
+[B] F, V, V, F.
+[C] F, F, V, V.
+[D] V, F, V, F.
+[E] V, V, F, F.
+Gabarito: D
+
+Questão 51
+Durante treinamento interno, foi analisada situação na qual determinado servidor presenciou atos caracterizadores de tortura praticados contra pessoa sob custódia estatal. Em razão das atribuições que exercia, o servidor possuía o dever de evitar ou apurar aquelas condutas, mas, mesmo tendo condições de agir, permaneceu deliberadamente omisso.
+Considerando exclusivamente o disposto na Lei Federal nº 9.455/1997 e, para fins da questão, comprovada a existência do dever de evitar ou apurar as condutas, analise as asserções a seguir e a relação proposta entre elas.
+I. Aquele que se omite diante das condutas de tortura, quando tinha o dever de evitá-las ou apurá-las, submete-se a tratamento penal expressamente previsto na legislação.
+PORQUE
+II. A Lei nº 9.455/1997 estabelece para essa omissão a mesma espécie e a mesma faixa de pena previstas para quem pratica diretamente as modalidades principais de tortura.
+Considerando as disposições legais aplicáveis à situação apresentada, assinale a alternativa CORRETA.
+[A] A asserção I é falsa e a asserção II é verdadeira.
+[B] A asserção I é verdadeira e a asserção II é falsa.
+[C] As asserções I e II são verdadeiras, e a segunda justifica corretamente a primeira.
+[D] As asserções I e II são falsas.
+[E] As asserções I e II são verdadeiras, mas a segunda não justifica corretamente a primeira.
+Gabarito: B
+
+Questão 52
+Depois de uma ocorrência envolvendo adolescente ao qual se atribuía ato infracional, a equipe de comunicação de um órgão municipal recebeu gravação produzida durante o atendimento. Com a intenção de demonstrar a atuação dos serviços públicos, um servidor publicou trecho do vídeo em página institucional. O rosto do adolescente foi parcialmente desfocado, mas o uniforme escolar, o local, a voz e outras referências permitiam sua identificação pelas pessoas da comunidade. Não havia autorização para a divulgação. Posteriormente, guardas que participaram do atendimento foram questionados sobre a natureza jurídica dessa exposição à luz exclusivamente do capítulo das infrações administrativas do Estatuto da Criança e do Adolescente.
+Com base exclusivamente na Lei Federal nº 8.069/1990, considerando apenas seu Título VII, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A divulgação permanece regular porque o desfoque parcial do rosto elimina a possibilidade de infração, ainda que outros elementos permitam reconhecer o adolescente.
+[B] A divulgação caracteriza infração administrativa quando a transmissão da imagem ou do vídeo permite identificar o adolescente envolvido no ato que lhe foi atribuído.
+[C] A divulgação caracteriza infração administrativa apenas quando proveniente de processo judicial, ficando excluídos registros produzidos em procedimentos administrativos ou policiais.
+[D] A divulgação configura crime previsto no Estatuto porque qualquer exposição audiovisual de adolescente relacionado a ato infracional possui natureza penal pela simples publicação.
+[E] A divulgação é autorizada quando realizada por órgão público para demonstrar atuação institucional, desde que não seja informado expressamente o nome completo do adolescente.
+Gabarito: B
+
+Questão 53
+Uma equipe da Guarda Municipal participou de capacitação sobre as disposições da Lei de Tortura. Durante a atividade, foram analisadas situações envolvendo causas de aumento de pena, efeitos funcionais da condenação, restrições legais relacionadas ao crime e aplicação da lei a fatos ocorridos fora do território nacional. O objetivo era verificar a correta identificação das consequências e regras expressamente estabelecidas pela Lei nº 9.455/1997.
+Com base exclusivamente na Lei Federal nº 9.455/1997, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) A prática do crime de tortura por agente público constitui causa legal de aumento de pena.
+( ) Na condenação por tortura, a perda do cargo, função ou emprego público somente ocorre se o juiz reconhecer e fundamentar separadamente esse efeito.
+( ) O crime de tortura é inafiançável e insuscetível de graça ou anistia.
+( ) A Lei nº 9.455/1997 também se aplica quando o crime não tenha sido cometido em território nacional, sendo a vítima brasileira.
+Considerando as disposições expressamente previstas na Lei nº 9.455/1997, a sequência CORRETA, de cima para baixo, é:
+[A] F, V, F, V.
+[B] F, V, V, F.
+[C] V, F, F, V.
+[D] V, V, F, F.
+[E] V, F, V, V.
+Gabarito: E
+
+Questão 54
+Em fiscalização municipal realizada em área pública, um fiscal determinou a apreensão administrativa de mercadorias nas condições previstas pela legislação local. Guardas municipais acompanhavam a atuação para assegurar sua execução. O responsável pelos objetos, informado da medida, aproximou-se de um dos guardas que auxiliava o fiscal, ameaçou agredi-lo e o empurrou com força para impedir que a apreensão fosse realizada. Apesar da oposição, a equipe conseguiu concluir o ato administrativo. Para fins da questão, considere demonstradas a legalidade da medida executada, a competência do servidor responsável e a utilização consciente de violência e ameaça para impedir sua realização.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A conduta corresponde à desobediência, porque a conclusão do ato administrativo impede o reconhecimento da resistência quando a ordem pública acaba sendo efetivamente executada.
+[B] A conduta não se enquadra na resistência porque a violência foi dirigida ao agente que auxiliava o fiscal, e não diretamente ao responsável formal pela apreensão.
+[C] A conduta corresponde ao desacato, pois violência ou ameaça contra agente público durante fiscalização transforma a oposição ao ato em ofensa funcional à Administração.
+[D] A conduta corresponde à resistência, pois houve oposição à execução de ato legal mediante violência ou ameaça contra agente que prestava auxílio à execução.
+[E] A conduta corresponde à usurpação de função pública, porque o particular tentou substituir a decisão do fiscal por sua própria vontade sobre a apreensão.
+Gabarito: D
+
+Questão 55
+Ao final de uma atividade em parque municipal, dois guardas localizaram um adolescente de quinze anos que corria após uma discussão entre jovens. Nenhuma testemunha atribuiu a ele prática de ato infracional, não havia objeto ilícito em sua posse e tampouco existia ordem escrita da autoridade judiciária determinando sua apreensão. Mesmo assim, um agente sugeriu levá-lo à unidade operacional por algumas horas, exclusivamente para averiguar sua identidade e descobrir se possuía registros anteriores. O adolescente não apresentava risco imediato a si ou a terceiros e forneceu corretamente seus dados pessoais. O comandante da equipe precisa avaliar se a privação de liberdade proposta encontra respaldo no Título VII do Estatuto da Criança e do Adolescente.
+Com base exclusivamente na Lei Federal nº 8.069/1990, considerando apenas seu Título VII e as circunstâncias descritas, assinale a alternativa CORRETA.
+[A] A apreensão configura crime previsto no Estatuto, pois priva o adolescente da liberdade sem flagrante de ato infracional ou ordem escrita da autoridade judiciária.
+[B] A apreensão somente assume relevância criminal quando acompanhada de violência física, não bastando a privação injustificada da liberdade do adolescente.
+[C] A apreensão é admissível como providência preventiva, desde que sua duração seja breve e a família do adolescente seja posteriormente comunicada pela equipe.
+[D] A apreensão é admitida para averiguação quando o adolescente estiver em espaço público e seu comportamento tiver despertado fundada suspeita na equipe.
+[E] A apreensão corresponde a infração administrativa, porque a ausência de flagrante impede a privação da liberdade, mas não configura figura criminal no Estatuto.
+Gabarito: A
+
+Questão 56
+Em três atendimentos independentes, guardas municipais encontraram situações relacionadas à identificação pessoal. No primeiro, um homem apresentou como se fosse seu um documento de identidade autêntico pertencente ao irmão. No segundo, outro indivíduo exibiu carteira de habilitação materialmente falsificada para comprovar identidade, embora não houvesse elementos de que ele próprio tivesse produzido a falsificação. No terceiro, uma pessoa, sem apresentar documento, forneceu deliberadamente nome e dados de terceiro para obter vantagem durante a abordagem. Na capacitação posterior, a equipe precisou distinguir as figuras previstas no capítulo das falsidades documentais e de outras falsidades, evitando tratar como uso de documento falso qualquer forma de informação inverídica sobre identidade.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, associe os fatos às respectivas figuras.
+Coluna 1
+1. Uso de documento falso.
+2. Falsa identidade.
+3. Uso, como próprio, de documento de identidade alheio.
+Coluna 2
+( ) Apresentação de documento autêntico pertencente ao irmão como se fosse próprio.
+( ) Apresentação de carteira de habilitação falsificada para comprovar identidade.
+( ) Fornecimento deliberado de nome e dados de terceiro, sem apresentação documental, para obtenção de vantagem.
+A sequência CORRETA, de cima para baixo, é:
+[A] 3, 1, 2.
+[B] 2, 3, 1.
+[C] 3, 2, 1.
+[D] 2, 1, 3.
+[E] 1, 3, 2.
+Gabarito: A
+
+Questão 57
+No início da noite, um homem aproveitou a distração de frequentadores de uma praça e retirou silenciosamente uma carteira que estava sobre um banco. O proprietário percebeu a subtração logo após o agente se afastar e iniciou perseguição. Ao ser alcançado ainda nas proximidades, o autor sacou uma faca, ameaçou gravemente a vítima e afirmou que a atacaria caso tentasse recuperar a carteira. Em razão da ameaça, conseguiu conservar o objeto e fugir. Para fins da questão, considere comprovado que a subtração inicial ocorreu sem violência ou ameaça e que o emprego da grave ameaça aconteceu imediatamente após a retirada do bem, com o objetivo de assegurar sua posse e evitar a recuperação pela vítima.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A conduta configura furto qualificado, considerando que a faca foi empregada depois da retirada da carteira e durante a fuga do agente.
+[B] A conduta configura roubo na modalidade em que a grave ameaça é empregada logo após a subtração para assegurar a detenção da coisa.
+[C] A conduta configura furto em concurso com ameaça, considerando que a grave ameaça ocorreu após a retirada do bem e durante sua conservação pelo agente.
+[D] A conduta configura furto, pois a grave ameaça empregada após a retirada do bem constitui fato posterior à consumação da subtração.
+[E] A conduta configura extorsão, pois a grave ameaça empregada após a subtração fez com que a vítima tolerasse a permanência do bem em poder do agente.
+Gabarito: B
+
+Questão 58
+Em ônibus que circulava pelo Município, uma passageira pediu auxílio após um homem praticar contra ela, sem consentimento, ato de natureza libidinosa destinado à própria satisfação sexual. Outros passageiros intervieram e a Guarda Municipal foi acionada em um terminal próximo. A apuração inicial não indicou emprego de violência ou grave ameaça nem circunstância que, para fins da questão, caracterizasse crime sexual mais grave. Durante o registro, surgiram dúvidas sobre os elementos necessários à figura de importunação sexual, especialmente quanto à ausência de anuência, à finalidade de satisfação da lascívia e à eventual necessidade de vínculo anterior entre autor e vítima.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) A prática de ato libidinoso contra alguém, sem sua anuência, para satisfação da própria lascívia pode caracterizar importunação sexual.
+( ) A figura exige, como elemento indispensável, emprego de violência física ou grave ameaça contra a vítima.
+( ) A finalidade típica pode consistir também na satisfação da lascívia de terceiro.
+( ) A figura depende de relação afetiva, profissional ou de confiança anteriormente existente entre autor e vítima.
+A sequência CORRETA, de cima para baixo, é:
+[A] V, F, F, V.
+[B] F, F, V, V.
+[C] V, V, F, F.
+[D] V, F, V, F.
+[E] F, V, V, F.
+Gabarito: D
+
+Questão 59
+Após atendimento de ocorrência envolvendo violência doméstica, a equipe da Guarda Municipal recebeu informação de que a vítima pretendia solicitar medidas protetivas de urgência. Na reunião de acompanhamento, foram discutidas medidas que podem obrigar o agressor e a possibilidade de aplicação conjunta ou separada dessas providências. Alguns participantes confundiram as medidas protetivas com efeitos exclusivos de sentença penal definitiva, enquanto outros sustentaram que determinadas providências, como restrição relacionada a armas, podem ser adotadas no próprio regime protetivo. Para fins da questão, devem ser consideradas exclusivamente as medidas atribuídas ao agressor pela Lei Maria da Penha.
+Com base exclusivamente na Lei Federal nº 11.340/2006, sem considerar jurisprudência ou doutrina, analise as assertivas.
+I. As medidas protetivas que obrigam o agressor podem ser aplicadas conjuntamente ou separadamente.
+II. Entre essas medidas estão a suspensão da posse ou a restrição do porte de armas, com a comunicação legalmente prevista.
+III. A proibição de contato pode alcançar a ofendida, mas não seus familiares nem testemunhas da ocorrência.
+IV. A prestação de alimentos provisionais ou provisórios não integra as medidas protetivas que podem ser impostas ao agressor.
+Assinale a alternativa que apresenta apenas as assertivas CORRETAS.
+[A] II, III e IV, apenas.
+[B] I e II, apenas.
+[C] I e III, apenas.
+[D] I, III e IV, apenas.
+[E] II e IV, apenas.
+Gabarito: B
+
+Questão 60
+Em ronda preventiva, uma equipe da Guarda Municipal foi chamada para atender uma mulher ameaçada por seu ex-companheiro. Os dois haviam mantido relacionamento amoroso por aproximadamente dois anos, encontravam-se regularmente e participavam da vida pessoal um do outro, mas nunca residiram na mesma casa e mantiveram domicílios separados durante todo o período. Após o término, o homem passou a comparecer ao local de trabalho da mulher, enviar mensagens intimidatórias e tentar controlar as pessoas com quem ela mantinha contato. Diante da situação, um dos agentes sustentou que a Lei Maria da Penha não poderia ser aplicada porque o casal jamais compartilhou residência.
+Com base exclusivamente na Lei Federal nº 11.340/2006, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A lei não alcança a situação após o término do relacionamento, pois sua incidência depende da permanência atual do vínculo afetivo entre agressor e ofendida.
+[B] A lei alcança a situação apenas se as ameaças ocorrerem dentro da residência da ofendida, pois o local do fato substitui o requisito de coabitação.
+[C] A lei não alcança a situação, pois a relação íntima de afeto somente integra seu âmbito quando agressor e ofendida mantiveram domicílio comum durante o relacionamento.
+[D] A lei pode alcançar a situação, pois a relação íntima de afeto presente ou anterior é contemplada independentemente de ter existido coabitação entre agressor e ofendida.
+[E] A lei pode alcançar a situação desde que os envolvidos tenham filhos em comum, circunstância que substitui a inexistência de residência compartilhada durante o vínculo.
+Gabarito: D
+
+Questão 61
+Em uma discussão na saída de evento municipal, um homem desferiu golpes contra outro com intenção comprovada de causar lesões corporais. A vítima caiu, sofreu complicação decorrente diretamente das agressões e morreu. A investigação técnica concluiu, para fins da questão, que o autor quis produzir a lesão inicialmente causada, mas não desejou a morte e tampouco assumiu o risco de produzi-la. A equipe da Guarda Municipal que realizou o primeiro atendimento utilizou o caso posteriormente em treinamento para diferenciar as figuras previstas no capítulo das lesões corporais daquelas em que o resultado morte é abrangido pelo dolo do agente.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, analise as asserções e a relação proposta entre elas.
+I. Nas circunstâncias apresentadas, o fato corresponde à figura de lesão corporal seguida de morte.
+PORQUE
+II. Essa figura pressupõe resultado morte sem que o agente tenha desejado produzi-lo ou assumido o risco de sua produção.
+Assinale a alternativa CORRETA.
+[A] A asserção I é verdadeira e a asserção II é falsa.
+[B] As asserções I e II são verdadeiras, mas a segunda não justifica corretamente a primeira.
+[C] A asserção I é falsa e a asserção II é verdadeira.
+[D] As asserções I e II são verdadeiras, e a segunda justifica corretamente a primeira.
+[E] As asserções I e II são falsas.
+Gabarito: D
+
+Questão 62
+Uma mulher procurou a Guarda Municipal relatando que possuía medida protetiva judicial contra o ex-companheiro. Durante o atendimento, ficou comprovado que o homem havia violado deliberadamente a proibição determinada pelo juízo. Os agentes discutiram quais regras específicas a Lei Maria da Penha estabelece para o crime de descumprimento da medida, especialmente quanto à competência do juiz que a deferiu, à fiança em situação de flagrante e à coexistência com outras sanções decorrentes do mesmo fato. Para fins da questão, considere válida e vigente a decisão protetiva e limite a análise às disposições expressas da própria Lei Maria da Penha.
+Com base exclusivamente na Lei Federal nº 11.340/2006, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) A configuração do crime independe de a medida ter sido deferida por juiz com competência civil ou criminal.
+( ) Em caso de prisão em flagrante pelo descumprimento, a autoridade policial pode conceder fiança quando entender suficiente a medida.
+( ) A incidência do crime de descumprimento exclui a aplicação de outras sanções cabíveis ao mesmo fato.
+( ) O descumprimento de decisão judicial que defere medida protetiva de urgência possui figura criminal própria na Lei Maria da Penha.
+A sequência CORRETA, de cima para baixo, é:
+[A] V, F, F, V.
+[B] F, F, V, V.
+[C] V, V, F, F.
+[D] F, V, V, F.
+[E] V, F, V, F.
+Gabarito: A
+
+Questão 63
+Em curso de formação continuada, foram apresentados quatro casos independentes envolvendo autores de fatos definidos como crime. No primeiro, o autor possuía dezessete anos na data do fato. No segundo, um adulto afirmou ter agido sob forte emoção provocada por conflito pessoal. No terceiro, um adulto havia ingerido voluntariamente grande quantidade de bebida alcoólica antes de agir. No quarto, ficou comprovado que intoxicação completa, decorrente de evento acidental imprevisível, tornou o agente inteiramente incapaz de compreender o caráter ilícito de sua conduta ou de determinar-se conforme esse entendimento. A equipe deve analisar as consequências exclusivamente segundo as regras de imputabilidade do Código Penal, sem acrescentar circunstâncias não informadas.
+Com base exclusivamente no Decreto-Lei nº 2.848/1940, Código Penal, sem considerar jurisprudência ou doutrina, julgue as afirmações como Verdadeiras (V) ou Falsas (F).
+( ) O autor de dezessete anos é penalmente inimputável e fica sujeito à legislação especial.
+( ) A emoção intensa, por si, exclui a imputabilidade penal do agente adulto.
+( ) A embriaguez voluntária pelo álcool exclui a imputabilidade quando o agente se encontra completamente embriagado no momento do fato.
+( ) A embriaguez completa proveniente de caso fortuito ou força maior pode isentar de pena quando houver inteira incapacidade no momento do fato.
+A sequência CORRETA, de cima para baixo, é:
+[A] V, F, F, V.
+[B] V, F, V, F.
+[C] F, V, F, V.
+[D] F, F, V, V.
+[E] V, V, F, F.
+Gabarito: A
+
+Questão 64
+Após a contenção de um homem surpreendido em flagrante por crime patrimonial, guardas municipais aguardavam a chegada da autoridade responsável pela continuidade da ocorrência. Um dos agentes acreditava que o preso sabia onde estavam outros bens subtraídos e, para obrigá-lo a revelar o local, passou a ameaçá-lo gravemente e a agredi-lo, causando sofrimento físico. Os demais elementos do caso demonstraram que a finalidade da violência era obter informação diretamente do custodiado. Não se discute a legalidade da captura inicial nem eventual responsabilidade por outros fatos, devendo a análise ficar limitada à Lei de Tortura e à circunstância de o autor ser agente público.
+Com base exclusivamente na Lei Federal nº 9.455/1997, sem considerar jurisprudência ou doutrina, assinale a alternativa CORRETA.
+[A] A conduta corresponde à forma omissiva de tortura, pois a obtenção de informação de pessoa presa é juridicamente atribuída à autoridade que conduz a investigação.
+[B] A conduta enquadra-se na hipótese destinada a pessoa presa submetida a ato não previsto em lei, afastando a finalidade específica de obtenção de informação.
+[C] A conduta corresponde à tortura-castigo, porque a condição de pessoa custodiada transforma a finalidade de obtenção de informação em finalidade disciplinar.
+[D] A conduta não integra a Lei de Tortura porque a vítima foi legalmente capturada, circunstância que autoriza emprego coercitivo para localização dos bens subtraídos.
+[E] A conduta corresponde à tortura destinada à obtenção de informação ou declaração, incidindo também a causa de aumento prevista para crime cometido por agente público.
+Gabarito: E
+
+Questão 65
+Durante processo seletivo promovido por uma empresa privada, o responsável pelo recrutamento estabeleceu, como requisito para participação, características de aparência associadas a determinada etnia. O emprego oferecido envolvia atividades de atendimento ao público que não apresentavam particularidade técnica, artística ou funcional capaz de justificar essa exigência. A condição foi identificada ainda na etapa de recrutamento, antes de qualquer decisão individual de contratação.
+Considerando especificamente o disposto no art. 4º, § 2º, da Lei Federal nº 7.716/1989 para exigências dessa natureza em anúncios ou outras formas de recrutamento de trabalhadores, assinale a alternativa CORRETA.
+[A] A conduta sujeita o responsável às penas de multa e prestação de serviços à comunidade, incluindo atividades de promoção da igualdade racial.
+[B] A conduta sujeita o responsável à pena de reclusão prevista para a negativa ou o obstáculo ao emprego em empresa privada.
+[C] A conduta recebe o tratamento penal destinado à discriminação praticada por meio de comunicação, em razão da divulgação do requisito aos candidatos.
+[D] A responsabilização ocorre quando a exigência discriminatória resulta posteriormente na recusa de contratação de candidato submetido ao processo seletivo.
+[E] A conduta sujeita o responsável à pena aplicável ao impedimento de acesso a cargo da Administração Pública por motivo discriminatório.
+Gabarito: A
