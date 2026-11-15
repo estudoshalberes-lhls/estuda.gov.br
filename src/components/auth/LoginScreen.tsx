@@ -185,17 +185,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
 
         {/* Sub-barra limpa estilo gov.br com a marca MEC/estuda.gov.br */}
         <div className="w-full bg-[var(--panel)] border-b border-[var(--line)] shadow-[0_1px_4px_rgba(7,29,65,0.05)]">
-          <div className="max-w-[1180px] mx-auto px-5 sm:px-8 h-[56px] flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3 min-w-0">
-              <span className="inline-flex items-center justify-center rounded-md bg-white px-2 py-1 border border-[var(--line)] shrink-0">
+          <div className="max-w-[1180px] mx-auto px-3 sm:px-8 min-h-[54px] py-2 flex items-center justify-between gap-2.5 sm:gap-4">
+            <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+              <span className="inline-flex items-center justify-center rounded-md bg-white px-1.5 sm:px-2 py-1 border border-[var(--line)] shrink-0">
                 <img
                   src="/assets/aistudio/MEC-GOV-2025-Positivo-Horizontal_0f35c2cb.png"
                   alt="Ministério da Educação · Governo do Brasil"
-                  className="h-7 w-auto object-contain"
+                  className="h-5 sm:h-7 w-auto object-contain"
                 />
               </span>
               <div className="flex items-baseline gap-2 min-w-0">
-                <span className="font-display text-[17px] font-extrabold tracking-[-0.02em] text-[var(--text)] whitespace-nowrap">
+                <span className="font-display text-[15px] sm:text-[17px] font-extrabold tracking-[-0.02em] text-[var(--text)] truncate">
                   estuda.gov.br
                 </span>
                 <span className="hidden md:inline text-[11.5px] font-medium text-[var(--muted)] truncate">
@@ -204,7 +204,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               </div>
             </div>
 
-            <span className="font-mono-num text-[11px] font-semibold text-[var(--accent)] whitespace-nowrap shrink-0">
+            <span className="hidden sm:inline font-mono-num text-[11px] font-semibold text-[var(--accent)] whitespace-nowrap shrink-0">
               Atendimento 24h
             </span>
           </div>

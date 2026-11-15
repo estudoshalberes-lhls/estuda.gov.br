@@ -38,7 +38,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ variant = 't
           onClick={() => void handleAction()}
           aria-label={isIOS ? 'Instalar no iPhone / iPad' : 'Instalar aplicativo no celular'}
           title={isIOS ? 'Instalar no iPhone / iPad' : 'Instalar aplicativo (PWA)'}
-          className="inline-flex items-center gap-1.5 h-10 px-2.5 sm:px-3 rounded-xl border border-[#1351B4]/40 bg-[#1351B4]/10 text-[#1351B4] dark:text-[#60A5FA] hover:bg-[#1351B4] hover:text-white text-[11px] font-bold transition-colors shrink-0 whitespace-nowrap cursor-pointer"
+          className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3 rounded-xl border border-[#1351B4]/40 bg-[#1351B4]/10 text-[#1351B4] dark:text-[#60A5FA] hover:bg-[#1351B4] hover:text-white text-[11px] font-bold transition-colors shrink-0 whitespace-nowrap cursor-pointer"
         >
           <Smartphone className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
           <span className="hidden sm:inline">{isIOS ? 'Instalar no iOS' : 'Instalar App'}</span>

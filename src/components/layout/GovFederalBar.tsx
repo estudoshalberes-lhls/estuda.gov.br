@@ -67,8 +67,8 @@ export const GovFederalBar: React.FC<GovFederalBarProps> = ({ insideApp = false 
 
   return (
     <div className="w-full bg-[#071D41] text-white shrink-0">
-      <div className="max-w-[1440px] mx-auto px-4 sm:px-7 min-h-[34px] py-1.5 flex items-center justify-between gap-4 text-[11px]">
-        <div className="flex items-center gap-2.5 min-w-0">
+      <div className="max-w-[1440px] mx-auto px-3 sm:px-7 min-h-[34px] py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-[11px]">
+        <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
           <span className="inline-flex items-center gap-1.5 font-display font-extrabold tracking-[0.06em] uppercase whitespace-nowrap shrink-0">
             <svg
               viewBox="0 0 24 16"
@@ -84,12 +84,15 @@ export const GovFederalBar: React.FC<GovFederalBarProps> = ({ insideApp = false 
           <span className="text-white/40 hidden sm:inline" aria-hidden="true">
             |
           </span>
-          <span className="text-white/85 font-medium truncate hidden sm:inline">
+          <span className="text-white/85 font-medium truncate hidden md:inline">
             Ministério da Aprovação, Café Forte e Madrugadas
           </span>
         </div>
 
-        <nav className="flex items-center gap-3 sm:gap-4 shrink-0" aria-label="Atalhos institucionais e acessibilidade">
+        <nav
+          className="flex flex-wrap items-center justify-end gap-x-2.5 sm:gap-x-4 gap-y-1 min-w-0 max-w-full"
+          aria-label="Atalhos institucionais e acessibilidade"
+        >
           {insideApp &&
             GOV_BAR_LINKS.map((item) => (
               <button
@@ -114,7 +117,7 @@ export const GovFederalBar: React.FC<GovFederalBarProps> = ({ insideApp = false 
           </a>
 
           <div
-            className="inline-flex items-center gap-1 border-l border-r border-white/20 px-2.5 shrink-0"
+            className="inline-flex items-center gap-1 border-l border-white/20 pl-2 sm:border-r sm:px-2.5 shrink-0"
             role="group"
             aria-label="Tamanho do texto"
           >

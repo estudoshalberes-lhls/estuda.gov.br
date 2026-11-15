@@ -162,14 +162,14 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
   };
 
   return (
-    <header className="sticky top-0 z-30 flex items-center justify-between flex-wrap xl:flex-nowrap gap-2.5 px-4 py-2 border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
+    <header className="sticky top-0 z-30 flex items-center justify-between flex-wrap xl:flex-nowrap gap-2 sm:gap-2.5 px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
       {/* Menu + Título */}
-      <div className="flex items-center gap-2 min-w-0 shrink-0 h-10">
+      <div className="flex items-center gap-2 min-w-0 shrink-0 h-9 sm:h-10">
         <button
           type="button"
           onClick={() => setMobileOpen(true)}
           aria-label="Abrir menu"
-          className="mobile-menu-btn w-10 h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 grid place-items-center"
+          className="mobile-menu-btn w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 grid place-items-center"
         >
           <Menu className="w-4 h-4" />
         </button>
@@ -186,7 +186,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
       </div>
 
       {/* Busca Geral */}
-      <div className="flex-1 min-w-[170px] max-w-[300px] h-10 flex items-center">
+      <div className="flex-1 min-w-[110px] sm:min-w-[170px] max-w-[300px] h-9 sm:h-10 flex items-center">
         <GlobalSearch />
       </div>
 
@@ -346,7 +346,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
       {/* Relógio, Cronômetro e Ações */}
       <div
         ref={linkPopoverRef}
-        className="relative flex items-center gap-2.5 h-10 px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] shrink-0"
+        className="relative flex items-center justify-between sm:justify-start w-full sm:w-auto gap-1.5 sm:gap-2.5 min-h-10 px-2 sm:px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] shrink-0"
         aria-label="Cronômetro"
       >
         <div className="hidden xl:flex flex-col justify-center leading-none pr-2.5 border-r border-[var(--line)] h-7">
@@ -387,7 +387,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
           </strong>
         </div>
 
-        <div className="flex items-center gap-1.5 pl-2.5 border-l border-[var(--line)] h-7 shrink-0">
+        <div className="flex items-center gap-1 sm:gap-1.5 pl-2 sm:pl-2.5 border-l border-[var(--line)] h-7 shrink-0">
           <button
             type="button"
             onClick={cyclePomodoroMode}
@@ -543,7 +543,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
       </div>
 
       {/* Ícones Minimalistas: Instalar PWA, Status Pasta Local, Status Drive, Google e Tela Inicial */}
-      <div className="flex items-center gap-1.5 h-10 shrink-0">
+      <div className="flex items-center gap-1 sm:gap-1.5 h-9 sm:h-10 shrink-0">
         <PWAInstallButton variant="topbar" />
         {localFolderConnected && (
           <button
@@ -555,7 +555,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
                 ? `Pasta local ativa: "${localFolderName}" · Leitura e salvamento automático no computador`
                 : `Pasta local carregada: "${localFolderName}" · Salvando automaticamente no navegador`
             }
-            className="inline-flex items-center gap-1.5 h-10 px-2.5 rounded-xl border border-[var(--good)]/45 bg-[var(--good)]/10 text-[var(--good)] text-[11px] font-bold hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--good)]/45 bg-[var(--good)]/10 text-[var(--good)] text-[11px] font-bold hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap"
           >
             <HardDrive className={`w-3.5 h-3.5 shrink-0 ${isSyncingLocalFolder ? 'animate-pulse' : ''}`} />
             <span className="hidden sm:inline max-w-[110px] truncate">{localFolderName}</span>
@@ -569,7 +569,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             disabled={isSyncingDrive}
             aria-label="Autorizar pasta do Google Drive"
             title={`Autorizar acesso aos backups da pasta "${drivePermissionNeedsPicker.folderName}" no Google Drive`}
-            className="inline-flex items-center gap-1.5 h-10 px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
           >
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">Autorizar Drive</span>
@@ -581,7 +581,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             disabled={isSyncingDrive}
             aria-label="Reconectar Google Drive"
             title="Permissão temporária do Drive expirou — clique para reconectar e salvar alterações"
-            className="inline-flex items-center gap-1.5 h-10 px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
           >
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">Reconectar</span>
@@ -596,7 +596,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
                 ? 'Sincronizando alterações locais com o Google Drive…'
                 : 'Alterações salvas localmente aguardando conexão com o Google Drive'
             }
-            className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0"
+            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
           </button>
@@ -619,7 +619,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
                 ? `Sincronizando (${googleUser?.email || ''})…`
                 : `Sincronizado (${googleUser?.email || ''}) — Clique para sair`
             }
-            className={`relative grid place-items-center w-10 h-10 rounded-xl border transition-colors shrink-0 ${
+            className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 ${
               drivePermissionNeedsPicker || !driveTokenReady
                 ? 'border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
                 : 'border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
@@ -633,7 +633,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             onClick={() => void connectGoogleDrive()}
             aria-label="Entrar com Google"
             title="Entrar com Google"
-            className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
+            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
           >
             <svg className="w-4 h-4" viewBox="0 0 48 48">
               <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
@@ -650,7 +650,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             onClick={onExitToLogin}
             aria-label="Tela Inicial"
             title="Tela Inicial"
-            className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
+            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
           >
             <Home className="w-4 h-4" />
           </button>
