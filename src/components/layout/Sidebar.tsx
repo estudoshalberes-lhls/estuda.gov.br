@@ -85,7 +85,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
           setActivePage('Início');
           setMobileOpen(false);
         }}
-        className="brand flex flex-col items-start gap-2 w-full text-left px-2 py-2 mb-2.5 rounded-xl border border-transparent hover:border-[var(--line)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
+        className="brand shrink-0 flex flex-col items-start gap-2 w-full text-left px-2 py-2 mb-2.5 rounded-xl border border-transparent hover:border-[var(--line)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
         aria-label="estuda.gov.br — ir para Início"
       >
         <span className="brand-mark-mec inline-flex items-center justify-center rounded-xl border border-[var(--line-strong)] bg-white px-2.5 py-1.5 shadow-xs shrink-0 max-w-full overflow-hidden">
@@ -105,7 +105,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
         </span>
       </button>
 
-      <div className="sidebar-timer rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3 mb-2.5">
+      <div className="sidebar-timer shrink-0 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3 mb-2.5">
         <div className="flex items-center justify-between text-[10px] font-bold tracking-[0.06em] text-[var(--muted)] uppercase mb-1">
           <span>Ponto Eletrônico</span>
           {timerRunning && (
@@ -219,7 +219,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
         ))}
       </nav>
 
-      <div className="pt-2 mt-1 border-t border-[var(--line)]">
+      <div className="shrink-0 pt-2 mt-1 border-t border-[var(--line)]">
         <button
           type="button"
           onClick={() => {
