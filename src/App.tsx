@@ -9,6 +9,7 @@ import { MobileTimerFloat } from './components/layout/MobileTimerFloat';
 import { ConfirmDialog } from './components/ui/ConfirmDialog';
 import { ToastRegion } from './components/ui/ToastRegion';
 import { BackToTopButton } from './components/ui/BackToTopButton';
+import { OfflineIndicator } from './components/ui/OfflineIndicator';
 import { ModuleName } from './types/study';
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
@@ -229,6 +230,7 @@ const MainApp: React.FC = () => {
       )}
       <ConfirmDialog />
       <ToastRegion />
+      <OfflineIndicator />
     </>
   );
 };

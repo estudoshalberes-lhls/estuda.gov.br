@@ -16,6 +16,7 @@ import firebaseConfig from '../../../firebase-applet-config.json';
 import { useStudy } from '../../context/StudyContext';
 import { CANONICAL_LOCAL_SUBFOLDERS, getLocalCategoryList } from '../../lib/localFolderSync';
 import { GovFederalBar } from '../layout/GovFederalBar';
+import { PWAInstallButton } from '../ui/PWAInstallButton';
 
 interface LoginScreenProps {
   onContinueOffline: () => void;
@@ -517,6 +518,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   <ArrowRight className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
                   <span>Entrar direto no navegador (sem cadastro)</span>
                 </button>
+              </div>
+
+              <div className="mt-3">
+                <PWAInstallButton variant="login" />
               </div>
             </div>
 

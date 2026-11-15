@@ -4,6 +4,7 @@ import { useStudy } from '../../context/StudyContext';
 import { formatClock } from '../../lib/parsers';
 import { ModuleName } from '../../types/study';
 import { ModuleIcon } from '../ui/ModuleIcon';
+import { PWAInstallButton } from '../ui/PWAInstallButton';
 
 interface NavGroup {
   label: string;
@@ -242,6 +243,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
           </span>
           <span className="nav-label truncate">{getGovModuleLabel('Configurações')}</span>
         </button>
+
+        <PWAInstallButton variant="sidebar" />
 
         {/* Account / Auth Session Card */}
         <div className="sidebar-account mt-2.5 p-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] flex items-center justify-between gap-2">

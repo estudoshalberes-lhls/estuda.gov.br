@@ -20,6 +20,7 @@ import { WEEKDAYS, formatClock, formatScheduleDuration, visibleName } from '../.
 import { ModuleName, WeekdayName } from '../../types/study';
 import { GlobalSearch } from './GlobalSearch';
 import { ModuleIcon } from '../ui/ModuleIcon';
+import { PWAInstallButton } from '../ui/PWAInstallButton';
 
 interface TopbarProps {
   onExitToLogin?: () => void;
@@ -541,8 +542,9 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
         )}
       </div>
 
-      {/* Ícones Minimalistas: Status Pasta Local, Status Drive, Google e Tela Inicial */}
+      {/* Ícones Minimalistas: Instalar PWA, Status Pasta Local, Status Drive, Google e Tela Inicial */}
       <div className="flex items-center gap-1.5 h-10 shrink-0">
+        <PWAInstallButton variant="topbar" />
         {localFolderConnected && (
           <button
             type="button"
