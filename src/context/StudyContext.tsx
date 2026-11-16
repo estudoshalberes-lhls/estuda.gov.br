@@ -1544,6 +1544,8 @@ async function restoreFilesAndOrphansFromDriveList(
     onlyFileIds?: string[];
     forceModule?: 'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries';
     skipTargetDbBlobs?: boolean;
+    lazyBinaryBlobs?: boolean;
+    knownSyncedFileIds?: Set<string>;
     localFileMap?: Map<string, File>;
   },
 ): Promise<{
@@ -1616,13 +1618,27 @@ async function restoreFilesAndOrphansFromDriveList(
     );
   };
 
+  const skipBlobDownload = Boolean(options?.skipTargetDbBlobs || options?.lazyBinaryBlobs);
+  const dbAlreadyHydrated = !isUntouchedSeedDatabase(targetDb);
+  const knownSyncedIds = options?.knownSyncedFileIds;
+  const shouldInspectDriveTxtOnAuth = (df: DriveFileInfo) => {
+    if (!options?.lazyBinaryBlobs) return true;
+    if (!dbAlreadyHydrated) return true;
+    if (knownSyncedIds && knownSyncedIds.size > 0) {
+      return !knownSyncedIds.has(df.id);
+    }
+    return false;
+  };
+
   const estimatedTotal = Math.max(
     1,
-    Object.values(targetDb.pdfFolders || {}).reduce((s, list) => s + list.length, 0) +
-      Object.values(targetDb.summaryFolders || {}).reduce((s, list) => s + list.length, 0) +
-      Object.values(targetDb.laws || {}).reduce((s, f) => s + (f.pdfs?.length || 0), 0) +
-      (targetDb.proofFiles?.length || 0) +
-      (targetDb.essays?.length || 0) +
+    (skipBlobDownload
+      ? 0
+      : Object.values(targetDb.pdfFolders || {}).reduce((s, list) => s + list.length, 0) +
+        Object.values(targetDb.summaryFolders || {}).reduce((s, list) => s + list.length, 0) +
+        Object.values(targetDb.laws || {}).reduce((s, f) => s + (f.pdfs?.length || 0), 0) +
+        (targetDb.proofFiles?.length || 0) +
+        (targetDb.essays?.length || 0)) +
       driveFiles.filter((df) => !isBackupFile(df) && isSupportedRestorableStudyFile(df)).length,
   );
   let processedSteps = 0;
@@ -1651,6 +1667,13 @@ async function restoreFilesAndOrphansFromDriveList(
     }
     if (match) matchedDriveFileIds.add(match.id);
 
+    // When lazyBinaryBlobs or skipTargetDbBlobs is enabled (e.g. instant login hydration),
+    // we register the file in knownFileNames/matchedDriveFileIds and skip downloading the binary blob.
+    // The PDF/file binary will be downloaded on-demand via recoverFileFromDrive only when the user opens it.
+    if (skipBlobDownload) {
+      return;
+    }
+
     const existing = await getFileBlob(blobKey, scope);
     if (existing && existing.size > 0) {
       emitProgress(candidates[0] || 'Arquivo local verificado');
@@ -1676,74 +1699,73 @@ async function restoreFilesAndOrphansFromDriveList(
     }
   };
 
-  if (!options?.skipTargetDbBlobs) {
-    // 1. PDFs Pessoais
-    for (const files of Object.values(targetDb.pdfFolders || {})) {
-      for (const f of files) {
-        await tryRestoreBlob(f.blobKey, [f.name, f.blobKey, `${f.blobKey}.pdf`], 'application/pdf');
-      }
+  // Always index known files from targetDb (and download blobs only if skipBlobDownload is false)
+  // 1. PDFs Pessoais
+  for (const files of Object.values(targetDb.pdfFolders || {})) {
+    for (const f of files) {
+      await tryRestoreBlob(f.blobKey, [f.name, f.blobKey, `${f.blobKey}.pdf`], 'application/pdf');
     }
+  }
 
-    // 2. Resumos e Mapas
-    for (const files of Object.values(targetDb.summaryFolders || {})) {
-      for (const s of files) {
-        await tryRestoreBlob(
-          s.blobKey,
-          [`RESUMO - ${s.name}`, s.name, s.blobKey, `${s.blobKey}.pdf`],
-          s.mimeType,
-        );
-      }
+  // 2. Resumos e Mapas
+  for (const files of Object.values(targetDb.summaryFolders || {})) {
+    for (const s of files) {
+      await tryRestoreBlob(
+        s.blobKey,
+        [`RESUMO - ${s.name}`, s.name, s.blobKey, `${s.blobKey}.pdf`],
+        s.mimeType,
+      );
     }
+  }
 
-    // 3. Lei Seca PDFs/TXT
-    for (const folder of Object.values(targetDb.laws || {})) {
-      for (const pdf of folder.pdfs || []) {
-        const lowerName = (pdf.name || '').toLowerCase();
-        const hint =
-          lowerName.endsWith('.txt') || lowerName.endsWith('.md')
-            ? 'text/plain'
-            : 'application/pdf';
-        await tryRestoreBlob(
-          pdf.blobKey,
-          [`LEI - ${pdf.name}`, pdf.name, pdf.blobKey, `${pdf.blobKey}.pdf`],
-          hint,
-        );
-      }
-    }
-
-    // 4. Provas e Gabaritos
-    for (const pf of targetDb.proofFiles || []) {
-      const lowerProof = (pf.name || '').toLowerCase();
-      const proofMimeHint =
-        lowerProof.endsWith('.txt') || lowerProof.endsWith('.md')
+  // 3. Lei Seca PDFs/TXT
+  for (const folder of Object.values(targetDb.laws || {})) {
+    for (const pdf of folder.pdfs || []) {
+      const lowerName = (pdf.name || '').toLowerCase();
+      const hint =
+        lowerName.endsWith('.txt') || lowerName.endsWith('.md')
           ? 'text/plain'
           : 'application/pdf';
       await tryRestoreBlob(
-        pf.blobKey,
-        [`PROVA - ${pf.name}`, pf.name, pf.blobKey, `${pf.blobKey}.pdf`],
-        proofMimeHint,
+        pdf.blobKey,
+        [`LEI - ${pdf.name}`, pdf.name, pdf.blobKey, `${pdf.blobKey}.pdf`],
+        hint,
       );
-      if (pf.gabarito_arquivo) {
-        knownFileNames.add(normalizeFileLookup(`GABARITO - ${pf.gabarito_arquivo}`));
-        knownFileNames.add(normalizeFileLookup(pf.gabarito_arquivo));
-      }
-      knownFileNames.add(normalizeFileLookup(`${pf.name}.gabarito.txt`));
     }
+  }
 
-    // 5. Discursivas
-    for (const e of targetDb.essays || []) {
+  // 4. Provas e Gabaritos
+  for (const pf of targetDb.proofFiles || []) {
+    const lowerProof = (pf.name || '').toLowerCase();
+    const proofMimeHint =
+      lowerProof.endsWith('.txt') || lowerProof.endsWith('.md')
+        ? 'text/plain'
+        : 'application/pdf';
+    await tryRestoreBlob(
+      pf.blobKey,
+      [`PROVA - ${pf.name}`, pf.name, pf.blobKey, `${pf.blobKey}.pdf`],
+      proofMimeHint,
+    );
+    if (pf.gabarito_arquivo) {
+      knownFileNames.add(normalizeFileLookup(`GABARITO - ${pf.gabarito_arquivo}`));
+      knownFileNames.add(normalizeFileLookup(pf.gabarito_arquivo));
+    }
+    knownFileNames.add(normalizeFileLookup(`${pf.name}.gabarito.txt`));
+  }
+
+  // 5. Discursivas
+  for (const e of targetDb.essays || []) {
+    await tryRestoreBlob(
+      e.original_blobKey,
+      [`DISCURSIVA - ${e.original_arquivo}`, e.original_arquivo, e.original_blobKey, `${e.original_blobKey}.pdf`],
+      e.original_mime,
+    );
+    if (e.corrigido_blobKey && e.corrigido_arquivo) {
       await tryRestoreBlob(
-        e.original_blobKey,
-        [`DISCURSIVA - ${e.original_arquivo}`, e.original_arquivo, e.original_blobKey, `${e.original_blobKey}.pdf`],
-        e.original_mime,
+        e.corrigido_blobKey,
+        [`CORRECAO - ${e.corrigido_arquivo}`, e.corrigido_arquivo, e.corrigido_blobKey, `${e.corrigido_blobKey}.pdf`],
+        e.corrigido_mime,
       );
-      if (e.corrigido_blobKey && e.corrigido_arquivo) {
-        await tryRestoreBlob(
-          e.corrigido_blobKey,
-          [`CORRECAO - ${e.corrigido_arquivo}`, e.corrigido_arquivo, e.corrigido_blobKey, `${e.corrigido_blobKey}.pdf`],
-          e.corrigido_mime,
-        );
-      }
     }
   }
 
@@ -1828,6 +1850,7 @@ async function restoreFilesAndOrphansFromDriveList(
     if (isBackupFile(df)) return false;
     if (!isSupportedRestorableStudyFile(df)) return false;
     if (isGabaritoFilename(df.name)) return false;
+    if (options?.lazyBinaryBlobs && dbAlreadyHydrated && knownSyncedIds?.has(df.id)) return false;
 
     const normName = normalizeFileLookup(df.name);
     const normStripped = normalizeFileLookup(stripDrivePrefix(df.name));
@@ -1866,20 +1889,11 @@ async function restoreFilesAndOrphansFromDriveList(
       if (isGabaritoFilename(df.name)) continue;
 
       try {
-        emitProgress(`Importando ${stripDrivePrefix(df.name) || df.name}`);
-        const localFile = options?.localFileMap?.get(df.id);
-        const blob =
-          localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
-        if (!blob) continue;
-        const blobKey = options?.localFileMap ? `local_${uid(14)}` : `drive_${df.id}`;
-        await saveFileBlob(blobKey, blob, scope);
         let cleanName = stripDrivePrefix(df.name) || df.name;
         if (df.mimeType === 'application/vnd.google-apps.document' && !cleanName.toLowerCase().endsWith('.pdf')) {
           cleanName = `${cleanName}.pdf`;
         }
-        const sizeNum = Number(df.size || blob.size || 0);
         const isTxtOrMd = /\.(txt|md)$/i.test(cleanName);
-
         const isLaw =
           forced === 'laws' ||
           (forced === 'auto' && (df.subfolderName === 'Lei Seca' || /^LEI\s*-\s*/i.test(df.name)));
@@ -1891,6 +1905,22 @@ async function restoreFilesAndOrphansFromDriveList(
           (forced === 'auto' && (df.subfolderName === 'Resumos e Mapas' || /^RESUMO\s*-\s*/i.test(df.name)));
         const isEssay =
           forced === 'auto' && (df.subfolderName === 'Discursivas' || /^DISCURSIVA\s*-\s*/i.test(df.name));
+
+        // When lazyBinaryBlobs is active, binary PDFs/images are cataloged by metadata without downloading the file blob on login
+        const needsBlobForParsing = isTxtOrMd || isLaw;
+        let blob: Blob | null = null;
+        if (!options?.lazyBinaryBlobs || needsBlobForParsing) {
+          emitProgress(`Importando ${cleanName}`);
+          const localFile = options?.localFileMap?.get(df.id);
+          blob =
+            localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
+          if (!blob) continue;
+        }
+        const blobKey = options?.localFileMap ? `local_${uid(14)}` : `drive_${df.id}`;
+        if (blob) {
+          await saveFileBlob(blobKey, blob, scope);
+        }
+        const sizeNum = Number(df.size || blob?.size || 0);
 
         const registerTxtProofAndSim = async (
           fileText: string,
@@ -1970,11 +2000,13 @@ async function restoreFilesAndOrphansFromDriveList(
           const existingFolder = nextLaws[folderKey] || { name: folderKey, items: [], pdfs: [] };
 
           let parsedItems: LawItem[] = [];
-          try {
-            const extractedText = await readStudyBlobText(blob, cleanName, df.mimeType);
-            parsedItems = parseLawTextToItems(cleanName, extractedText);
-          } catch (parseErr) {
-            console.warn(`Não foi possível extrair dispositivos automaticamente de "${cleanName}":`, parseErr);
+          if (blob) {
+            try {
+              const extractedText = await readStudyBlobText(blob, cleanName, df.mimeType);
+              parsedItems = parseLawTextToItems(cleanName, extractedText);
+            } catch (parseErr) {
+              console.warn(`Não foi possível extrair dispositivos automaticamente de "${cleanName}":`, parseErr);
+            }
           }
 
           const hasPdfAlready = existingFolder.pdfs.some(
@@ -2009,11 +2041,11 @@ async function restoreFilesAndOrphansFromDriveList(
             ? `Arquivo importado da pasta local (${df.folderPath || 'Pasta Local'}).`
             : `Arquivo restaurado do Google Drive (${df.folderPath || 'Drive'}).`;
 
-          if (isTxtOrMd) {
+          if (isTxtOrMd && blob) {
             const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
             await registerTxtProofAndSim(txt, bankName, sourceLabel);
           } else {
-            const paired = await readPairedGabarito(cleanName);
+            const paired = options?.lazyBinaryBlobs ? null : await readPairedGabarito(cleanName);
             const gabaritoQuestoes = paired ? Object.keys(paired.answers).length : 0;
             nextProofFiles.unshift({
               id: uid(10),
@@ -2041,7 +2073,7 @@ async function restoreFilesAndOrphansFromDriveList(
               id: uid(10),
               name: cleanName,
               size: sizeNum,
-              mimeType: blob.type || df.mimeType || 'application/pdf',
+              mimeType: blob?.type || df.mimeType || 'application/pdf',
               blobKey,
               createdAt: nowIso,
             },
@@ -2055,14 +2087,14 @@ async function restoreFilesAndOrphansFromDriveList(
             created_at: new Date().toISOString().slice(0, 19),
             original_arquivo: cleanName,
             original_blobKey: blobKey,
-            original_mime: blob.type || df.mimeType || 'application/pdf',
+            original_mime: blob?.type || df.mimeType || 'application/pdf',
             corrigido_arquivo: '',
             feedback: options?.localFileMap
               ? 'Recuperada automaticamente da pasta local.'
               : 'Recuperada automaticamente do Google Drive.',
           });
           orphansImported += 1;
-        } else if (isTxtOrMd && forced === 'auto') {
+        } else if (isTxtOrMd && forced === 'auto' && blob) {
           // Inspect text files outside canonical folders before misfiling into Personal PDFs
           const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
           const paired = await readPairedGabarito(cleanName);
@@ -2145,7 +2177,7 @@ async function restoreFilesAndOrphansFromDriveList(
   }
 
   // 6b. Pair companion gabarito files & extract .txt gabaritos for existing ProofFileRecords missing a gabarito
-  if ((nextDb.proofFiles || []).length > 0) {
+  if (!options?.lazyBinaryBlobs && (nextDb.proofFiles || []).length > 0) {
     let proofsPatched = false;
     const patchedProofs = [...nextDb.proofFiles];
     for (let i = 0; i < patchedProofs.length; i++) {
@@ -2204,7 +2236,7 @@ async function restoreFilesAndOrphansFromDriveList(
 
   // 8. Recover weekly schedule TXT files from 'Cronogramas' and contests/editais TXT files from 'Datas e Locais' & 'Editais'
   const scheduleTxtDriveFiles = driveFiles.filter((df) => {
-    if (!inSelectedFolder(df) || isBackupFile(df)) return false;
+    if (!inSelectedFolder(df) || isBackupFile(df) || !shouldInspectDriveTxtOnAuth(df)) return false;
     const lower = df.name.toLowerCase();
     if (!lower.endsWith('.txt')) return false;
     return df.subfolderName === 'Cronogramas' || /^CRONOGRAMA\s*-\s*/i.test(df.name);
@@ -2270,7 +2302,7 @@ async function restoreFilesAndOrphansFromDriveList(
   }
 
   const contestAndEditalTxtFiles = driveFiles.filter((df) => {
-    if (!inSelectedFolder(df) || isBackupFile(df)) return false;
+    if (!inSelectedFolder(df) || isBackupFile(df) || !shouldInspectDriveTxtOnAuth(df)) return false;
     const lower = df.name.toLowerCase();
     if (!lower.endsWith('.txt')) return false;
     return (
@@ -2361,7 +2393,7 @@ async function restoreFilesAndOrphansFromDriveList(
 
   // 9. Recover question & .txt exam files from 'Questões' / 'Simulados' / 'Provas e Gabaritos'
   const questionOrExamTxtFiles = driveFiles.filter((df) => {
-    if (!inSelectedFolder(df) || isBackupFile(df)) return false;
+    if (!inSelectedFolder(df) || isBackupFile(df) || !shouldInspectDriveTxtOnAuth(df)) return false;
     if (isGabaritoFilename(df.name)) return false;
     const lower = df.name.toLowerCase();
     if (!lower.endsWith('.txt') && !lower.endsWith('.md')) return false;
@@ -3290,8 +3322,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
           const folderWritable = await verifyDriveFolderWritable(folder.id, token).catch(() => false);
 
-          // Fetch Drive file/backup metadata first so unchanged accounts skip JSON/PDF restoration via browser cache
-          const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta] = await Promise.all([
+          // Fetch Drive file/backup metadata and Firebase Firestore state in parallel
+          const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta, firestoreLoaded] = await Promise.all([
             skipSubfolderEnsure || !folderWritable
               ? Promise.resolve({})
               : syncStudySubFoldersInDrive(folder.id, token).catch(() => ({})),
@@ -3301,6 +3333,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             loadScopedSyncMeta<ScopeSyncMeta>(scope),
             loadScopedDatabaseJson('offline_guest'),
             loadScopedSyncMeta<ScopeSyncMeta>('offline_guest'),
+            user.uid ? loadDatabaseFromFirestore(user.uid).catch(() => null) : Promise.resolve(null),
           ]);
 
           let currentDb = dbRef.current;
@@ -3311,6 +3344,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               hasLocalAny = true;
             } catch {
               // ignore malformed idb snapshot
+            }
+          }
+
+          const firestoreUpdatedMs = Date.parse(firestoreLoaded?.updatedAt || '') || 0;
+          const idbEditMs = Math.max(
+            Date.parse(preSyncMeta.lastLocalEditAt || '') || 0,
+            Date.parse(idbMeta?.lastLocalEditAt || '') || 0,
+            Date.parse(idbSnap?.updatedAt || '') || 0,
+          );
+          if (firestoreLoaded?.db) {
+            const firestoreNormalized = normalizeAndMergeDatabase(firestoreLoaded.db);
+            if (!isUntouchedSeedDatabase(firestoreNormalized)) {
+              if (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500) {
+                currentDb = firestoreNormalized;
+                hasLocalAny = true;
+              }
             }
           }
 
@@ -3548,10 +3597,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               new Date().toISOString();
 
             const syncMeta = loadSyncMeta(scope);
+            const knownSyncedFileIds = new Set(Object.keys(metaAfterLoad.cachedDriveFilesSignatureMap || {}));
             const localEditMs = Math.max(
               Date.parse(syncMeta.lastLocalEditAt || '') || 0,
               Date.parse(idbMeta?.lastLocalEditAt || '') || 0,
               Date.parse(idbSnap?.updatedAt || '') || 0,
+              firestoreUpdatedMs,
               rescuedGuestEdits ? candidateGuestMs : 0,
             );
             const cloudMs = Date.parse(cloudIso) || 0;
@@ -3578,9 +3629,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const lastCloudSyncMs = Math.max(
               Date.parse(syncMeta.lastCloudSyncAt || '') || 0,
               Date.parse(idbMeta?.lastCloudSyncAt || '') || 0,
+              firestoreUpdatedMs,
             );
             const hasPersistedUnsyncedLocal =
-              hasPersistedPendingSync(syncMeta) || Boolean(pendingCloudSyncRef.current) || rescuedGuestEdits;
+              hasPersistedPendingSync(syncMeta) ||
+              Boolean(pendingCloudSyncRef.current) ||
+              rescuedGuestEdits ||
+              firestoreUpdatedMs > cloudMs + 1500;
             const offlineLocalContinuation =
               localIsNewer &&
               !cloudOutsideActiveFolder &&
@@ -3608,8 +3663,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   driveFiles,
                   token,
                   scope,
-                  (current, total, label) => setRestoreProgress({ current, total, label }),
-                  { importFromAnyFolder: false },
+                  isUntouchedSeedDatabase(baseLocalDb)
+                    ? (current, total, label) => setRestoreProgress({ current, total, label })
+                    : undefined,
+                  { importFromAnyFolder: false, lazyBinaryBlobs: true, knownSyncedFileIds },
                 );
               const { uploadedCount: filesUploaded, uploadedFiles } = await syncMissingReferencedBlobsToDrive(
                 updatedDb,
@@ -3651,19 +3708,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               const totalFiles = filesRestored + orphansImported + filesUploaded;
               toast(
                 totalFiles > 0
-                  ? `Dados locais mantidos e pastas do Drive sincronizadas (${totalFiles} arquivo(s)).`
-                  : 'Dados locais mantidos e sincronizados com as pastas do Google Drive.',
+                  ? `Dados mantidos e pastas do Drive sincronizadas (${totalFiles} arquivo(s)).`
+                  : 'Dados sincronizados instantaneamente com o Firebase Firestore e Google Drive.',
               );
             }
 
             if (useCloudSnapshot) {
-              // Non-destructive safeguard: merge unsynced local additions/edits made after last sync instead of discarding them
+              // Non-destructive safeguard: merge unsynced local/Firestore additions/edits made after last sync instead of discarding them
               let baseMergedCloudDb = cloudDb;
               let preservedLocalEdits = false;
               const localEditedAfterLastSync =
                 localHasCustom &&
                 hashesDiffer &&
                 (rescuedGuestEdits ||
+                  firestoreUpdatedMs > cloudMs + 1500 ||
                   (hasPersistedUnsyncedLocal &&
                     (localIsNewer || localHasUnsavedEdge || (lastCloudSyncMs > 0 && localEditMs > lastCloudSyncMs + 1500))));
               if (localEditedAfterLastSync) {
@@ -3697,8 +3755,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   driveFiles,
                   token,
                   scope,
-                  (current, total, label) => setRestoreProgress({ current, total, label }),
-                  { importFromAnyFolder: false },
+                  isUntouchedSeedDatabase(baseMergedCloudDb)
+                    ? (current, total, label) => setRestoreProgress({ current, total, label })
+                    : undefined,
+                  { importFromAnyFolder: false, lazyBinaryBlobs: true, knownSyncedFileIds },
                 );
               let finalUpdatedDb = updatedDb;
               let hadConcurrentLocalEdits = preservedLocalEdits;
@@ -3756,18 +3816,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               const incCount = latestCloud.incrementalDeltas?.length || 0;
               toast(
                 preservedLocalEdits
-                  ? `Backup do Drive restaurado e suas alterações locais pendentes foram preservadas e mescladas!`
+                  ? `Dados sincronizados e suas alterações mais recentes foram preservadas!`
                   : totalFiles > 0
                   ? incCount > 0
-                    ? `Último backup (+${incCount} incremento(s)) restaurado e ${totalFiles} arquivo(s) sincronizados com as pastas do Drive!`
-                    : `Último backup restaurado e ${totalFiles} arquivo(s) sincronizados com as pastas do Drive!`
-                  : incCount > 0
-                  ? `Último backup (+${incCount} incremento(s)) e pastas do Google Drive restaurados!`
-                  : `Último backup e pastas de "${folder.name}" restaurados automaticamente do Google Drive!`,
+                    ? `Banco de dados (+${incCount} incremento(s)) e ${totalFiles} arquivo(s) sincronizados instantaneamente!`
+                    : `Banco de dados e ${totalFiles} arquivo(s) sincronizados instantaneamente!`
+                  : `Banco de dados carregado instantaneamente!`,
               );
             }
           } else {
             // No JSON backup in Drive yet -> sync all Drive study folders and upload any local files
+            const knownSyncedFileIds = new Set(Object.keys(metaAfterLoad.cachedDriveFilesSignatureMap || {}));
             let baseLocalDb = currentDb;
             if (computeDatabaseContentHash(dbRef.current) !== hydratedBaselineHash && dbRef.current !== dbAtSyncStart) {
               const concurrentDelta = buildIncrementalDatabaseBackup(hydratedBaselineDb, dbRef.current, {
@@ -3784,8 +3843,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 driveFiles,
                 token,
                 scope,
-                (current, total, label) => setRestoreProgress({ current, total, label }),
-                { importFromAnyFolder: false },
+                isUntouchedSeedDatabase(baseLocalDb)
+                  ? (current, total, label) => setRestoreProgress({ current, total, label })
+                  : undefined,
+                { importFromAnyFolder: false, lazyBinaryBlobs: true, knownSyncedFileIds },
               );
             const { uploadedCount: filesUploaded, uploadedFiles } = await syncMissingReferencedBlobsToDrive(
               updatedDb,
@@ -4135,6 +4196,33 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         localStorage.setItem(getTimerStorageKey(scope), JSON.stringify(timerStateRef.current));
       } catch {
         // ignore
+      }
+      // Immediately flush any pending debounced Firebase Firestore writes before tab hides/closes
+      if (firebaseSyncTimerRef.current) {
+        window.clearTimeout(firebaseSyncTimerRef.current);
+        firebaseSyncTimerRef.current = null;
+        const currentUser = auth.currentUser;
+        if (currentUser?.uid && isEmailAuthorized(currentUser.email) && !firebaseInFlightRef.current) {
+          const curDb = dbRef.current;
+          const curHash = computeDatabaseContentHash(curDb);
+          firebaseInFlightRef.current = true;
+          void saveDatabaseToFirestore(currentUser.uid, curDb, curHash, {
+            elapsed: timerStateRef.current.elapsed,
+            startedAt: timerStateRef.current.startedAt,
+            activeTopic: activeTimerTopicRef.current,
+          })
+            .then((res) => {
+              saveSyncMeta(scope, {
+                lastCloudSyncAt: res.updatedAt,
+                lastCloudContentHash: curHash,
+                hasPendingCloudSync: false,
+              });
+            })
+            .catch(() => {})
+            .finally(() => {
+              firebaseInFlightRef.current = false;
+            });
+        }
       }
       if (localFolderSyncTimerRef.current && localFolderHandleRef.current && localFolderWritableRef.current) {
         void flushLocalFolderSyncNow();
