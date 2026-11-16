@@ -404,19 +404,17 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     isSigningIn = true;
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (!credential?.accessToken) {
-      throw new Error('Falha ao obter token de acesso do Google Drive.');
+    if (credential?.accessToken) {
+      cachedAccessToken = credential.accessToken;
+      cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
     }
-
-    cachedAccessToken = credential.accessToken;
-    cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
     cachedFolderId = null;
     cachedFolderLink = null;
     for (const key of Object.keys(cachedSubFolderIds)) {
       delete cachedSubFolderIds[key];
     }
 
-    return { user: result.user, accessToken: cachedAccessToken };
+    return { user: result.user, accessToken: cachedAccessToken || '' };
   } catch (error: any) {
     const code = String(error?.code || '');
     if (

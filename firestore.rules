@@ -123,7 +123,7 @@ service cloud.firestore {
       allow get: if isSignedIn() &&
         isValidId(userId) &&
         request.auth.uid == userId &&
-        existing().ownerId == request.auth.uid;
+        (resource == null || existing().ownerId == request.auth.uid);
 
       allow list: if isSignedIn() &&
         request.auth.uid == userId &&
@@ -172,7 +172,7 @@ service cloud.firestore {
           isValidId(userId) &&
           isValidId(recordId) &&
           request.auth.uid == userId &&
-          existing().ownerId == request.auth.uid &&
+          (resource == null || existing().ownerId == request.auth.uid) &&
           isWorkspaceOwner(userId);
 
         allow list: if isSignedIn() &&

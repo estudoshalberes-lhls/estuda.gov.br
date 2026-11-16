@@ -4348,7 +4348,7 @@ function isEmailAuthorized(email?: string | null): boolean {
     setAuthError(null);
     try {
       const res = await googleSignIn();
-      if (res?.user && res.accessToken) {
+      if (res?.user) {
         const userEmail = res.user.email || '';
         if (!isEmailAuthorized(userEmail)) {
           await googleSignOut();
@@ -4423,22 +4423,22 @@ function isEmailAuthorized(email?: string | null): boolean {
         setAuthError(null);
         setGoogleUser(res.user);
         setDriveConnected(true);
-        setDriveTokenReady(true);
+        setDriveTokenReady(Boolean(res.accessToken));
+        toast(`Conectado como ${res.user.email || 'usuário Google'}! Sincronizando dados na nuvem...`);
 
-        try {
-          const folder = await getOrCreateStudyFolder(res.accessToken);
-          const resolvedFolderName = folder.name || getPreferredStudyFolder().name;
-          rememberKnownStudyDriveFolderName(resolvedFolderName);
-          setActiveDriveFolderName(resolvedFolderName);
-          if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
-          toast(`Conectado como ${res.user.email || 'usuário Google'}! Verificando dados na nuvem...`);
-          await syncAccountWithDriveOnAuth(res.user, res.accessToken, newScope, hadScopedLocal);
-        } catch (driveErr: any) {
-          console.warn('[Google Drive] Login OK, mas houve aviso ao preparar pasta do Drive:', driveErr);
-          toast(
-            `Conta ${res.user.email || 'Google'} conectada! Aviso ao acessar o Drive: ${driveErr?.message || 'Tente sincronizar novamente em Backup e Restauração.'}`,
-            true,
-          );
+        if (res.accessToken) {
+          void (async () => {
+            try {
+              const folder = await getOrCreateStudyFolder(res.accessToken);
+              const resolvedFolderName = folder.name || getPreferredStudyFolder().name;
+              rememberKnownStudyDriveFolderName(resolvedFolderName);
+              setActiveDriveFolderName(resolvedFolderName);
+              if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
+              await syncAccountWithDriveOnAuth(res.user, res.accessToken, newScope, hadScopedLocal);
+            } catch (driveErr: any) {
+              console.warn('[Google Drive] Login OK, mas houve aviso ao preparar pasta do Drive:', driveErr);
+            }
+          })();
         }
         return true;
       }

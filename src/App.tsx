@@ -198,15 +198,15 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 };
 
 const MainApp: React.FC = () => {
-  const { driveConnected, localFolderConnected } = useStudy();
+  const { firebaseConnected, driveConnected, localFolderConnected } = useStudy();
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [forceLoginScreen, setForceLoginScreen] = useState<boolean>(false);
 
   React.useEffect(() => {
-    if (driveConnected || localFolderConnected) {
+    if (firebaseConnected || driveConnected || localFolderConnected) {
       setForceLoginScreen(false);
     }
-  }, [driveConnected, localFolderConnected]);
+  }, [firebaseConnected, driveConnected, localFolderConnected]);
 
   const handleContinueOffline = () => {
     setOfflineMode(true);
@@ -219,7 +219,7 @@ const MainApp: React.FC = () => {
   };
 
   const shouldShowLogin =
-    forceLoginScreen || (!driveConnected && !localFolderConnected && !offlineMode);
+    forceLoginScreen || (!firebaseConnected && !driveConnected && !localFolderConnected && !offlineMode);
 
   return (
     <>
