@@ -5,7 +5,12 @@ import {
   loadLocalDirectoryHandle,
   saveLocalDirectoryHandle,
 } from './fileStorage';
-import { normalizeSearch, visibleName } from './parsers';
+import {
+  isContestOrEditalTxtDescriptor,
+  isScheduleTxtDescriptor,
+  normalizeSearch,
+  visibleName,
+} from './parsers';
 
 export const LOCAL_FOLDER_META_KEY = 'central_estudos_local_folder_meta_v1';
 
@@ -190,6 +195,19 @@ export function classifyLocalFileCategory(
     return { canonicalCategory: 'Backups', nestedSubfolder: undefined };
   }
 
+  if (isScheduleTxtDescriptor(trimmedName)) {
+    return { canonicalCategory: 'Cronogramas', nestedSubfolder: undefined };
+  }
+  if (isContestOrEditalTxtDescriptor(trimmedName)) {
+    const isDatasLocais =
+      /^(?:DATAS\s*(?:E|&)\s*LOCAIS)\b/i.test(trimmedName) ||
+      normalizeSearch(trimmedName).includes('controle geral de inscricoes') ||
+      normalizeSearch(trimmedName).includes('inscricoes boletos e locais');
+    return {
+      canonicalCategory: isDatasLocais ? 'Datas e Locais' : 'Editais',
+      nestedSubfolder: undefined,
+    };
+  }
   if (/^LEI\s*-\s*/i.test(trimmedName)) {
     const nested = folderSegments.length > 0 ? folderSegments[folderSegments.length - 1] : undefined;
     return { canonicalCategory: 'Lei Seca', nestedSubfolder: nested };
@@ -205,21 +223,14 @@ export function classifyLocalFileCategory(
   if (/^(?:DISCURSIVA|CORRECAO)\s*-\s*/i.test(trimmedName)) {
     return { canonicalCategory: 'Discursivas', nestedSubfolder: undefined };
   }
-  if (/^CRONOGRAMA\s*-\s*/i.test(trimmedName)) {
-    return { canonicalCategory: 'Cronogramas', nestedSubfolder: undefined };
-  }
-  if (/^EDITAL\s*-\s*/i.test(trimmedName)) {
-    return { canonicalCategory: 'Editais', nestedSubfolder: undefined };
-  }
-  if (/^DATAS\s*E\s*LOCAIS\s*-\s*/i.test(trimmedName)) {
-    return { canonicalCategory: 'Datas e Locais', nestedSubfolder: undefined };
-  }
 
   const nested = folderSegments.length > 0 ? folderSegments.join(' / ') : undefined;
   const normalizedBase = normalizeSearch(trimmedName);
 
   if (
     (lower.endsWith('.txt') || lower.endsWith('.md')) &&
+    !isScheduleTxtDescriptor(trimmedName) &&
+    !isContestOrEditalTxtDescriptor(trimmedName) &&
     (normalizedBase.includes('_estruturada') ||
       normalizedBase.includes('estruturada.') ||
       /\b(?:prova|simulado)\b/.test(normalizedBase))

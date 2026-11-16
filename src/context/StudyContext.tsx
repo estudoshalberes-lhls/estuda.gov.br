@@ -105,7 +105,9 @@ import {
   getWeekDatesForIsoWeek,
   healAndNormalizeLawItems,
   inferFixedSubjectFromTopic,
+  isContestOrEditalTxtDescriptor,
   isReservedBackupFolderName,
+  isScheduleTxtDescriptor,
   localDateBrazilian,
   localDateIso,
   localDateTimeBrazilian,
@@ -1160,8 +1162,13 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     }
   });
 
+  const extractSourcePathFromObs = (obs?: string): string | undefined => {
+    const m = String(obs || '').match(/\(([^)]+)\)\s*\.?\s*$/);
+    return m ? m[1] : undefined;
+  };
+
   // Coalesce any duplicate law folder keys (e.g. "Direito Constitucional" vs "Direito_Constitucional")
-  // and ensure valid items/pdfs arrays
+  // and ensure valid items/pdfs arrays while purging misclassified Cronograma / Edital / Datas e Locais files
   const rawLaws = dataObj.laws && typeof dataObj.laws === 'object' ? dataObj.laws : seed.laws || {};
   const normalizedLaws: Record<string, LawFolderData> = {};
   const normalizedLawHighlights = { ...(seed.lawHighlights || {}), ...(dataObj.lawHighlights || {}) };
@@ -1171,17 +1178,56 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     ...(dataObj.lawLastReadPosition || {}),
   };
 
+  const dropLawFolderMetadata = (folderKey: string) => {
+    delete normalizedLawHighlights[folderKey];
+    delete normalizedReadLawItems[folderKey];
+    delete normalizedLawReadDates[folderKey];
+    delete normalizedLawLastReadPosition[folderKey];
+  };
+
   const lawGroups = new Map<string, Array<{ key: string; folder: LawFolderData }>>();
   Object.entries(rawLaws).forEach(([key, val]) => {
     if (!val || typeof val !== 'object') return;
+    if (
+      isScheduleTxtDescriptor(key) ||
+      isScheduleTxtDescriptor(visibleName(key)) ||
+      isContestOrEditalTxtDescriptor(key) ||
+      isContestOrEditalTxtDescriptor(visibleName(key))
+    ) {
+      dropLawFolderMetadata(key);
+      return;
+    }
+
+    const rawItems = Array.isArray(val.items) ? val.items : [];
+    const rawPdfs = Array.isArray(val.pdfs) ? val.pdfs : [];
+    const filteredItems = rawItems.filter(
+      (it) =>
+        !isScheduleTxtDescriptor(it.arquivo, undefined, it.texto) &&
+        !isContestOrEditalTxtDescriptor(it.arquivo, undefined, it.texto),
+    );
+    const filteredPdfs = rawPdfs.filter(
+      (p) =>
+        !isScheduleTxtDescriptor(p.name) &&
+        !isContestOrEditalTxtDescriptor(p.name),
+    );
+
+    if (
+      filteredItems.length === 0 &&
+      filteredPdfs.length === 0 &&
+      (rawItems.length > 0 || rawPdfs.length > 0)
+    ) {
+      dropLawFolderMetadata(key);
+      return;
+    }
+
     const norm = normalizeSearch(visibleName(key)) || key.toLowerCase();
     const arr = lawGroups.get(norm) || [];
     arr.push({
       key,
       folder: {
         name: key,
-        items: Array.isArray(val.items) ? val.items : [],
-        pdfs: Array.isArray(val.pdfs) ? val.pdfs : [],
+        items: filteredItems,
+        pdfs: filteredPdfs,
       },
     });
     lawGroups.set(norm, arr);
@@ -1327,10 +1373,41 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     ),
   );
 
+  const normalizedSubmittedSimulations = (
+    Array.isArray(dataObj.submittedSimulations)
+      ? dataObj.submittedSimulations
+      : seed.submittedSimulations || []
+  ).filter((sim) => {
+    if (!sim || typeof sim !== 'object') return false;
+    const samplePrompt = sim.questoes?.[0]?.enunciado || '';
+    return !(
+      isScheduleTxtDescriptor(sim.arquivo, sim.materia, samplePrompt) ||
+      isScheduleTxtDescriptor(sim.titulo, sim.materia, samplePrompt) ||
+      isContestOrEditalTxtDescriptor(sim.arquivo, sim.materia, samplePrompt) ||
+      isContestOrEditalTxtDescriptor(sim.titulo, sim.materia, samplePrompt)
+    );
+  });
+
+  const normalizedProofFiles = (
+    Array.isArray(dataObj.proofFiles)
+      ? dataObj.proofFiles
+      : seed.proofFiles || []
+  ).filter((pf) => {
+    if (!pf || typeof pf !== 'object') return false;
+    const obsPath = extractSourcePathFromObs(pf.observacoes);
+    const pathHint = [pf.bank, obsPath].filter(Boolean).join(' / ');
+    return !(
+      isScheduleTxtDescriptor(pf.name, pathHint) ||
+      isContestOrEditalTxtDescriptor(pf.name, pathHint)
+    );
+  });
+
   return {
     ...seed,
     ...dataObj,
     laws: normalizedLaws,
+    submittedSimulations: normalizedSubmittedSimulations,
+    proofFiles: normalizedProofFiles,
     lawHighlights: normalizedLawHighlights,
     readLawItems: normalizedReadLawItems,
     lawLastReadPosition: normalizedLawLastReadPosition,
@@ -1841,6 +1918,23 @@ async function restoreFilesAndOrphansFromDriveList(
   };
 
   const unlinkedDriveFiles = driveFiles.filter((df) => {
+    const forcedMode = options?.forceModule || 'auto';
+    const isTxtOrMdEntry = /\.(txt|md)$/i.test(df.name || '');
+    const isNonArchiveModuleFile =
+      df.subfolderName === 'Questões' ||
+      df.subfolderName === 'Cronogramas' ||
+      df.subfolderName === 'Datas e Locais' ||
+      df.subfolderName === 'Editais' ||
+      isScheduleTxtDescriptor(df.name, df.subfolderName || df.folderPath) ||
+      isContestOrEditalTxtDescriptor(df.name, df.subfolderName || df.folderPath);
+
+    if (
+      isNonArchiveModuleFile &&
+      (isTxtOrMdEntry || forcedMode === 'auto' || forcedMode === 'laws' || forcedMode === 'proofs')
+    ) {
+      return false; // handled by Step 8 / Step 9 dedicated TXT recovery passes
+    }
+
     if (onlyFileIdSet) {
       if (!onlyFileIdSet.has(df.id)) return false;
       return !isBackupFile(df) && isSupportedRestorableStudyFile(df);
@@ -1857,14 +1951,6 @@ async function restoreFilesAndOrphansFromDriveList(
     if (knownFileNames.has(normName) || knownFileNames.has(normStripped)) return false;
 
     if (options?.onlyFolderId || options?.importFromAnyFolder) return true;
-    if (df.subfolderName === 'Questões') return false;
-    if (
-      df.subfolderName === 'Cronogramas' ||
-      df.subfolderName === 'Datas e Locais' ||
-      df.subfolderName === 'Editais'
-    ) {
-      return false; // handled in dedicated TXT folder recovery pass below
-    }
     return Boolean(df.isInStudyFolder || hasStudyPrefix(df.name));
   });
 
@@ -1927,6 +2013,12 @@ async function restoreFilesAndOrphansFromDriveList(
           bankName: string,
           sourceLabel: string,
         ) => {
+          if (
+            isScheduleTxtDescriptor(cleanName, df.folderPath, fileText) ||
+            isContestOrEditalTxtDescriptor(cleanName, df.folderPath, fileText)
+          ) {
+            return;
+          }
           const paired = await readPairedGabarito(cleanName);
           const parsedQuestions = parseUploadedQuestions(
             fileText,
@@ -1992,22 +2084,28 @@ async function restoreFilesAndOrphansFromDriveList(
         };
 
         if (isLaw) {
+          let parsedItems: LawItem[] = [];
+          if (blob) {
+            try {
+              const extractedText = await readStudyBlobText(blob, cleanName, df.mimeType);
+              if (
+                isScheduleTxtDescriptor(cleanName, df.folderPath, extractedText) ||
+                isContestOrEditalTxtDescriptor(cleanName, df.folderPath, extractedText)
+              ) {
+                continue;
+              }
+              parsedItems = parseLawTextToItems(cleanName, extractedText);
+            } catch (parseErr) {
+              console.warn(`Não foi possível extrair dispositivos automaticamente de "${cleanName}":`, parseErr);
+            }
+          }
+
           const rawFolderName =
             extractNestedFolderName(df, 'Lei Seca') ||
             displayBaseName(cleanName) ||
             'Leis_Recuperadas_do_Drive';
           const folderKey = resolveLawFolderKey(nextLaws, rawFolderName);
           const existingFolder = nextLaws[folderKey] || { name: folderKey, items: [], pdfs: [] };
-
-          let parsedItems: LawItem[] = [];
-          if (blob) {
-            try {
-              const extractedText = await readStudyBlobText(blob, cleanName, df.mimeType);
-              parsedItems = parseLawTextToItems(cleanName, extractedText);
-            } catch (parseErr) {
-              console.warn(`Não foi possível extrair dispositivos automaticamente de "${cleanName}":`, parseErr);
-            }
-          }
 
           const hasPdfAlready = existingFolder.pdfs.some(
             (p) => p.blobKey === blobKey || normalizeFileLookup(p.name) === normalizeFileLookup(cleanName),
@@ -2043,6 +2141,12 @@ async function restoreFilesAndOrphansFromDriveList(
 
           if (isTxtOrMd && blob) {
             const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
+            if (
+              isScheduleTxtDescriptor(cleanName, df.folderPath, txt) ||
+              isContestOrEditalTxtDescriptor(cleanName, df.folderPath, txt)
+            ) {
+              continue;
+            }
             await registerTxtProofAndSim(txt, bankName, sourceLabel);
           } else {
             const paired = options?.lazyBinaryBlobs ? null : await readPairedGabarito(cleanName);
@@ -2097,6 +2201,12 @@ async function restoreFilesAndOrphansFromDriveList(
         } else if (isTxtOrMd && forced === 'auto' && blob) {
           // Inspect text files outside canonical folders before misfiling into Personal PDFs
           const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
+          if (
+            isScheduleTxtDescriptor(cleanName, df.folderPath, txt) ||
+            isContestOrEditalTxtDescriptor(cleanName, df.folderPath, txt)
+          ) {
+            continue;
+          }
           const paired = await readPairedGabarito(cleanName);
           const detectedQuestions = parseUploadedQuestions(
             txt,
@@ -2112,7 +2222,7 @@ async function restoreFilesAndOrphansFromDriveList(
                 : `Prova .txt restaurada do Drive (${df.folderPath || 'Drive'}).`,
             );
             orphansImported += 1;
-          } else {
+          } else if (splitLawDevices(txt).length >= 2) {
             const detectedLaw = parseLawTextToItems(cleanName, txt);
             if (detectedLaw.length >= 2) {
               const folderKey = resolveLawFolderKey(
@@ -2395,6 +2505,15 @@ async function restoreFilesAndOrphansFromDriveList(
   const questionOrExamTxtFiles = driveFiles.filter((df) => {
     if (!inSelectedFolder(df) || isBackupFile(df) || !shouldInspectDriveTxtOnAuth(df)) return false;
     if (isGabaritoFilename(df.name)) return false;
+    if (
+      df.subfolderName === 'Cronogramas' ||
+      df.subfolderName === 'Datas e Locais' ||
+      df.subfolderName === 'Editais' ||
+      isScheduleTxtDescriptor(df.name, df.subfolderName || df.folderPath) ||
+      isContestOrEditalTxtDescriptor(df.name, df.subfolderName || df.folderPath)
+    ) {
+      return false;
+    }
     const lower = df.name.toLowerCase();
     if (!lower.endsWith('.txt') && !lower.endsWith('.md')) return false;
     return (
@@ -2434,6 +2553,12 @@ async function restoreFilesAndOrphansFromDriveList(
           localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
         if (!blob) continue;
         const text = await readStudyBlobText(blob, df.name);
+        if (
+          isScheduleTxtDescriptor(cleanName, df.folderPath, text) ||
+          isContestOrEditalTxtDescriptor(cleanName, df.folderPath, text)
+        ) {
+          continue;
+        }
         const paired = await readPairedGabarito(cleanName);
         const nestedSubject =
           extractNestedFolderName(df, 'Questões') ||
@@ -2994,13 +3119,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       cloudTimestamp?: string,
       options?: { skipFirestorePush?: boolean },
     ) => {
+      const sanitizedDb = normalizeAndMergeDatabase(nextDb);
       isRestoringRef.current = true;
-      skipPersistDbRef.current = nextDb;
-      lastPersistedDbRef.current = nextDb;
-      setDb(nextDb);
-      dbRef.current = nextDb;
-      setFirebaseChunkCount(decomposeDatabaseToFirestoreChunks(nextDb).length);
-      const serialized = JSON.stringify(nextDb);
+      skipPersistDbRef.current = sanitizedDb;
+      lastPersistedDbRef.current = sanitizedDb;
+      setDb(sanitizedDb);
+      dbRef.current = sanitizedDb;
+      setFirebaseChunkCount(decomposeDatabaseToFirestoreChunks(sanitizedDb).length);
+      const serialized = JSON.stringify(sanitizedDb);
       const ts = cloudTimestamp || new Date().toISOString();
       persistLocalDatabaseForScope(scope, serialized, ts, {
         lastCloudSyncAt: ts,
@@ -3018,14 +3144,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         !options?.skipFirestorePush &&
         currentUser?.uid &&
         isEmailAuthorized(currentUser.email) &&
-        !isUntouchedSeedDatabase(nextDb)
+        !isUntouchedSeedDatabase(sanitizedDb)
       ) {
-        const nextHash = computeDatabaseContentHash(nextDb);
+        const nextHash = computeDatabaseContentHash(sanitizedDb);
         setIsSyncingFirebase(true);
         firebaseInFlightRef.current = true;
         void saveDatabaseToFirestore(
           currentUser.uid,
-          nextDb,
+          sanitizedDb,
           nextHash,
           {
             elapsed: timerStateRef.current.elapsed,
@@ -3185,11 +3311,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const localEditMs = Date.parse(localMeta.lastLocalEditAt || '') || 0;
 
         if (loadedFirestore) {
-          const remoteNormalized = normalizeAndMergeDatabase(loadedFirestore.db);
+          const rawRemoteDb = loadedFirestore.db as StudyDatabase;
+          const remoteNormalized = normalizeAndMergeDatabase(rawRemoteDb);
           const remoteUntouched = isUntouchedSeedDatabase(remoteNormalized);
           const remoteMs = Date.parse(loadedFirestore.updatedAt || '') || 0;
           const remoteHash = computeDatabaseContentHash(remoteNormalized);
           const localHash = computeDatabaseContentHash(localDb);
+
+          const rawLawFoldersCount = Object.keys(rawRemoteDb?.laws || {}).length;
+          const cleanLawFoldersCount = Object.keys(remoteNormalized.laws || {}).length;
+          const rawLawItemsTotal = Object.values(rawRemoteDb?.laws || {}).reduce(
+            (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
+            0,
+          );
+          const cleanLawItemsTotal = Object.values(remoteNormalized.laws || {}).reduce(
+            (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
+            0,
+          );
+          const remoteHadDirtyClassification =
+            cleanLawFoldersCount < rawLawFoldersCount ||
+            cleanLawItemsTotal < rawLawItemsTotal ||
+            (remoteNormalized.submittedSimulations || []).length <
+              (rawRemoteDb?.submittedSimulations || []).length ||
+            (remoteNormalized.proofFiles || []).length < (rawRemoteDb?.proofFiles || []).length;
 
           if (remoteUntouched && !localUntouched) {
             // Firestore only had default seed data while local/Drive has the user's real study database: push local/Drive DB to Firestore!
@@ -3208,9 +3352,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setLastFirebaseSyncAt(saved.updatedAt);
             setFirebaseChunkCount(saved.totalChunks);
           } else if (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500)) {
-            if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current)) {
+            if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
               applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
-                skipFirestorePush: true,
+                skipFirestorePush: !remoteHadDirtyClassification,
               });
             } else {
               setLastFirebaseSyncAt(loadedFirestore.updatedAt);
@@ -9492,6 +9636,14 @@ function isEmailAuthorized(email?: string | null): boolean {
         throw new Error('Selecione um arquivo .txt, .md ou .pdf.');
       }
       const extractedText = await readStudyTextFile(file);
+      if (
+        isScheduleTxtDescriptor(file.name, undefined, extractedText) ||
+        isContestOrEditalTxtDescriptor(file.name, undefined, extractedText)
+      ) {
+        throw new Error(
+          `O arquivo "${file.name}" pertence a Cronograma, Datas e Locais ou Edital e deve ser importado no módulo correspondente, não em Lei Seca.`,
+        );
+      }
       const parsedItems = parseLawTextToItems(file.name, extractedText);
       if (parsedItems.length === 0) {
         throw new Error(`Não foi possível extrair artigos ou texto legível de "${file.name}".`);
@@ -10577,6 +10729,17 @@ function isEmailAuthorized(email?: string | null): boolean {
       if (!/\.(pdf|txt|md)$/i.test(file.name)) {
         throw new Error('Selecione um arquivo de prova em PDF ou TXT.');
       }
+      if (/\.(txt|md)$/i.test(file.name)) {
+        const previewTxt = await file.text();
+        if (
+          isScheduleTxtDescriptor(file.name, undefined, previewTxt) ||
+          isContestOrEditalTxtDescriptor(file.name, undefined, previewTxt)
+        ) {
+          throw new Error(
+            `O arquivo "${file.name}" pertence a Cronograma, Datas e Locais ou Edital e não deve ser enviado como prova/simulado.`,
+          );
+        }
+      }
       const blobKey = `proof-${uid(16)}`;
       await saveFileBlob(blobKey, file);
       const bankSeg = bank && bank.trim() && bank !== 'Geral' ? visibleName(bank).replace(/[\\/]+/g, ' - ').trim() : '';
@@ -10666,6 +10829,15 @@ function isEmailAuthorized(email?: string | null): boolean {
       }
       const isTxtProof = /\.(txt|md)$/i.test(proofFile.name);
       const proofRawText = isTxtProof ? await proofFile.text() : '';
+      if (
+        isTxtProof &&
+        (isScheduleTxtDescriptor(proofFile.name, undefined, proofRawText) ||
+          isContestOrEditalTxtDescriptor(proofFile.name, undefined, proofRawText))
+      ) {
+        throw new Error(
+          `O arquivo "${proofFile.name}" pertence a Cronograma, Datas e Locais ou Edital e não deve ser enviado como prova/simulado.`,
+        );
+      }
       const rawKey = await readAnswerKeyInput(answerFile, answerText);
       const hasExplicitAnswer = Boolean(rawKey.trim());
 
@@ -11053,6 +11225,14 @@ function isEmailAuthorized(email?: string | null): boolean {
       }
       const subject = subjectInput.trim() || displayBaseName(file.name);
       const text = await file.text();
+      if (
+        isScheduleTxtDescriptor(file.name, undefined, text) ||
+        isContestOrEditalTxtDescriptor(file.name, undefined, text)
+      ) {
+        throw new Error(
+          `O arquivo "${file.name}" pertence a Cronograma, Datas e Locais ou Edital e não deve ser importado como questões/simulado.`,
+        );
+      }
       const parsed = parseUploadedQuestions(text, subject);
       if (!parsed.length) {
         throw new Error(

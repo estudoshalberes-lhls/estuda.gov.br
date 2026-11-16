@@ -651,12 +651,134 @@ function stripStructuredExamArtifacts(rawContent: string): string {
     .trim();
 }
 
+function normalizeDescriptorText(value?: string): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[_]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+export function isScheduleTxtDescriptor(
+  fileName?: string,
+  pathOrFolder?: string,
+  content?: string,
+): boolean {
+  const cleanName = String(fileName || '')
+    .trim()
+    .replace(/^(?:LEI|PROVA|GABARITO|RESUMO|DISCURSIVA|CORRECAO)\s*-\s*/i, '')
+    .trim();
+  const normName = normalizeDescriptorText(cleanName);
+
+  if (
+    /^cronograma(?:\b|\s|[-–—_.:]|$)/i.test(normName) ||
+    /\bcronograma\s*[-–—]\s*semana\b/i.test(normName) ||
+    /\bcronograma\s+semanal\b/i.test(normName) ||
+    /^semana\s+\d{1,2}\s*[-/]\s*\d{4}\b/i.test(normName)
+  ) {
+    return true;
+  }
+
+  if (pathOrFolder) {
+    const folderParts = String(pathOrFolder)
+      .split(/[/\\]/)
+      .map((p) => normalizeDescriptorText(p))
+      .filter(Boolean);
+    if (folderParts.some((p) => p === 'cronogramas' || p === 'cronograma')) {
+      return true;
+    }
+  }
+
+  if (content) {
+    const head = content.slice(0, 2500);
+    if (
+      /#\s*CRONOGRAMA SEMANAL\b/i.test(head) ||
+      (/#\s*SEMANA:/i.test(head) && /#\s*DATAS_DIAS:/i.test(head)) ||
+      /#\s*Formato:\s*Dia\s*\|\s*Data\s*\|\s*Assunto\s*\|\s*Tempo\b/i.test(head) ||
+      /^(?:Segunda|Terça|Terca|Quarta|Quinta|Sexta|Sábado|Sabado|Domingo)-feira\s*\|\s*\d{2}\/\d{2}\/\d{4}\s*\|/im.test(
+        head,
+      )
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+export function isContestOrEditalTxtDescriptor(
+  fileName?: string,
+  pathOrFolder?: string,
+  content?: string,
+): boolean {
+  const cleanName = String(fileName || '')
+    .trim()
+    .replace(/^(?:LEI|PROVA|GABARITO|RESUMO|DISCURSIVA|CORRECAO)\s*-\s*/i, '')
+    .trim();
+  const normName = normalizeDescriptorText(cleanName);
+
+  if (
+    /^datas\s*(?:e|&)\s*locais(?:\b|\s|[-–—_.:]|$)/i.test(normName) ||
+    /^edital(?:\b|\s|[-–—_.:]|$)/i.test(normName) ||
+    normName.includes('controle geral de inscricoes') ||
+    normName.includes('inscricoes boletos e locais') ||
+    normName.includes('edital verticalizado')
+  ) {
+    return true;
+  }
+
+  if (pathOrFolder) {
+    const folderParts = String(pathOrFolder)
+      .split(/[/\\]/)
+      .map((p) => normalizeDescriptorText(p))
+      .filter(Boolean);
+    if (
+      folderParts.some(
+        (p) =>
+          p === 'datas e locais' ||
+          p === 'datas & locais' ||
+          p === 'editais' ||
+          p === 'edital' ||
+          p === 'inscricoes',
+      )
+    ) {
+      return true;
+    }
+  }
+
+  if (content) {
+    const head = content.slice(0, 2500);
+    if (
+      /#\s*EDITAL VERTICALIZADO\b/i.test(head) ||
+      /#\s*CONTROLE DE INSCRICOES\b/i.test(head) ||
+      /#\s*PASTA DATAS\s*&\s*LOCAIS\b/i.test(head) ||
+      /^[ \t]*(?:#\s*)?DATA_INSCRICAO_PROVA:/im.test(head) ||
+      /^[ \t]*(?:#\s*)?VENCIMENTO_BOLETO:/im.test(head) ||
+      /^[ \t]*(?:#\s*)?EDITAL_ARQUIVO:/im.test(head) ||
+      (/^[ \t]*(?:#\s*)?LOCAL_PROVA:/im.test(head) &&
+        /^[ \t]*(?:#\s*)?STATUS_PAGAMENTO:/im.test(head))
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function parseUploadedQuestions(
   rawText: string,
   subject: string,
   externalAnswerMap?: Record<number, string>,
 ): Question[] {
   const text = rawText.replace(/^\ufeff/, '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  if (
+    isScheduleTxtDescriptor(undefined, undefined, text) ||
+    isContestOrEditalTxtDescriptor(undefined, undefined, text)
+  ) {
+    return [];
+  }
   const validAnswers = new Set(['A', 'B', 'C', 'D', 'E']);
   const parsed: Question[] = [];
 
@@ -1515,6 +1637,12 @@ export function splitLawDevices(rawText: string): Array<{
 }
 
 export function parseLawTextToItems(fileName: string, rawText: string): LawItem[] {
+  if (
+    isScheduleTxtDescriptor(fileName, undefined, rawText) ||
+    isContestOrEditalTxtDescriptor(fileName, undefined, rawText)
+  ) {
+    return [];
+  }
   const devices = splitLawDevices(rawText);
   if (devices.length) {
     return devices.map((d, index) => {

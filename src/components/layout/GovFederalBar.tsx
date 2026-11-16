@@ -116,6 +116,17 @@ export const GovFederalBar: React.FC<GovFederalBarProps> = ({ insideApp = false 
             <ExternalLink className="w-3 h-3 shrink-0 opacity-85" aria-hidden="true" />
           </a>
 
+          <a
+            href="https://ministerio-publicodo-casal.vercel.app/"
+            target="_blank"
+            rel="noopener noreferrer"
+            title="Acessar portal do Ministério Público do Casal"
+            className="inline-flex items-center gap-1 text-[11px] font-semibold text-white/95 hover:text-[#FFCD07] hover:underline underline-offset-4 whitespace-nowrap shrink-0 transition-colors"
+          >
+            <span>Ministério Público do Casal</span>
+            <ExternalLink className="w-3 h-3 shrink-0 opacity-85" aria-hidden="true" />
+          </a>
+
           <div
             className="inline-flex items-center gap-1 border-l border-white/20 pl-2 sm:border-r sm:px-2.5 shrink-0"
             role="group"
