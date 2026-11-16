@@ -1,0 +1,128 @@
+{
+  "entities": {
+    "UserWorkspace": {
+      "title": "UserWorkspace",
+      "description": "Root workspace metadata and study timer state for an authenticated student.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the workspace owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "contentHash": {
+          "type": "string",
+          "description": "Deterministic hash of the full StudyDatabase content.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "schemaVersion": {
+          "type": "number",
+          "description": "Schema version of the persisted StudyDatabase."
+        },
+        "sectionCount": {
+          "type": "number",
+          "description": "Total number of active StudyDbRecord documents in the subcollection."
+        },
+        "timerState": {
+          "type": "object",
+          "description": "Current electronic study timer and Pomodoro state."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the workspace was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the workspace was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "contentHash",
+        "schemaVersion",
+        "sectionCount",
+        "timerState",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "StudyDbRecord": {
+      "title": "StudyDbRecord",
+      "description": "Native Firestore map chunk representing a section or slice of the user's StudyDatabase.",
+      "type": "object",
+      "properties": {
+        "ownerId": {
+          "type": "string",
+          "description": "The Firebase Auth UID of the record owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "section": {
+          "type": "string",
+          "description": "Name of the StudyDatabase section (e.g., questions, laws, schedule, preferences).",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "chunkIndex": {
+          "type": "number",
+          "description": "Zero-based index of this chunk within the section."
+        },
+        "chunkTotal": {
+          "type": "number",
+          "description": "Total number of chunks for this section."
+        },
+        "contentHash": {
+          "type": "string",
+          "description": "Deterministic hash of this chunk's payload.",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "payload": {
+          "type": "object",
+          "description": "Native Firestore map containing the structured records for this chunk."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when this record chunk was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when this record chunk was last updated."
+        }
+      },
+      "required": [
+        "ownerId",
+        "section",
+        "chunkIndex",
+        "chunkTotal",
+        "contentHash",
+        "payload",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/UserWorkspace"
+      },
+      "description": "Stores root workspace metadata and timer state for each authenticated user."
+    },
+    "/users/{userId}/dbRecords/{recordId}": {
+      "schema": {
+        "$ref": "#/entities/StudyDbRecord"
+      },
+      "description": "Stores native map chunks for all 29 sections of the user's StudyDatabase."
+    }
+  }
+}

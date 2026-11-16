@@ -143,6 +143,14 @@ import {
   readStudyTextFile,
 } from '../lib/pdfExtract';
 import {
+  clearUserFirestoreCacheState,
+  decomposeDatabaseToFirestoreChunks,
+  loadDatabaseFromFirestore,
+  saveDatabaseToFirestore,
+  subscribeToFirestoreWorkspace,
+  syncTimerStateToFirestore,
+} from '../lib/firebaseDb';
+import {
   ActiveTimerLink,
   AppPreferences,
   CaseLawItem,
@@ -801,6 +809,15 @@ interface StudyContextValue {
   testLocalIntegrity: () => { status: string; totalRecords: number };
   updatePreferences: (patch: Partial<AppPreferences>) => void;
   updateModuleVisibility: (moduleName: string, key: keyof ModuleVisibility, value: boolean) => void;
+
+  // Firebase Firestore Cloud Database integration
+  firebaseConnected: boolean;
+  isSyncingFirebase: boolean;
+  lastFirebaseSyncAt: string | null;
+  firebaseChunkCount: number;
+  syncNowWithFirebase: (options?: { forceFullWrite?: boolean; silent?: boolean }) => Promise<boolean>;
+  restoreFromFirebase: () => Promise<boolean>;
+  migrateDriveToFirebase: () => Promise<boolean>;
 
   // Google Drive integration
   googleUser: User | null;
@@ -2531,6 +2548,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
 
+  // Firebase Firestore state
+  const [isSyncingFirebase, setIsSyncingFirebase] = useState<boolean>(false);
+  const [lastFirebaseSyncAt, setLastFirebaseSyncAt] = useState<string | null>(
+    () => loadSyncMeta(initialScope).lastCloudSyncAt || null,
+  );
+  const [firebaseChunkCount, setFirebaseChunkCount] = useState<number>(() =>
+    decomposeDatabaseToFirestoreChunks(db).length,
+  );
+  const firebaseSyncTimerRef = useRef<number | null>(null);
+  const firebaseInFlightRef = useRef<boolean>(false);
+  const firebaseHydratedUidRef = useRef<string | null>(null);
+  const activeTimerTopicRef = useRef<ActiveTimerLink | null>(activeTimerTopic);
+  activeTimerTopicRef.current = activeTimerTopic;
+
   // Local Folder (Computer Directory) state
   const [localFolderConnected, setLocalFolderConnected] = useState<boolean>(false);
   const [localFolderWritable, setLocalFolderWritable] = useState<boolean>(false);
@@ -2728,6 +2759,53 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           });
       }, 450);
     }
+
+    // Automatically persist every database change incrementally to Firebase Firestore when authenticated
+    const activeUser = auth.currentUser;
+    if (activeUser?.uid && isEmailAuthorized(activeUser.email)) {
+      if (firebaseSyncTimerRef.current) {
+        window.clearTimeout(firebaseSyncTimerRef.current);
+      }
+      firebaseSyncTimerRef.current = window.setTimeout(() => {
+        firebaseSyncTimerRef.current = null;
+        const currentUser = auth.currentUser;
+        if (!currentUser?.uid || firebaseInFlightRef.current) return;
+        const curDb = dbRef.current;
+        const curScope = activeScopeRef.current;
+        const curHash = computeDatabaseContentHash(curDb);
+        firebaseInFlightRef.current = true;
+        setIsSyncingFirebase(true);
+        void saveDatabaseToFirestore(
+          currentUser.uid,
+          curDb,
+          curHash,
+          {
+            elapsed: timerStateRef.current.elapsed,
+            startedAt: timerStateRef.current.startedAt,
+            activeTopic: activeTimerTopicRef.current,
+          },
+        )
+          .then((res) => {
+            setLastFirebaseSyncAt(res.updatedAt);
+            setFirebaseChunkCount(res.totalChunks);
+            setLastCloudSyncAt(res.updatedAt);
+            pendingCloudSyncRef.current = false;
+            setHasPendingCloudChanges(false);
+            saveSyncMeta(curScope, {
+              lastCloudSyncAt: res.updatedAt,
+              lastCloudContentHash: curHash,
+              hasPendingCloudSync: false,
+            });
+          })
+          .catch((err) => {
+            console.warn('[Firebase Firestore] Falha ao sincronizar alteração incremental:', err);
+          })
+          .finally(() => {
+            firebaseInFlightRef.current = false;
+            setIsSyncingFirebase(false);
+          });
+      }, 600);
+    }
   }, [db]);
 
   // Apply theme attribute & meta color
@@ -2739,12 +2817,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     if (theme && meta) meta.content = theme.colors[0];
   }, [db.preferences.tema]);
 
-  // Persist timer state to user-scoped localStorage
+  // Persist timer state to user-scoped localStorage and Firebase Firestore
   useEffect(() => {
     try {
       localStorage.setItem(getTimerStorageKey(activeScopeRef.current), JSON.stringify(timerState));
     } catch {
       // Ignore storage error
+    }
+    const currentUser = auth.currentUser;
+    if (currentUser?.uid && firebaseHydratedUidRef.current === currentUser.uid) {
+      void syncTimerStateToFirestore(currentUser.uid, {
+        elapsed: timerState.elapsed,
+        startedAt: timerState.startedAt,
+        activeTopic: activeTimerTopicRef.current,
+      }).catch(() => {});
     }
   }, [timerState]);
 
@@ -2869,23 +2955,313 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   }, []);
 
-  const applyRestoredDatabaseForScope = useCallback((scope: string, nextDb: StudyDatabase, cloudTimestamp?: string) => {
-    isRestoringRef.current = true;
-    skipPersistDbRef.current = nextDb;
-    lastPersistedDbRef.current = nextDb;
-    setDb(nextDb);
-    dbRef.current = nextDb;
-    const serialized = JSON.stringify(nextDb);
-    const ts = cloudTimestamp || new Date().toISOString();
-    persistLocalDatabaseForScope(scope, serialized, ts, {
-      lastCloudSyncAt: ts,
-      lastLocalEditAt: ts,
-      hasPendingCloudSync: false,
+  const applyRestoredDatabaseForScope = useCallback(
+    (
+      scope: string,
+      nextDb: StudyDatabase,
+      cloudTimestamp?: string,
+      options?: { skipFirestorePush?: boolean },
+    ) => {
+      isRestoringRef.current = true;
+      skipPersistDbRef.current = nextDb;
+      lastPersistedDbRef.current = nextDb;
+      setDb(nextDb);
+      dbRef.current = nextDb;
+      setFirebaseChunkCount(decomposeDatabaseToFirestoreChunks(nextDb).length);
+      const serialized = JSON.stringify(nextDb);
+      const ts = cloudTimestamp || new Date().toISOString();
+      persistLocalDatabaseForScope(scope, serialized, ts, {
+        lastCloudSyncAt: ts,
+        lastLocalEditAt: ts,
+        hasPendingCloudSync: false,
+      });
+      setLastCloudSyncAt(ts);
+      setLastFirebaseSyncAt(ts);
+      pendingCloudSyncRef.current = false;
+      setHasPendingCloudChanges(false);
+
+      // Automatically mirror any database restored from Google Drive, Local Folder, or JSON Backup into Firebase Firestore
+      const currentUser = auth.currentUser;
+      if (
+        !options?.skipFirestorePush &&
+        currentUser?.uid &&
+        isEmailAuthorized(currentUser.email) &&
+        !isUntouchedSeedDatabase(nextDb)
+      ) {
+        const nextHash = computeDatabaseContentHash(nextDb);
+        setIsSyncingFirebase(true);
+        firebaseInFlightRef.current = true;
+        void saveDatabaseToFirestore(
+          currentUser.uid,
+          nextDb,
+          nextHash,
+          {
+            elapsed: timerStateRef.current.elapsed,
+            startedAt: timerStateRef.current.startedAt,
+            activeTopic: activeTimerTopicRef.current,
+          },
+        )
+          .then((saved) => {
+            setLastFirebaseSyncAt(saved.updatedAt);
+            setFirebaseChunkCount(saved.totalChunks);
+          })
+          .catch((err) => {
+            console.warn('[Firebase Firestore] Falha ao espelhar banco restaurado do Drive/Local:', err);
+          })
+          .finally(() => {
+            firebaseInFlightRef.current = false;
+            setIsSyncingFirebase(false);
+          });
+      }
+    },
+    [],
+  );
+
+  const syncNowWithFirebase = useCallback(
+    async (options?: { forceFullWrite?: boolean; silent?: boolean }): Promise<boolean> => {
+      let currentUser = auth.currentUser;
+      if (!currentUser?.uid) {
+        const res = await googleSignIn();
+        if (!res?.user?.uid) {
+          if (!options?.silent) {
+            toast('Faça login com sua conta Google para sincronizar com o Firebase Firestore.', true);
+          }
+          return false;
+        }
+        currentUser = res.user;
+      }
+
+      if (!isEmailAuthorized(currentUser.email)) {
+        if (!options?.silent) {
+          toast(`O e-mail "${currentUser.email || 'informado'}" não está autorizado.`, true);
+        }
+        return false;
+      }
+
+      setIsSyncingFirebase(true);
+      firebaseInFlightRef.current = true;
+      try {
+        window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
+        const curDb = dbRef.current;
+        const curScope = activeScopeRef.current;
+        const curHash = computeDatabaseContentHash(curDb);
+        const result = await saveDatabaseToFirestore(
+          currentUser.uid,
+          curDb,
+          curHash,
+          {
+            elapsed: timerStateRef.current.elapsed,
+            startedAt: timerStateRef.current.startedAt,
+            activeTopic: activeTimerTopicRef.current,
+          },
+          { forceFullWrite: options?.forceFullWrite },
+        );
+        setLastFirebaseSyncAt(result.updatedAt);
+        setFirebaseChunkCount(result.totalChunks);
+        setLastCloudSyncAt(result.updatedAt);
+        pendingCloudSyncRef.current = false;
+        setHasPendingCloudChanges(false);
+        saveSyncMeta(curScope, {
+          lastCloudSyncAt: result.updatedAt,
+          lastCloudContentHash: curHash,
+          hasPendingCloudSync: false,
+        });
+        if (!options?.silent) {
+          toast(
+            result.writtenChunks > 0
+              ? `Banco de dados salvo no Firebase Firestore (${result.writtenChunks} de ${result.totalChunks} partições atualizadas).`
+              : `Firebase Firestore já está 100% atualizado (${result.totalChunks} partições verificadas).`,
+          );
+        }
+        return true;
+      } catch (err) {
+        if (!options?.silent) {
+          toast(`Erro ao gravar no Firebase Firestore: ${(err as Error).message}`, true);
+        }
+        return false;
+      } finally {
+        firebaseInFlightRef.current = false;
+        setIsSyncingFirebase(false);
+      }
+    },
+    [toast],
+  );
+
+  const restoreFromFirebase = useCallback(async (): Promise<boolean> => {
+    let currentUser = auth.currentUser;
+    if (!currentUser?.uid) {
+      const res = await googleSignIn();
+      if (!res?.user?.uid) {
+        toast('Faça login com sua conta Google para restaurar do Firebase Firestore.', true);
+        return false;
+      }
+      currentUser = res.user;
+    }
+
+    setIsSyncingFirebase(true);
+    try {
+      const loaded = await loadDatabaseFromFirestore(currentUser.uid);
+      if (!loaded) {
+        toast('Nenhum banco de dados encontrado no Firebase Firestore para esta conta. Gravando dados atuais...', false);
+        return await syncNowWithFirebase({ forceFullWrite: true });
+      }
+      const normalized = normalizeAndMergeDatabase(loaded.db);
+      const scope = getUserScopeKey(currentUser);
+      applyRestoredDatabaseForScope(scope, normalized, loaded.updatedAt, { skipFirestorePush: true });
+      setFirebaseChunkCount(loaded.sectionCount);
+      toast(`Banco de dados restaurado do Firebase Firestore (${loaded.sectionCount} partições carregadas)!`);
+      return true;
+    } catch (err) {
+      toast(`Falha ao restaurar do Firebase Firestore: ${(err as Error).message}`, true);
+      return false;
+    } finally {
+      setIsSyncingFirebase(false);
+    }
+  }, [applyRestoredDatabaseForScope, syncNowWithFirebase, toast]);
+
+  // Automatic Firebase Firestore Hydration, Migration & Real-Time Listener on Auth
+  useEffect(() => {
+    const uidKey = googleUser?.uid || null;
+    if (!uidKey || !isEmailAuthorized(googleUser?.email)) {
+      firebaseHydratedUidRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    const scope = getUserScopeKey(googleUser);
+
+    void (async () => {
+      setIsSyncingFirebase(true);
+      try {
+        const [loadedFirestore, idbSnap] = await Promise.all([
+          loadDatabaseFromFirestore(uidKey),
+          loadScopedDatabaseJson(scope),
+        ]);
+        if (cancelled) return;
+
+        let localDb = dbRef.current;
+        if (idbSnap?.raw && shouldPreferIdbSnapshot(scope, idbSnap, true)) {
+          try {
+            localDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+          } catch {
+            // ignore
+          }
+        }
+
+        const localUntouched = isUntouchedSeedDatabase(localDb);
+        const localMeta = loadSyncMeta(scope);
+        const localEditMs = Date.parse(localMeta.lastLocalEditAt || '') || 0;
+
+        if (loadedFirestore) {
+          const remoteNormalized = normalizeAndMergeDatabase(loadedFirestore.db);
+          const remoteUntouched = isUntouchedSeedDatabase(remoteNormalized);
+          const remoteMs = Date.parse(loadedFirestore.updatedAt || '') || 0;
+          const remoteHash = computeDatabaseContentHash(remoteNormalized);
+          const localHash = computeDatabaseContentHash(localDb);
+
+          if (remoteUntouched && !localUntouched) {
+            // Firestore only had default seed data while local/Drive has the user's real study database: push local/Drive DB to Firestore!
+            applyRestoredDatabaseForScope(scope, localDb, new Date().toISOString(), { skipFirestorePush: true });
+            const saved = await saveDatabaseToFirestore(
+              uidKey,
+              localDb,
+              localHash,
+              {
+                elapsed: timerStateRef.current.elapsed,
+                startedAt: timerStateRef.current.startedAt,
+                activeTopic: activeTimerTopicRef.current,
+              },
+              { forceFullWrite: true },
+            );
+            setLastFirebaseSyncAt(saved.updatedAt);
+            setFirebaseChunkCount(saved.totalChunks);
+          } else if (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500)) {
+            if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current)) {
+              applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
+                skipFirestorePush: true,
+              });
+            } else {
+              setLastFirebaseSyncAt(loadedFirestore.updatedAt);
+            }
+            setFirebaseChunkCount(loadedFirestore.sectionCount);
+          } else {
+            // Merge local/Drive changes over Firestore baseline and push to Firestore
+            const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), localDb, {
+              updatedAt: new Date().toISOString(),
+              userEmail: googleUser?.email || undefined,
+            });
+            const mergedDb = delta.hasChanges
+              ? applyIncrementalDeltaToDatabase(remoteNormalized, delta.envelope)
+              : localDb;
+            const mergedHash = computeDatabaseContentHash(mergedDb);
+            applyRestoredDatabaseForScope(scope, mergedDb, new Date().toISOString(), { skipFirestorePush: true });
+            const saved = await saveDatabaseToFirestore(uidKey, mergedDb, mergedHash, {
+              elapsed: timerStateRef.current.elapsed,
+              startedAt: timerStateRef.current.startedAt,
+              activeTopic: activeTimerTopicRef.current,
+            });
+            setLastFirebaseSyncAt(saved.updatedAt);
+            setFirebaseChunkCount(saved.totalChunks);
+          }
+        } else if (!localUntouched) {
+          // First-time migration when local/Drive DB already has user data: push the entire StudyDatabase to Firebase Firestore
+          const hash = computeDatabaseContentHash(localDb);
+          const saved = await saveDatabaseToFirestore(
+            uidKey,
+            localDb,
+            hash,
+            {
+              elapsed: timerStateRef.current.elapsed,
+              startedAt: timerStateRef.current.startedAt,
+              activeTopic: activeTimerTopicRef.current,
+            },
+            { forceFullWrite: true },
+          );
+          if (!cancelled) {
+            setLastFirebaseSyncAt(saved.updatedAt);
+            setFirebaseChunkCount(saved.totalChunks);
+            setLastCloudSyncAt(saved.updatedAt);
+            saveSyncMeta(scope, {
+              lastCloudSyncAt: saved.updatedAt,
+              lastCloudContentHash: hash,
+              hasPendingCloudSync: false,
+            });
+          }
+        }
+
+        firebaseHydratedUidRef.current = uidKey;
+      } catch (err) {
+        console.warn('[Firebase Firestore] Aviso na hidratação inicial:', err);
+      } finally {
+        if (!cancelled) {
+          setIsSyncingFirebase(false);
+        }
+      }
+    })();
+
+    const unsubscribeSnapshot = subscribeToFirestoreWorkspace(uidKey, (remoteMeta) => {
+      if (cancelled || firebaseInFlightRef.current) return;
+      const curHash = computeDatabaseContentHash(dbRef.current);
+      if (remoteMeta.contentHash && remoteMeta.contentHash !== curHash) {
+        void loadDatabaseFromFirestore(uidKey)
+          .then((reloaded) => {
+            if (!reloaded || cancelled || firebaseInFlightRef.current) return;
+            const normalized = normalizeAndMergeDatabase(reloaded.db);
+            if (isUntouchedSeedDatabase(normalized) && !isUntouchedSeedDatabase(dbRef.current)) {
+              return;
+            }
+            applyRestoredDatabaseForScope(scope, normalized, reloaded.updatedAt, { skipFirestorePush: true });
+            setFirebaseChunkCount(reloaded.sectionCount);
+          })
+          .catch(() => {});
+      }
     });
-    setLastCloudSyncAt(ts);
-    pendingCloudSyncRef.current = false;
-    setHasPendingCloudChanges(false);
-  }, []);
+
+    return () => {
+      cancelled = true;
+      unsubscribeSnapshot();
+    };
+  }, [applyRestoredDatabaseForScope, googleUser]);
 
   const syncAccountWithDriveOnAuth = useCallback(
     async (user: User, token: string, scope: string, hadLocalDbBeforeLoad: boolean) => {
@@ -4156,8 +4532,10 @@ function isEmailAuthorized(email?: string | null): boolean {
     setDriveTokenReady(false);
     setDriveFolderUrl(null);
     setLastCloudSyncAt(null);
+    setLastFirebaseSyncAt(null);
     setLastCacheVerifiedAt(null);
-    toast('Google Drive desconectado. Alternado para ambiente local/offline.');
+    clearUserFirestoreCacheState();
+    toast('Conta desconectada. Alternado para ambiente local/offline.');
   }, [toast]);
 
   const clearDriveBrowserCache = useCallback(async () => {
@@ -4754,6 +5132,19 @@ function isEmailAuthorized(email?: string | null): boolean {
     },
     [applyRestoredDatabaseForScope, connectGoogleDrive, ensureDriveToken, googleUser?.email, toast],
   );
+
+  const migrateDriveToFirebase = useCallback(async (): Promise<boolean> => {
+    const driveRes = await restoreAllFromGoogleDrive({ silentIfEmpty: false });
+    const fbOk = await syncNowWithFirebase({ forceFullWrite: true, silent: true });
+    if (fbOk) {
+      toast(
+        driveRes.restoredDb || driveRes.filesRestored + driveRes.orphansImported > 0
+          ? `Migração concluída! Todos os dados e backups do Google Drive foram importados e gravados no Firebase Firestore.`
+          : `Seus dados já estavam atualizados e foram gravados integralmente no Firebase Firestore!`,
+      );
+    }
+    return fbOk;
+  }, [restoreAllFromGoogleDrive, syncNowWithFirebase, toast]);
 
   const pickDriveFolderOrFiles = useCallback(
     async (options?: {
@@ -11152,6 +11543,13 @@ function isEmailAuthorized(email?: string | null): boolean {
         testLocalIntegrity,
         updatePreferences,
         updateModuleVisibility,
+        firebaseConnected: Boolean(googleUser?.uid),
+        isSyncingFirebase,
+        lastFirebaseSyncAt,
+        firebaseChunkCount,
+        syncNowWithFirebase,
+        restoreFromFirebase,
+        migrateDriveToFirebase,
         googleUser,
         driveConnected,
         driveTokenReady,

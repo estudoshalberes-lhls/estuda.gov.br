@@ -39,6 +39,13 @@ export const BackupPage: React.FC = () => {
     resetDemoData,
     testLocalIntegrity,
     toast,
+    firebaseConnected,
+    isSyncingFirebase,
+    lastFirebaseSyncAt,
+    firebaseChunkCount,
+    syncNowWithFirebase,
+    restoreFromFirebase,
+    migrateDriveToFirebase,
     googleUser,
     driveConnected,
     driveTokenReady,
@@ -429,6 +436,130 @@ export const BackupPage: React.FC = () => {
         onChange={(e) => void handleMobileQuickFilesImport(e)}
         className="hidden"
       />
+
+      <Panel
+        title="Banco de Dados Principal em Nuvem — Firebase Firestore (Tempo Real)"
+        subtitle="Todo o banco de dados do portal (29 tabelas: questões, simulados, cronograma, caderno de erros, lei seca, matriz de incidência, editais, discursivas e preferências) é salvo e sincronizado automaticamente no Firebase Firestore em tempo real no PC e no smartphone."
+        className="mb-4"
+      >
+        <div className="flex flex-col gap-3 p-3.5 rounded-xl border border-emerald-500/40 bg-emerald-500/8">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <span
+                className={`grid place-items-center w-10 h-10 rounded-xl border shrink-0 ${
+                  firebaseConnected
+                    ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-600'
+                    : 'border-[var(--line-strong)] bg-[var(--panel)] text-[var(--muted)]'
+                }`}
+              >
+                <Database className="w-5 h-5" aria-hidden="true" />
+              </span>
+              <div className="min-w-0">
+                <div className="flex flex-wrap items-center gap-2">
+                  <strong className="text-[13px] font-bold text-[var(--text)]">
+                    {firebaseConnected
+                      ? `Firebase Firestore Ativo (${googleUser?.email || 'Conta autenticada'})`
+                      : 'Firebase Firestore — Conecte sua conta Google para sincronização em tempo real'}
+                  </strong>
+                  <span
+                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-bold ${
+                      firebaseConnected
+                        ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/35'
+                        : 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/35'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3 h-3 shrink-0" />
+                    {firebaseConnected
+                      ? isSyncingFirebase
+                        ? 'Sincronizando…'
+                        : 'Sincronização Automática Ativa'
+                      : 'Modo Offline / Local'}
+                  </span>
+                </div>
+                <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed mt-0.5">
+                  {firebaseConnected
+                    ? `Estrutura particionada nativa (${firebaseChunkCount} partições Firestore sem limite de tamanho e sem necessidade do Google Picker no celular)${
+                        lastFirebaseSyncAt
+                          ? ` · Última sincronização: ${new Date(lastFirebaseSyncAt).toLocaleString('pt-BR')}`
+                          : ''
+                      }`
+                    : 'No Firebase Firestore, seus dados sincronizam direto entre computador e celular sem depender do seletor de pastas do Google Drive.'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 shrink-0">
+              {!firebaseConnected ? (
+                <button
+                  type="button"
+                  onClick={() => void connectGoogleDrive()}
+                  disabled={isSyncingFirebase}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
+                >
+                  <Cloud className="w-3.5 h-3.5 shrink-0" />
+                  <span>Conectar Conta ao Firebase</span>
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => void syncNowWithFirebase()}
+                    disabled={isSyncingFirebase}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-emerald-600 bg-emerald-600 text-white text-[12px] font-bold hover:bg-emerald-700 disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
+                  >
+                    <CloudUpload className={`w-3.5 h-3.5 shrink-0 ${isSyncingFirebase ? 'animate-bounce' : ''}`} />
+                    <span>{isSyncingFirebase ? 'Sincronizando Firebase…' : 'Sincronizar Agora com Firebase'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void syncNowWithFirebase({ forceFullWrite: true })}
+                    disabled={isSyncingFirebase}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
+                  >
+                    <RefreshCcw className={`w-3.5 h-3.5 text-[var(--accent)] shrink-0 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
+                    <span>Gravar Banco Completo no Firebase</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void migrateDriveToFirebase()}
+                    disabled={isSyncingFirebase || isSyncingDrive}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
+                  >
+                    <FolderSync className={`w-3.5 h-3.5 shrink-0 ${isSyncingDrive || isSyncingFirebase ? 'animate-spin' : ''}`} />
+                    <span>
+                      {isSyncingDrive
+                        ? 'Lendo Google Drive…'
+                        : 'Importar Tudo do Google Drive p/ o Firebase'}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      const ok = await requestConfirm({
+                        title: 'Restaurar banco de dados do Firebase Firestore',
+                        description:
+                          'Deseja recarregar todas as 29 tabelas diretamente da última versão gravada no Firebase Firestore?',
+                        confirmLabel: 'Restaurar do Firebase',
+                      });
+                      if (ok) {
+                        await restoreFromFirebase();
+                      }
+                    }}
+                    disabled={isSyncingFirebase}
+                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
+                  >
+                    <CloudDownload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                    <span>Restaurar do Firebase</span>
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      </Panel>
 
       <Panel
         title="Modo Smartphone & Compartilhamento Rápido (App Google Drive / WhatsApp / Arquivos)"
