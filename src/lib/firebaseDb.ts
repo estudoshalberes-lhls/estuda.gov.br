@@ -2,12 +2,12 @@ import { getApps, getApp, initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
 import {
   collection,
+  deleteDoc,
   doc,
   getDoc,
   getDocFromServer,
   getDocs,
   getFirestore,
-  initializeFirestore,
   onSnapshot,
   query,
   serverTimestamp,
@@ -29,23 +29,12 @@ import {
 import { DEFAULT_PREFERENCES, createInitialDatabase } from '../data/seedData';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-function createFirestoreClient() {
-  try {
-    return initializeFirestore(
-      app,
-      { experimentalAutoDetectLongPolling: true },
-      firebaseConfig.firestoreDatabaseId,
-    );
-  } catch {
-    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
-  }
-}
-export const firestoreDb = createFirestoreClient();
+export const firestoreDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const firebaseAuth = getAuth(app);
 
-const FIRESTORE_READ_TIMEOUT_MS = 15_000;
-const FIRESTORE_WRITE_TIMEOUT_MS = 18_000;
-const FIRESTORE_BATCH_TIMEOUT_MS = 22_000;
+const FIRESTORE_READ_TIMEOUT_MS = 25_000;
+const FIRESTORE_WRITE_TIMEOUT_MS = 30_000;
+const FIRESTORE_BATCH_TIMEOUT_MS = 45_000;
 
 async function withFirestoreTimeout<T>(
   promise: Promise<T>,
@@ -917,23 +906,102 @@ export async function saveDatabaseToFirestore(
     }
   }
 
-  // Execute chunk mutations in safe batches of 20 operations
+  // Execute chunk mutations in small, fast batches (max 5 docs or ~450KB per batch)
   type BatchOp =
-    | { kind: 'create'; chunk: StudyDbRecordChunk }
-    | { kind: 'update'; chunk: StudyDbRecordChunk }
-    | { kind: 'delete'; recordId: string };
+    | { kind: 'create'; chunk: StudyDbRecordChunk; approxBytes: number }
+    | { kind: 'update'; chunk: StudyDbRecordChunk; approxBytes: number }
+    | { kind: 'delete'; recordId: string; approxBytes: number };
 
   const allOps: BatchOp[] = [
-    ...toCreate.map((chunk): BatchOp => ({ kind: 'create', chunk })),
-    ...toUpdate.map((chunk): BatchOp => ({ kind: 'update', chunk })),
-    ...toDelete.map((recordId): BatchOp => ({ kind: 'delete', recordId })),
+    ...toCreate.map((chunk): BatchOp => ({
+      kind: 'create',
+      chunk,
+      approxBytes: estimateByteLength(chunk.payload) + 256,
+    })),
+    ...toUpdate.map((chunk): BatchOp => ({
+      kind: 'update',
+      chunk,
+      approxBytes: estimateByteLength(chunk.payload) + 256,
+    })),
+    ...toDelete.map((recordId): BatchOp => ({
+      kind: 'delete',
+      recordId,
+      approxBytes: 128,
+    })),
   ];
 
-  const BATCH_SIZE = 20;
-  for (let i = 0; i < allOps.length; i += BATCH_SIZE) {
-    const slice = allOps.slice(i, i + BATCH_SIZE);
-    const batch = writeBatch(firestoreDb);
+  const MAX_BATCH_OPS = 5;
+  const MAX_BATCH_BYTES = 450_000;
+  const slices: BatchOp[][] = [];
+  let curSlice: BatchOp[] = [];
+  let curSliceBytes = 0;
 
+  for (const op of allOps) {
+    if (
+      curSlice.length > 0 &&
+      (curSlice.length >= MAX_BATCH_OPS || curSliceBytes + op.approxBytes > MAX_BATCH_BYTES)
+    ) {
+      slices.push(curSlice);
+      curSlice = [];
+      curSliceBytes = 0;
+    }
+    curSlice.push(op);
+    curSliceBytes += op.approxBytes;
+  }
+  if (curSlice.length > 0) {
+    slices.push(curSlice);
+  }
+
+  const commitSingleOp = async (op: BatchOp) => {
+    if (op.kind === 'create') {
+      const ref = doc(firestoreDb, 'users', userId, 'dbRecords', op.chunk.recordId);
+      await withFirestoreTimeout(
+        setDoc(ref, {
+          ownerId: userId,
+          section: op.chunk.section,
+          chunkIndex: op.chunk.chunkIndex,
+          chunkTotal: op.chunk.chunkTotal,
+          contentHash: op.chunk.contentHash,
+          payload: op.chunk.payload,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        `criação de partição (${op.chunk.recordId})`,
+      );
+      state.chunkHashes.set(op.chunk.recordId, op.chunk.contentHash);
+    } else if (op.kind === 'update') {
+      const ref = doc(firestoreDb, 'users', userId, 'dbRecords', op.chunk.recordId);
+      await withFirestoreTimeout(
+        updateDoc(ref, {
+          chunkIndex: op.chunk.chunkIndex,
+          chunkTotal: op.chunk.chunkTotal,
+          contentHash: op.chunk.contentHash,
+          payload: op.chunk.payload,
+          updatedAt: serverTimestamp(),
+        }),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        `atualização de partição (${op.chunk.recordId})`,
+      );
+      state.chunkHashes.set(op.chunk.recordId, op.chunk.contentHash);
+    } else {
+      const ref = doc(firestoreDb, 'users', userId, 'dbRecords', op.recordId);
+      await withFirestoreTimeout(
+        deleteDoc(ref),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        `remoção de partição (${op.recordId})`,
+      );
+      state.chunkHashes.delete(op.recordId);
+    }
+  };
+
+  let processedCount = 0;
+  for (const slice of slices) {
+    const startIdx = processedCount + 1;
+    const endIdx = processedCount + slice.length;
+    processedCount = endIdx;
+
+    const batch = writeBatch(firestoreDb);
     for (const op of slice) {
       if (op.kind === 'create') {
         const ref = doc(firestoreDb, 'users', userId, 'dbRecords', op.chunk.recordId);
@@ -956,7 +1024,7 @@ export async function saveDatabaseToFirestore(
           payload: op.chunk.payload,
           updatedAt: serverTimestamp(),
         });
-      } else if (op.kind === 'delete') {
+      } else {
         const ref = doc(firestoreDb, 'users', userId, 'dbRecords', op.recordId);
         batch.delete(ref);
       }
@@ -966,17 +1034,28 @@ export async function saveDatabaseToFirestore(
       await withFirestoreTimeout(
         batch.commit(),
         FIRESTORE_BATCH_TIMEOUT_MS,
-        `gravação em lote no Firestore (${i + 1}-${i + slice.length})`,
+        `gravação em lote no Firestore (${startIdx}-${endIdx})`,
       );
       for (const op of slice) {
         if (op.kind === 'create' || op.kind === 'update') {
           state.chunkHashes.set(op.chunk.recordId, op.chunk.contentHash);
-        } else if (op.kind === 'delete') {
+        } else {
           state.chunkHashes.delete(op.recordId);
         }
       }
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, recordsPath);
+    } catch (batchErr) {
+      if (slice.length > 1) {
+        // Fallback: commit operations individually so a larger slice never blocks progress
+        try {
+          for (const op of slice) {
+            await commitSingleOp(op);
+          }
+          continue;
+        } catch (singleErr) {
+          handleFirestoreError(singleErr, OperationType.WRITE, recordsPath);
+        }
+      }
+      handleFirestoreError(batchErr, OperationType.WRITE, recordsPath);
     }
   }
 

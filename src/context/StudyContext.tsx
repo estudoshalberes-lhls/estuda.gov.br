@@ -2745,7 +2745,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       activeFirebaseOpsRef.current = 0;
       firebaseInFlightRef.current = false;
       setIsSyncingFirebase(false);
-    }, 45_000);
+    }, 120_000);
     return () => window.clearTimeout(watchdogId);
   }, [isSyncingFirebase]);
 
@@ -3234,6 +3234,18 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return false;
       }
 
+      if (firebaseSyncTimerRef.current) {
+        window.clearTimeout(firebaseSyncTimerRef.current);
+        firebaseSyncTimerRef.current = null;
+      }
+
+      if (firebaseInFlightRef.current) {
+        const waitStart = Date.now();
+        while (firebaseInFlightRef.current && Date.now() - waitStart < 8000) {
+          await new Promise((r) => window.setTimeout(r, 200));
+        }
+      }
+
       beginFirebaseSyncOp();
       firebaseInFlightRef.current = true;
       try {
@@ -3272,7 +3284,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return true;
       } catch (err) {
         if (!options?.silent) {
-          toast(`Erro ao gravar no Firebase Firestore: ${(err as Error).message}`, true);
+          let readable = (err as Error)?.message || 'Falha na sincronização';
+          try {
+            const parsed = JSON.parse(readable);
+            if (parsed?.error) readable = String(parsed.error);
+          } catch {
+            // keep raw message
+          }
+          toast(`Erro ao gravar no Firebase Firestore: ${readable}`, true);
         }
         return false;
       } finally {
@@ -3308,7 +3327,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       toast(`Banco de dados restaurado do Firebase Firestore (${loaded.sectionCount} partições carregadas)!`);
       return true;
     } catch (err) {
-      toast(`Falha ao restaurar do Firebase Firestore: ${(err as Error).message}`, true);
+      let readable = (err as Error)?.message || 'Falha na restauração';
+      try {
+        const parsed = JSON.parse(readable);
+        if (parsed?.error) readable = String(parsed.error);
+      } catch {
+        // keep raw message
+      }
+      toast(`Falha ao restaurar do Firebase Firestore: ${readable}`, true);
       return false;
     } finally {
       endFirebaseSyncOp();
