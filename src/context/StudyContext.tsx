@@ -66,6 +66,10 @@ import {
   upsertTextFileInDriveSubFolder,
   getAccessToken,
   clearAccessTokenOnly,
+  subscribeDriveTokenChanges,
+  refreshDriveAccessTokenSilently,
+  ensureFirebaseSessionAlive,
+  isDriveAccessTokenExpiringSoon,
   DriveFileInfo,
   DriveFolderSummary,
   buildDriveSignatureMap,
@@ -825,6 +829,7 @@ interface StudyContextValue {
   googleUser: User | null;
   driveConnected: boolean;
   driveTokenReady: boolean;
+  isRenewingDriveToken: boolean;
   driveFolderUrl: string | null;
   activeDriveFolderName: string;
   lastCloudSyncAt: string | null;
@@ -835,7 +840,7 @@ interface StudyContextValue {
   authorizeDriveFolderViaPicker: () => Promise<boolean>;
   restoreProgress: RestoreProgress | null;
   authError: string | null;
-  connectGoogleDrive: () => Promise<boolean>;
+  connectGoogleDrive: (options?: { forceAccountPicker?: boolean }) => Promise<boolean>;
   disconnectGoogleDrive: () => Promise<void>;
   clearDriveBrowserCache: () => Promise<void>;
   selectDriveStudyFolder: (folder: { id?: string; name?: string }) => Promise<boolean>;
@@ -2687,6 +2692,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const [driveConnected, setDriveConnected] = useState<boolean>(false);
   const [driveTokenReady, setDriveTokenReady] = useState<boolean>(false);
+  const [isRenewingDriveToken, setIsRenewingDriveToken] = useState<boolean>(false);
   const [driveFolderUrl, setDriveFolderUrl] = useState<string | null>(null);
   const [activeDriveFolderName, setActiveDriveFolderName] = useState<string>(() => getPreferredStudyFolder().name);
   const [lastCloudSyncAt, setLastCloudSyncAt] = useState<string | null>(() => loadSyncMeta(initialScope).lastCloudSyncAt || null);
@@ -4502,8 +4508,28 @@ function isEmailAuthorized(email?: string | null): boolean {
         setDriveConnected(true);
         setDriveTokenReady(Boolean(token));
 
-        if (token && syncedScopeOnceRef.current !== newScope) {
-          void syncAccountWithDriveOnAuth(user, token, newScope, hadScopedLocal);
+        if (token) {
+          if (syncedScopeOnceRef.current !== newScope) {
+            void syncAccountWithDriveOnAuth(user, token, newScope, hadScopedLocal);
+          }
+        } else {
+          // OAuth access token expired (~60 min TTL) or cleared across restart while Firebase Auth persisted:
+          // Keep account connected and silently renew Drive access in the background.
+          setIsRenewingDriveToken(true);
+          void refreshDriveAccessTokenSilently({ email: user.email })
+            .then((renewedToken) => {
+              if (renewedToken && auth.currentUser?.uid === user.uid) {
+                setDriveTokenReady(true);
+                if (syncedScopeOnceRef.current !== newScope) {
+                  void syncAccountWithDriveOnAuth(user, renewedToken, newScope, hadScopedLocal);
+                } else if (pendingCloudSyncRef.current) {
+                  void flushCloudSyncNow();
+                }
+              }
+            })
+            .finally(() => {
+              setIsRenewingDriveToken(false);
+            });
         }
       },
       () => {
@@ -4574,12 +4600,111 @@ function isEmailAuthorized(email?: string | null): boolean {
       },
     );
     return () => unsubscribe();
-  }, [syncAccountWithDriveOnAuth]);
+  }, [flushCloudSyncNow, syncAccountWithDriveOnAuth]);
 
-  const connectGoogleDrive = useCallback(async (): Promise<boolean> => {
+  // Keep React driveTokenReady synchronized whenever Drive OAuth token is silently renewed or cleared
+  useEffect(() => {
+    return subscribeDriveTokenChanges((hasToken) => {
+      setDriveTokenReady(hasToken);
+    });
+  }, []);
+
+  // Permanent Google Session Keep-Alive:
+  // Keeps Firebase Auth ID token alive and proactively renews Drive OAuth token before the 60-min limit
+  // as well as whenever the user returns to the app or regains connectivity.
+  useEffect(() => {
+    if (!driveConnected) return;
+
+    let cancelled = false;
+    const maintainPermanentSession = async (forceRefresh = false) => {
+      await ensureFirebaseSessionAlive(false);
+      const currentUser = auth.currentUser;
+      if (!currentUser || !isEmailAuthorized(currentUser.email)) return;
+
+      const needsRenewal = forceRefresh || isDriveAccessTokenExpiringSoon(10 * 60 * 1000);
+      if (!needsRenewal) return;
+
+      setIsRenewingDriveToken(true);
+      try {
+        const renewed = await refreshDriveAccessTokenSilently({
+          email: currentUser.email,
+          force: forceRefresh,
+        });
+        if (cancelled || !renewed || auth.currentUser?.uid !== currentUser.uid) return;
+
+        setDriveTokenReady(true);
+        const scope = activeScopeRef.current;
+        if (scope !== 'offline_guest' && syncedScopeOnceRef.current !== scope) {
+          await syncAccountWithDriveOnAuth(currentUser, renewed, scope, true);
+        } else if (pendingCloudSyncRef.current) {
+          void flushCloudSyncNow();
+        }
+      } finally {
+        if (!cancelled) {
+          setIsRenewingDriveToken(false);
+        }
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void maintainPermanentSession(false);
+    }, 4 * 60 * 1000);
+
+    const handleWakeOrOnline = () => {
+      if (document.visibilityState === 'visible') {
+        void maintainPermanentSession(false);
+      }
+    };
+    const handleOnline = () => {
+      void maintainPermanentSession(true);
+    };
+
+    document.addEventListener('visibilitychange', handleWakeOrOnline);
+    window.addEventListener('focus', handleWakeOrOnline);
+    window.addEventListener('online', handleOnline);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleWakeOrOnline);
+      window.removeEventListener('focus', handleWakeOrOnline);
+      window.removeEventListener('online', handleOnline);
+    };
+  }, [driveConnected, flushCloudSyncNow, syncAccountWithDriveOnAuth]);
+
+  const connectGoogleDrive = useCallback(async (options?: { forceAccountPicker?: boolean }): Promise<boolean> => {
     setAuthError(null);
     try {
-      const res = await googleSignIn();
+      const currentUser = auth.currentUser;
+      if (currentUser && isEmailAuthorized(currentUser.email) && !options?.forceAccountPicker) {
+        setIsRenewingDriveToken(true);
+        try {
+          const silentToken = await refreshDriveAccessTokenSilently({
+            email: currentUser.email,
+            force: true,
+          });
+          if (silentToken) {
+            const currentScope = getUserScopeKey(currentUser);
+            setDriveConnected(true);
+            setGoogleUser(currentUser);
+            setDriveTokenReady(true);
+            if (syncedScopeOnceRef.current !== currentScope) {
+              void syncAccountWithDriveOnAuth(currentUser, silentToken, currentScope, true);
+            } else if (pendingCloudSyncRef.current) {
+              void flushCloudSyncNow();
+            }
+            toast(`Sessão do Google Drive renovada automaticamente (${currentUser.email})!`);
+            return true;
+          }
+        } finally {
+          setIsRenewingDriveToken(false);
+        }
+      }
+
+      const res = await googleSignIn({
+        loginHint: options?.forceAccountPicker ? null : currentUser?.email,
+        forceAccountPicker: options?.forceAccountPicker,
+      });
       if (res?.user) {
         const userEmail = res.user.email || '';
         if (!isEmailAuthorized(userEmail)) {
@@ -4681,7 +4806,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       toast(`Erro ao conectar ao Google: ${msg}`, true);
       return false;
     }
-  }, [syncAccountWithDriveOnAuth, toast]);
+  }, [flushCloudSyncNow, syncAccountWithDriveOnAuth, toast]);
 
   const disconnectGoogleDrive = useCallback(async () => {
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
@@ -4782,11 +4907,11 @@ function isEmailAuthorized(email?: string | null): boolean {
   }, [toast]);
 
   const ensureDriveToken = useCallback(async (): Promise<string | null> => {
-    let activeToken = await getAccessToken();
+    let activeToken = await getAccessToken({ allowSilentRefresh: true });
     if (!activeToken) {
       const ok = await connectGoogleDrive();
       if (!ok) return null;
-      activeToken = await getAccessToken();
+      activeToken = await getAccessToken({ allowSilentRefresh: true });
     }
     if (activeToken) {
       setDriveTokenReady(true);
@@ -11821,6 +11946,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         googleUser,
         driveConnected,
         driveTokenReady,
+        isRenewingDriveToken,
         driveFolderUrl,
         activeDriveFolderName,
         lastCloudSyncAt,

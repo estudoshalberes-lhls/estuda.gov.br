@@ -7,6 +7,7 @@ import {
   GoogleAuthProvider,
   onAuthStateChanged,
   setPersistence,
+  indexedDBLocalPersistence,
   browserLocalPersistence,
   User,
   signOut,
@@ -25,25 +26,159 @@ export const DRIVE_SCOPE = DRIVE_SCOPES[0];
 export const CLOUD_SYNC_FILENAME = 'central_estudos_sync_latest.json';
 const DRIVE_FOLDER_PREF_KEY = 'central_estudos_drive_folder_pref_v1';
 const KNOWN_DRIVE_ROOTS_KEY = 'central_estudos_known_drive_roots_v1';
+const DRIVE_TOKEN_CACHE_KEY = 'central_estudos_drive_token_v1';
+const LAST_GOOGLE_EMAIL_KEY = 'central_estudos_last_google_email_v1';
+const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
+const DRIVE_TOKEN_DEFAULT_TTL_MS = 55 * 60 * 1000;
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
 export const auth = getAuth(app);
-void setPersistence(auth, browserLocalPersistence).catch(() => {});
+const authPersistencePromise = setPersistence(auth, indexedDBLocalPersistence)
+  .catch(() => setPersistence(auth, browserLocalPersistence))
+  .catch(() => {});
 
-const provider = new GoogleAuthProvider();
-DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
-provider.setCustomParameters({ prompt: 'select_account' });
+function createGoogleAuthProvider(options?: {
+  loginHint?: string | null;
+  forceAccountPicker?: boolean;
+}): GoogleAuthProvider {
+  const authProvider = new GoogleAuthProvider();
+  DRIVE_SCOPES.forEach((scope) => authProvider.addScope(scope));
+  const customParams: Record<string, string> = {};
+  if (options?.forceAccountPicker || !options?.loginHint) {
+    customParams.prompt = 'select_account';
+  }
+  if (options?.loginHint) {
+    customParams.login_hint = options.loginHint;
+  }
+  if (Object.keys(customParams).length > 0) {
+    authProvider.setCustomParameters(customParams);
+  }
+  return authProvider;
+}
 
-// In-memory access token cache (never persisted to localStorage/sessionStorage)
+type DriveTokenListener = (hasToken: boolean, token: string | null) => void;
+const driveTokenListeners = new Set<DriveTokenListener>();
+
 let cachedAccessToken: string | null = null;
 let cachedAccessTokenExpiresAt = 0;
 let isSigningIn = false;
+let gsiLoadPromise: Promise<void> | null = null;
+let inflightSilentRefreshPromise: Promise<string | null> | null = null;
+let lastSilentRefreshFailureAt = 0;
 let cachedFolderId: string | null = null;
 let cachedFolderLink: string | null = null;
 let cachedFolderName: string | null = null;
 let inflightStudyFolderPromise: Promise<{ id: string; name: string; webViewLink?: string }> | null = null;
 const cachedSubFolderIds: Record<string, string> = {};
 const inflightSubFolderPromises = new Map<string, Promise<string>>();
+
+function notifyDriveTokenListeners(): void {
+  const valid = Boolean(cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 15_000));
+  const token = valid ? cachedAccessToken : null;
+  driveTokenListeners.forEach((listener) => {
+    try {
+      listener(valid, token);
+    } catch {
+      // ignore listener error
+    }
+  });
+}
+
+export function subscribeDriveTokenChanges(listener: DriveTokenListener): () => void {
+  driveTokenListeners.add(listener);
+  return () => {
+    driveTokenListeners.delete(listener);
+  };
+}
+
+function readLastGoogleEmail(): string | null {
+  try {
+    const val = localStorage.getItem(LAST_GOOGLE_EMAIL_KEY);
+    return val && val.trim() ? val.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+function rememberLastGoogleEmail(email?: string | null): void {
+  const clean = typeof email === 'string' ? email.trim() : '';
+  if (!clean) return;
+  try {
+    localStorage.setItem(LAST_GOOGLE_EMAIL_KEY, clean);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function clearRememberedGoogleEmail(): void {
+  try {
+    localStorage.removeItem(LAST_GOOGLE_EMAIL_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function persistDriveAccessToken(
+  token: string,
+  expiresAt: number,
+  user?: { uid?: string | null; email?: string | null } | null,
+): void {
+  cachedAccessToken = token;
+  cachedAccessTokenExpiresAt = expiresAt;
+  lastSilentRefreshFailureAt = 0;
+  const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
+  if (email) rememberLastGoogleEmail(email);
+  try {
+    localStorage.setItem(
+      DRIVE_TOKEN_CACHE_KEY,
+      JSON.stringify({
+        token,
+        expiresAt,
+        uid: user?.uid || auth.currentUser?.uid || undefined,
+        email,
+      }),
+    );
+  } catch {
+    // ignore storage errors
+  }
+  notifyDriveTokenListeners();
+}
+
+function restorePersistedDriveAccessToken(user?: User | null): string | null {
+  try {
+    const raw = localStorage.getItem(DRIVE_TOKEN_CACHE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as {
+      token?: string;
+      expiresAt?: number;
+      uid?: string;
+      email?: string;
+    };
+    if (!parsed?.token || !parsed?.expiresAt) return null;
+    if (Date.now() >= parsed.expiresAt - 60_000) {
+      localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
+      return null;
+    }
+    const targetUser = user || auth.currentUser;
+    if (targetUser) {
+      if (parsed.uid && targetUser.uid && parsed.uid !== targetUser.uid) {
+        return null;
+      }
+      if (
+        parsed.email &&
+        targetUser.email &&
+        parsed.email.trim().toLowerCase() !== targetUser.email.trim().toLowerCase()
+      ) {
+        return null;
+      }
+    }
+    cachedAccessToken = parsed.token;
+    cachedAccessTokenExpiresAt = parsed.expiresAt;
+    return parsed.token;
+  } catch {
+    return null;
+  }
+}
 
 export interface DriveFolderPreference {
   id: string | null;
@@ -147,9 +282,18 @@ export function extractDriveFolderId(input: string): string | null {
 export function clearAccessTokenOnly(): void {
   cachedAccessToken = null;
   cachedAccessTokenExpiresAt = 0;
+  try {
+    localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+  notifyDriveTokenListeners();
 }
 
 export function isDriveAccessTokenExpiringSoon(bufferMs = 5 * 60 * 1000): boolean {
+  if (!cachedAccessToken) {
+    restorePersistedDriveAccessToken(auth.currentUser);
+  }
   if (!cachedAccessToken) return true;
   if (!cachedAccessTokenExpiresAt) return false;
   return Date.now() >= cachedAccessTokenExpiresAt - bufferMs;
@@ -157,6 +301,7 @@ export function isDriveAccessTokenExpiringSoon(bufferMs = 5 * 60 * 1000): boolea
 
 export function resetDriveCache(): void {
   clearAccessTokenOnly();
+  lastSilentRefreshFailureAt = 0;
   cachedFolderId = null;
   cachedFolderLink = null;
   cachedFolderName = null;
@@ -164,6 +309,175 @@ export function resetDriveCache(): void {
   inflightSubFolderPromises.clear();
   for (const key of Object.keys(cachedSubFolderIds)) {
     delete cachedSubFolderIds[key];
+  }
+}
+
+function loadGoogleIdentityServices(): Promise<void> {
+  if (typeof window === 'undefined') {
+    return Promise.reject(new Error('Google Identity Services indisponível fora do navegador.'));
+  }
+  const win = window as any;
+  if (win.google?.accounts?.oauth2?.initTokenClient) {
+    return Promise.resolve();
+  }
+  if (gsiLoadPromise) return gsiLoadPromise;
+
+  gsiLoadPromise = new Promise<void>((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      'script[src="https://accounts.google.com/gsi/client"]',
+    );
+    const onReady = () => {
+      if (win.google?.accounts?.oauth2?.initTokenClient) {
+        resolve();
+      } else {
+        gsiLoadPromise = null;
+        reject(new Error('Google Identity Services não inicializou oauth2.'));
+      }
+    };
+    const onError = () => {
+      gsiLoadPromise = null;
+      reject(new Error('Falha ao carregar https://accounts.google.com/gsi/client.'));
+    };
+
+    if (existing) {
+      if (win.google?.accounts?.oauth2?.initTokenClient) {
+        resolve();
+        return;
+      }
+      existing.addEventListener('load', onReady, { once: true });
+      existing.addEventListener('error', onError, { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'https://accounts.google.com/gsi/client';
+    script.async = true;
+    script.defer = true;
+    script.onload = onReady;
+    script.onerror = onError;
+    document.head.appendChild(script);
+  });
+
+  return gsiLoadPromise;
+}
+
+export async function ensureFirebaseSessionAlive(forceRefresh = false): Promise<User | null> {
+  try {
+    await authPersistencePromise;
+    const currentUser = auth.currentUser;
+    if (!currentUser) return null;
+    await currentUser.getIdToken(forceRefresh);
+    return currentUser;
+  } catch {
+    return auth.currentUser || null;
+  }
+}
+
+export async function refreshDriveAccessTokenSilently(options?: {
+  email?: string | null;
+  force?: boolean;
+}): Promise<string | null> {
+  if (typeof window === 'undefined') return null;
+
+  if (!options?.force) {
+    if (!cachedAccessToken) {
+      restorePersistedDriveAccessToken(auth.currentUser);
+    }
+    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(3 * 60 * 1000)) {
+      return cachedAccessToken;
+    }
+    if (
+      lastSilentRefreshFailureAt &&
+      Date.now() - lastSilentRefreshFailureAt < SILENT_REFRESH_FAILURE_COOLDOWN_MS
+    ) {
+      return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt)
+        ? cachedAccessToken
+        : null;
+    }
+  } else if (
+    lastSilentRefreshFailureAt &&
+    Date.now() - lastSilentRefreshFailureAt < 15_000
+  ) {
+    return null;
+  }
+
+  if (inflightSilentRefreshPromise) {
+    return inflightSilentRefreshPromise;
+  }
+
+  const clientId = (firebaseConfig as any)?.oAuthClientId as string | undefined;
+  const loginHint = (options?.email || auth.currentUser?.email || readLastGoogleEmail() || '').trim();
+  if (!clientId || !loginHint) {
+    return null;
+  }
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      await loadGoogleIdentityServices();
+      const win = window as any;
+      const initTokenClient = win.google?.accounts?.oauth2?.initTokenClient;
+      if (!initTokenClient) return null;
+
+      return await new Promise<string | null>((resolve) => {
+        let settled = false;
+        const finish = (token: string | null) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeoutId);
+          resolve(token);
+        };
+
+        const timeoutId = window.setTimeout(() => {
+          lastSilentRefreshFailureAt = Date.now();
+          finish(null);
+        }, 9000);
+
+        try {
+          const tokenClient = initTokenClient({
+            client_id: clientId,
+            scope: DRIVE_SCOPES.join(' '),
+            hint: loginHint,
+            prompt: '',
+            callback: (resp: any) => {
+              if (resp?.access_token) {
+                const ttlSeconds = Number(resp.expires_in) || 3500;
+                const safeTtlMs = Math.max(5 * 60 * 1000, (ttlSeconds - 120) * 1000);
+                persistDriveAccessToken(resp.access_token, Date.now() + safeTtlMs, {
+                  uid: auth.currentUser?.uid,
+                  email: loginHint,
+                });
+                finish(resp.access_token);
+              } else {
+                lastSilentRefreshFailureAt = Date.now();
+                finish(null);
+              }
+            },
+            error_callback: () => {
+              lastSilentRefreshFailureAt = Date.now();
+              finish(null);
+            },
+          });
+
+          tokenClient.requestAccessToken({
+            prompt: '',
+            hint: loginHint,
+          });
+        } catch {
+          lastSilentRefreshFailureAt = Date.now();
+          finish(null);
+        }
+      });
+    } catch {
+      lastSilentRefreshFailureAt = Date.now();
+      return null;
+    }
+  })();
+
+  inflightSilentRefreshPromise = task;
+  try {
+    return await task;
+  } finally {
+    inflightSilentRefreshPromise = null;
   }
 }
 
@@ -256,6 +570,41 @@ function parseGoogleDriveErrorMessage(rawText: string): string {
   return rawText;
 }
 
+async function tryRefreshDriveTokenAfter401(): Promise<string | null> {
+  clearAccessTokenOnly();
+  return await refreshDriveAccessTokenSilently({
+    email: auth.currentUser?.email || readLastGoogleEmail(),
+    force: true,
+  });
+}
+
+async function authorizedDriveFetch(
+  url: string,
+  buildInit: (token: string) => RequestInit,
+  explicitToken?: string,
+  options?: { withRetry?: boolean; retries?: number },
+): Promise<{ res: Response; usedToken: string }> {
+  let tokenToUse = explicitToken || (await getAccessToken()) || '';
+  if (!tokenToUse) {
+    throw new Error('TOKEN_EXPIRED: Sua sessão do Google Drive expirou. Reconecte sua conta Google.');
+  }
+
+  const exec = (t: string) =>
+    options?.withRetry
+      ? driveFetchWithRetry(url, buildInit(t), options.retries ?? 2)
+      : fetch(url, buildInit(t));
+
+  let res = await exec(tokenToUse);
+  if (res.status === 401) {
+    const renewed = await tryRefreshDriveTokenAfter401();
+    if (renewed) {
+      tokenToUse = renewed;
+      res = await exec(tokenToUse);
+    }
+  }
+  return { res, usedToken: tokenToUse };
+}
+
 async function fetchDriveFilesList(
   token: string,
   opts: {
@@ -277,11 +626,24 @@ async function fetchDriveFilesList(
   if (opts.orderBy) baseParams.set('orderBy', opts.orderBy);
   if (opts.pageToken) baseParams.set('pageToken', opts.pageToken);
 
-  const primaryRes = await driveFetchWithRetry(
+  let activeToken = token;
+  let primaryRes = await driveFetchWithRetry(
     `https://www.googleapis.com/drive/v3/files?${baseParams.toString()}`,
-    { headers: { Authorization: `Bearer ${token}` } },
+    { headers: { Authorization: `Bearer ${activeToken}` } },
     2,
   );
+
+  if (primaryRes.status === 401) {
+    const renewed = await tryRefreshDriveTokenAfter401();
+    if (renewed) {
+      activeToken = renewed;
+      primaryRes = await driveFetchWithRetry(
+        `https://www.googleapis.com/drive/v3/files?${baseParams.toString()}`,
+        { headers: { Authorization: `Bearer ${activeToken}` } },
+        2,
+      );
+    }
+  }
 
   if (primaryRes.ok || primaryRes.status === 401 || primaryRes.status === 403) {
     return primaryRes;
@@ -297,11 +659,22 @@ async function fetchDriveFilesList(
     });
     if (opts.pageToken) fallbackParams.set('pageToken', opts.pageToken);
 
-    const fallbackRes = await driveFetchWithRetry(
+    let fallbackRes = await driveFetchWithRetry(
       `https://www.googleapis.com/drive/v3/files?${fallbackParams.toString()}`,
-      { headers: { Authorization: `Bearer ${token}` } },
+      { headers: { Authorization: `Bearer ${activeToken}` } },
       1,
     );
+    if (fallbackRes.status === 401) {
+      const renewed = await tryRefreshDriveTokenAfter401();
+      if (renewed) {
+        activeToken = renewed;
+        fallbackRes = await driveFetchWithRetry(
+          `https://www.googleapis.com/drive/v3/files?${fallbackParams.toString()}`,
+          { headers: { Authorization: `Bearer ${activeToken}` } },
+          1,
+        );
+      }
+    }
     if (fallbackRes.ok || fallbackRes.status === 401 || fallbackRes.status === 403) {
       return fallbackRes;
     }
@@ -362,29 +735,38 @@ export const initDriveAuth = (
   onAuthFailure?: () => void,
 ) => {
   try {
-    void getRedirectResult(auth)
-      .then((result) => {
-        if (result?.user) {
-          const cred = GoogleAuthProvider.credentialFromResult(result);
-          if (cred?.accessToken) {
-            cachedAccessToken = cred.accessToken;
-            cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
-            if (onAuthSuccess) {
-              onAuthSuccess(result.user, cachedAccessToken);
+    void authPersistencePromise.then(() =>
+      getRedirectResult(auth)
+        .then((result) => {
+          if (result?.user) {
+            rememberLastGoogleEmail(result.user.email);
+            const cred = GoogleAuthProvider.credentialFromResult(result);
+            if (cred?.accessToken) {
+              persistDriveAccessToken(
+                cred.accessToken,
+                Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS,
+                result.user,
+              );
+              if (onAuthSuccess) {
+                onAuthSuccess(result.user, cred.accessToken);
+              }
             }
           }
-        }
-      })
-      .catch((err) => {
-        console.warn('Redirect auth result:', err);
-      });
+        })
+        .catch((err) => {
+          console.warn('Redirect auth result:', err);
+        }),
+    );
 
     return onAuthStateChanged(auth, (user: User | null) => {
       if (user) {
-        // Never disconnect an authenticated user if the in-memory Drive OAuth token
-        // cleared on reload or expired by time limit — keep the account active.
+        rememberLastGoogleEmail(user.email);
+        const token = cachedAccessToken || restorePersistedDriveAccessToken(user);
+        notifyDriveTokenListeners();
+        // Never disconnect an authenticated user if the Drive OAuth token
+        // cleared or expired by time limit — keep the account active and renew silently.
         if (onAuthSuccess) {
-          onAuthSuccess(user, cachedAccessToken);
+          onAuthSuccess(user, token);
         }
       } else {
         resetDriveCache();
@@ -399,14 +781,28 @@ export const initDriveAuth = (
   }
 };
 
-export const googleSignIn = async (): Promise<{ user: User; accessToken: string } | null> => {
+export const googleSignIn = async (options?: {
+  loginHint?: string | null;
+  forceAccountPicker?: boolean;
+}): Promise<{ user: User; accessToken: string } | null> => {
+  const hint = (options?.loginHint || (!options?.forceAccountPicker ? auth.currentUser?.email : null) || null)?.trim() || null;
+  const authProvider = createGoogleAuthProvider({
+    loginHint: hint,
+    forceAccountPicker: options?.forceAccountPicker,
+  });
+
   try {
     isSigningIn = true;
-    const result = await signInWithPopup(auth, provider);
+    await authPersistencePromise;
+    const result = await signInWithPopup(auth, authProvider);
+    rememberLastGoogleEmail(result.user.email);
     const credential = GoogleAuthProvider.credentialFromResult(result);
     if (credential?.accessToken) {
-      cachedAccessToken = credential.accessToken;
-      cachedAccessTokenExpiresAt = Date.now() + 55 * 60 * 1000;
+      persistDriveAccessToken(
+        credential.accessToken,
+        Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS,
+        result.user,
+      );
     }
     cachedFolderId = null;
     cachedFolderLink = null;
@@ -422,7 +818,7 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
       typeof window !== 'undefined' &&
       window.self === window.top
     ) {
-      await signInWithRedirect(auth, provider);
+      await signInWithRedirect(auth, authProvider);
       return null;
     }
     console.error('Erro de login no Google Drive:', error);
@@ -434,11 +830,43 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
   }
 };
 
-export const getAccessToken = async (): Promise<string | null> => {
-  return cachedAccessToken;
+export const getAccessToken = async (options?: {
+  allowSilentRefresh?: boolean;
+  forceRefresh?: boolean;
+  loginHint?: string | null;
+}): Promise<string | null> => {
+  if (!options?.forceRefresh) {
+    if (!cachedAccessToken && auth.currentUser) {
+      restorePersistedDriveAccessToken(auth.currentUser);
+    }
+    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(2 * 60 * 1000)) {
+      return cachedAccessToken;
+    }
+  }
+
+  if (options?.allowSilentRefresh !== false && (auth.currentUser || readLastGoogleEmail())) {
+    const renewed = await refreshDriveAccessTokenSilently({
+      email: options?.loginHint || auth.currentUser?.email,
+      force: options?.forceRefresh,
+    });
+    if (renewed) {
+      return renewed;
+    }
+  }
+
+  if (
+    !options?.forceRefresh &&
+    cachedAccessToken &&
+    (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 15_000)
+  ) {
+    return cachedAccessToken;
+  }
+
+  return null;
 };
 
 export const googleSignOut = async (): Promise<void> => {
+  clearRememberedGoogleEmail();
   await signOut(auth);
   resetDriveCache();
 };
@@ -625,11 +1053,10 @@ export async function getDriveFolderMetadata(
   const extractedId = extractDriveFolderId(folderIdOrUrl);
   if (!extractedId) return null;
 
-  const res = await fetch(
+  const { res } = await authorizedDriveFetch(
     `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(extractedId)}?fields=id,name,mimeType,webViewLink,trashed&supportsAllDrives=true`,
-    {
-      headers: { Authorization: `Bearer ${activeToken}` },
-    },
+    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+    activeToken,
   );
 
   if (res.status === 401) {
@@ -660,12 +1087,12 @@ export async function verifyDriveFolderWritable(folderId: string, token?: string
     throw new Error('TOKEN_EXPIRED: Conecte sua conta Google primeiro.');
   }
 
-  const res = await fetch(
+  const { res, usedToken } = await authorizedDriveFetch(
     'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id',
-    {
+    (t) => ({
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${activeToken}`,
+        Authorization: `Bearer ${t}`,
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
@@ -673,7 +1100,8 @@ export async function verifyDriveFolderWritable(folderId: string, token?: string
         mimeType: 'text/plain',
         parents: [folderId],
       }),
-    },
+    }),
+    activeToken,
   );
 
   if (res.status === 401) {
@@ -693,7 +1121,7 @@ export async function verifyDriveFolderWritable(folderId: string, token?: string
         `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(created.id)}?supportsAllDrives=true`,
         {
           method: 'DELETE',
-          headers: { Authorization: `Bearer ${activeToken}` },
+          headers: { Authorization: `Bearer ${usedToken}` },
         },
       ).catch(() => {});
     }
@@ -831,12 +1259,12 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
       return { id: chosen.id, name: chosen.name, webViewLink: link };
     }
 
-    const createRes = await fetch(
+    const { res: createRes } = await authorizedDriveFetch(
       'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name,webViewLink',
-      {
+      (t) => ({
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${activeToken}`,
+          Authorization: `Bearer ${t}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -844,7 +1272,8 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
           mimeType: 'application/vnd.google-apps.folder',
           description: 'Pasta do acervo de estudos e materiais da Central de Estudos.',
         }),
-      },
+      }),
+      activeToken,
     );
 
     if (!createRes.ok) {
@@ -897,11 +1326,10 @@ async function getOrCreateSingleSubFolder(
     const query = encodeURIComponent(
       `mimeType = 'application/vnd.google-apps.folder' and name = '${escapedSegment}' and '${parentId}' in parents and trashed = false`,
     );
-    const searchRes = await fetch(
+    const { res: searchRes, usedToken } = await authorizedDriveFetch(
       `https://www.googleapis.com/drive/v3/files?q=${query}&fields=files(id,name)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=createdTime asc&pageSize=10`,
-      {
-        headers: { Authorization: `Bearer ${activeToken}` },
-      },
+      (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+      activeToken,
     );
 
     if (searchRes.ok) {
@@ -915,12 +1343,12 @@ async function getOrCreateSingleSubFolder(
       await throwDriveResponseError(searchRes, 'Sessão expirada ao buscar subpasta');
     }
 
-    const createRes = await fetch(
+    const { res: createRes } = await authorizedDriveFetch(
       'https://www.googleapis.com/drive/v3/files?supportsAllDrives=true&fields=id,name',
-      {
+      (t) => ({
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${activeToken}`,
+          Authorization: `Bearer ${t}`,
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
@@ -928,7 +1356,8 @@ async function getOrCreateSingleSubFolder(
           mimeType: 'application/vnd.google-apps.folder',
           parents: [parentId],
         }),
-      },
+      }),
+      usedToken,
     );
 
     if (!createRes.ok) {
@@ -1067,16 +1496,17 @@ export async function uploadFileToDrive(
   fullPayload.set(new Uint8Array(buffer), part1.length + part2.length);
   fullPayload.set(part3, part1.length + part2.length + buffer.byteLength);
 
-  const res = await fetch(
+  const { res } = await authorizedDriveFetch(
     'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents',
-    {
+    (t) => ({
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${activeToken}`,
+        Authorization: `Bearer ${t}`,
         'Content-Type': `multipart/related; boundary=${boundary}`,
       },
       body: fullPayload,
-    },
+    }),
+    activeToken,
   );
 
   if (!res.ok) {
@@ -1140,14 +1570,19 @@ export async function upsertTextFileInDriveSubFolder(
     ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`
     : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents';
 
-  const res = await driveFetchWithRetry(url, {
-    method: existingFileId ? 'PATCH' : 'POST',
-    headers: {
-      Authorization: `Bearer ${activeToken}`,
-      'Content-Type': `multipart/related; boundary=${boundary}`,
-    },
-    body: multipartBody,
-  });
+  const { res } = await authorizedDriveFetch(
+    url,
+    (t) => ({
+      method: existingFileId ? 'PATCH' : 'POST',
+      headers: {
+        Authorization: `Bearer ${t}`,
+        'Content-Type': `multipart/related; boundary=${boundary}`,
+      },
+      body: multipartBody,
+    }),
+    activeToken,
+    { withRetry: true },
+  );
 
   if (!res.ok) {
     await throwDriveResponseError(res, `Falha ao salvar arquivo TXT "${filename}" no Google Drive`);
@@ -1345,11 +1780,10 @@ export async function saveCloudSyncSnapshot(
   const searchQuery = encodeURIComponent(
     `'${backupsFolderId}' in parents and name = '${CLOUD_SYNC_FILENAME}' and trashed = false`,
   );
-  const searchRes = await fetch(
+  const { res: searchRes, usedToken } = await authorizedDriveFetch(
     `https://www.googleapis.com/drive/v3/files?q=${searchQuery}&fields=files(id,name,modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=modifiedTime desc&pageSize=10`,
-    {
-      headers: { Authorization: `Bearer ${activeToken}` },
-    },
+    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+    activeToken,
   );
 
   if (searchRes.ok) {
@@ -1357,22 +1791,23 @@ export async function saveCloudSyncSnapshot(
     const existingList = (searchData.files || []) as Array<{ id: string }>;
     const existing = existingList[0];
     if (existing?.id) {
-      const patchRes = await fetch(
+      const { res: patchRes, usedToken: patchToken } = await authorizedDriveFetch(
         `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`,
-        {
+        (t) => ({
           method: 'PATCH',
           headers: {
-            Authorization: `Bearer ${activeToken}`,
+            Authorization: `Bearer ${t}`,
             'Content-Type': 'application/json; charset=UTF-8',
           },
           body: blob,
-        },
+        }),
+        usedToken,
       );
       if (patchRes.ok) {
         // Remove any duplicate canonical sync files in the same Backups folder so only 1 remains
         for (const dup of existingList.slice(1)) {
           if (dup?.id) {
-            void deleteFileFromDrive(dup.id, activeToken).catch(() => {});
+            void deleteFileFromDrive(dup.id, patchToken).catch(() => {});
           }
         }
         return (await patchRes.json()) as DriveFileInfo;
@@ -1385,7 +1820,7 @@ export async function saveCloudSyncSnapshot(
     await throwDriveResponseError(searchRes, 'Sessão expirada ao buscar sincronização no Drive');
   }
 
-  return await uploadFileToDrive(blob, CLOUD_SYNC_FILENAME, activeToken, 'Backups');
+  return await uploadFileToDrive(blob, CLOUD_SYNC_FILENAME, usedToken, 'Backups');
 }
 
 /**
@@ -1585,11 +2020,10 @@ export async function downloadBackupFileFromDrive(
   const activeToken = token || (await getAccessToken());
   if (!activeToken) throw new Error('TOKEN_EXPIRED: Não autenticado no Google.');
 
-  const res = await fetch(
+  const { res } = await authorizedDriveFetch(
     `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`,
-    {
-      headers: { Authorization: `Bearer ${activeToken}` },
-    },
+    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+    activeToken,
   );
 
   if (!res.ok) {
@@ -1840,9 +2274,11 @@ export async function downloadDriveFileBlob(
     ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf`
     : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
 
-  const res = await fetch(url, {
-    headers: { Authorization: `Bearer ${activeToken}` },
-  });
+  const { res } = await authorizedDriveFetch(
+    url,
+    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+    activeToken,
+  );
 
   if (!res.ok) {
     if (res.status === 403) {
@@ -1875,10 +2311,14 @@ export async function deleteFileFromDrive(fileId: string, token?: string): Promi
   const activeToken = token || (await getAccessToken());
   if (!activeToken) return;
 
-  const res = await fetch(`https://www.googleapis.com/drive/v3/files/${fileId}`, {
-    method: 'DELETE',
-    headers: { Authorization: `Bearer ${activeToken}` },
-  });
+  const { res } = await authorizedDriveFetch(
+    `https://www.googleapis.com/drive/v3/files/${fileId}`,
+    (t) => ({
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${t}` },
+    }),
+    activeToken,
+  );
 
   if (!res.ok && res.status === 401) {
     clearAccessTokenOnly();

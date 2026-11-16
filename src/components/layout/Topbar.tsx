@@ -59,6 +59,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     googleUser,
     driveConnected,
     driveTokenReady,
+    isRenewingDriveToken,
     isSyncingDrive,
     hasPendingCloudChanges,
     drivePermissionNeedsPicker,
@@ -574,13 +575,22 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">Autorizar Drive</span>
           </button>
+        ) : driveConnected && isRenewingDriveToken ? (
+          <span
+            aria-label="Renovando sessão do Google Drive"
+            title="Renovando automaticamente a permissão do Google Drive em segundo plano…"
+            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold shrink-0 whitespace-nowrap"
+          >
+            <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
+            <span className="hidden sm:inline">Renovando…</span>
+          </span>
         ) : driveConnected && !driveTokenReady ? (
           <button
             type="button"
             onClick={() => void connectGoogleDrive()}
             disabled={isSyncingDrive}
             aria-label="Reconectar Google Drive"
-            title="Permissão temporária do Drive expirou — clique para reconectar e salvar alterações"
+            title="Navegador bloqueou a renovação silenciosa — clique uma vez para renovar o acesso ao Google Drive"
             className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
           >
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
@@ -613,19 +623,21 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             title={
               drivePermissionNeedsPicker
                 ? `Conectado (${googleUser?.email || ''}) · Aguardando autorização da pasta — Clique para sair`
+                : isRenewingDriveToken
+                ? `Conectado (${googleUser?.email || ''}) · Renovando sessão automaticamente…`
                 : !driveTokenReady
-                ? `Conectado (${googleUser?.email || ''}) · Sessão Drive expirada — Clique para sair`
+                ? `Conta conectada (${googleUser?.email || ''}) · Clique em Reconectar se precisar enviar arquivos ao Drive`
                 : isSyncingDrive
                 ? `Sincronizando (${googleUser?.email || ''})…`
-                : `Sincronizado (${googleUser?.email || ''}) — Clique para sair`
+                : `Sessão permanente ativa (${googleUser?.email || ''}) — Clique para sair`
             }
             className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 ${
-              drivePermissionNeedsPicker || !driveTokenReady
+              drivePermissionNeedsPicker || (!driveTokenReady && !isRenewingDriveToken)
                 ? 'border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
                 : 'border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
             }`}
           >
-            <Cloud className={`w-4 h-4 ${isSyncingDrive ? 'animate-pulse' : ''}`} />
+            <Cloud className={`w-4 h-4 ${isSyncingDrive || isRenewingDriveToken ? 'animate-pulse' : ''}`} />
           </button>
         ) : (
           <button

@@ -49,6 +49,7 @@ export const BackupPage: React.FC = () => {
     googleUser,
     driveConnected,
     driveTokenReady,
+    isRenewingDriveToken,
     driveFolderUrl,
     activeDriveFolderName,
     lastCloudSyncAt,
@@ -919,18 +920,20 @@ export const BackupPage: React.FC = () => {
                 </strong>
                 <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed">
                   {driveConnected
-                    ? driveTokenReady
+                    ? isRenewingDriveToken
+                      ? `Conta permanente (${googleUser?.email || 'Google'}) · Renovando permissão do Google Drive automaticamente…`
+                      : driveTokenReady
                       ? lastCloudSyncAt
-                        ? `Pasta ativa: "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
-                        : `Pasta ativa: "${activeDriveFolderName}" · Sincronização automática ativa`
-                      : `Conta vinculada (${googleUser?.email || 'Google'}), mas a permissão do Drive expirou — toque em Reconectar Drive`
+                        ? `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
+                        : `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Renovação automática ativada`
+                      : `Conta e Firestore conectados (${googleUser?.email || 'Google'}), mas o navegador bloqueou a renovação silenciosa do Drive — toque em Reconectar Drive`
                     : 'Nenhuma conta Google vinculada no momento. Conecte para ativar backups automáticos na nuvem'}
                 </span>
               </div>
             </div>
 
             <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
-              {(!driveConnected || !driveTokenReady) && (
+              {(!driveConnected || (!driveTokenReady && !isRenewingDriveToken)) && (
                 <button
                   type="button"
                   onClick={() => void connectGoogleDrive()}
@@ -1228,14 +1231,14 @@ export const BackupPage: React.FC = () => {
             )}
           </div>
 
-          {hasPendingCloudChanges && (!driveConnected || !driveTokenReady || drivePermissionNeedsPicker) && (
+          {hasPendingCloudChanges && (!driveConnected || (!driveTokenReady && !isRenewingDriveToken) || drivePermissionNeedsPicker) && (
             <div className="ce-notice ce-notice-warning text-[11.5px] leading-relaxed flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2">
               <span className="min-w-0 flex-1">
                 <strong className="text-[var(--text)]">Alterações locais aguardando envio para a nuvem:</strong>{' '}
                 {drivePermissionNeedsPicker
                   ? 'seus dados já estão salvos neste navegador. Ative a pasta sincronizada do Google Drive para enviar suas alterações.'
                   : driveConnected && !driveTokenReady
-                  ? 'seus dados já estão seguros no navegador, mas a permissão temporária do Drive expirou. Reconecte para enviar à nuvem.'
+                  ? 'seus dados já estão seguros no Firestore e no navegador, mas o navegador impediu a renovação automática do Drive. Toque em Reconectar para enviar os arquivos.'
                   : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta Google.'}
               </span>
               {drivePermissionNeedsPicker ? (

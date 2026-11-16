@@ -133,11 +133,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
     }
   };
 
-  const handleGoogleLogin = async () => {
+  const handleGoogleLogin = async (forceAccountPicker = false) => {
     setLoading(true);
     setErrorMessage(null);
     try {
-      const ok = await connectGoogleDrive();
+      const ok = await connectGoogleDrive({ forceAccountPicker });
       if (ok) {
         onContinueOffline();
       } else {
@@ -314,7 +314,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleGoogleLogin()}
+                    onClick={() => void handleGoogleLogin(true)}
                     disabled={loading || isBusyLocal}
                     className="w-full py-1.5 text-[11.5px] font-semibold text-[var(--accent)] hover:underline bg-transparent border-0 cursor-pointer"
                   >
@@ -523,7 +523,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               <div className="flex flex-col divide-y divide-[var(--line)]/60">
                 <button
                   type="button"
-                  onClick={handleGoogleLogin}
+                  onClick={() => void handleGoogleLogin(false)}
                   disabled={loading || isBusyLocal}
                   className="w-full py-2.5 px-1 text-left flex items-center justify-between gap-2 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait bg-transparent border-0"
                 >
