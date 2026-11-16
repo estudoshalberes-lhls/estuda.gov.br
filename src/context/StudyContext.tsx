@@ -2722,8 +2722,32 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const firebaseSyncTimerRef = useRef<number | null>(null);
   const firebaseInFlightRef = useRef<boolean>(false);
   const firebaseHydratedUidRef = useRef<string | null>(null);
+  const activeFirebaseOpsRef = useRef<number>(0);
   const activeTimerTopicRef = useRef<ActiveTimerLink | null>(activeTimerTopic);
   activeTimerTopicRef.current = activeTimerTopic;
+
+  const beginFirebaseSyncOp = useCallback(() => {
+    activeFirebaseOpsRef.current += 1;
+    setIsSyncingFirebase(true);
+  }, []);
+
+  const endFirebaseSyncOp = useCallback(() => {
+    activeFirebaseOpsRef.current = Math.max(0, activeFirebaseOpsRef.current - 1);
+    if (activeFirebaseOpsRef.current === 0) {
+      setIsSyncingFirebase(false);
+    }
+  }, []);
+
+  // Safety watchdog: never leave the Firebase UI locked in "Sincronizando..." indefinitely
+  useEffect(() => {
+    if (!isSyncingFirebase) return;
+    const watchdogId = window.setTimeout(() => {
+      activeFirebaseOpsRef.current = 0;
+      firebaseInFlightRef.current = false;
+      setIsSyncingFirebase(false);
+    }, 45_000);
+    return () => window.clearTimeout(watchdogId);
+  }, [isSyncingFirebase]);
 
   // Local Folder (Computer Directory) state
   const [localFolderConnected, setLocalFolderConnected] = useState<boolean>(false);
@@ -2929,47 +2953,54 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (firebaseSyncTimerRef.current) {
         window.clearTimeout(firebaseSyncTimerRef.current);
       }
-      firebaseSyncTimerRef.current = window.setTimeout(() => {
-        firebaseSyncTimerRef.current = null;
-        const currentUser = auth.currentUser;
-        if (!currentUser?.uid || firebaseInFlightRef.current) return;
-        const curDb = dbRef.current;
-        const curScope = activeScopeRef.current;
-        const curHash = computeDatabaseContentHash(curDb);
-        firebaseInFlightRef.current = true;
-        setIsSyncingFirebase(true);
-        void saveDatabaseToFirestore(
-          currentUser.uid,
-          curDb,
-          curHash,
-          {
-            elapsed: timerStateRef.current.elapsed,
-            startedAt: timerStateRef.current.startedAt,
-            activeTopic: activeTimerTopicRef.current,
-          },
-        )
-          .then((res) => {
-            setLastFirebaseSyncAt(res.updatedAt);
-            setFirebaseChunkCount(res.totalChunks);
-            setLastCloudSyncAt(res.updatedAt);
-            pendingCloudSyncRef.current = false;
-            setHasPendingCloudChanges(false);
-            saveSyncMeta(curScope, {
-              lastCloudSyncAt: res.updatedAt,
-              lastCloudContentHash: curHash,
-              hasPendingCloudSync: false,
+      const scheduleIncrementalFirebaseSave = (delayMs: number) => {
+        firebaseSyncTimerRef.current = window.setTimeout(() => {
+          firebaseSyncTimerRef.current = null;
+          const currentUser = auth.currentUser;
+          if (!currentUser?.uid) return;
+          if (firebaseInFlightRef.current) {
+            scheduleIncrementalFirebaseSave(1200);
+            return;
+          }
+          const curDb = dbRef.current;
+          const curScope = activeScopeRef.current;
+          const curHash = computeDatabaseContentHash(curDb);
+          firebaseInFlightRef.current = true;
+          beginFirebaseSyncOp();
+          void saveDatabaseToFirestore(
+            currentUser.uid,
+            curDb,
+            curHash,
+            {
+              elapsed: timerStateRef.current.elapsed,
+              startedAt: timerStateRef.current.startedAt,
+              activeTopic: activeTimerTopicRef.current,
+            },
+          )
+            .then((res) => {
+              setLastFirebaseSyncAt(res.updatedAt);
+              setFirebaseChunkCount(res.totalChunks);
+              setLastCloudSyncAt(res.updatedAt);
+              pendingCloudSyncRef.current = false;
+              setHasPendingCloudChanges(false);
+              saveSyncMeta(curScope, {
+                lastCloudSyncAt: res.updatedAt,
+                lastCloudContentHash: curHash,
+                hasPendingCloudSync: false,
+              });
+            })
+            .catch((err) => {
+              console.warn('[Firebase Firestore] Falha ao sincronizar alteração incremental:', err);
+            })
+            .finally(() => {
+              firebaseInFlightRef.current = false;
+              endFirebaseSyncOp();
             });
-          })
-          .catch((err) => {
-            console.warn('[Firebase Firestore] Falha ao sincronizar alteração incremental:', err);
-          })
-          .finally(() => {
-            firebaseInFlightRef.current = false;
-            setIsSyncingFirebase(false);
-          });
-      }, 600);
+        }, delayMs);
+      };
+      scheduleIncrementalFirebaseSave(600);
     }
-  }, [db]);
+  }, [beginFirebaseSyncOp, db, endFirebaseSyncOp]);
 
   // Apply theme attribute & meta color
   useEffect(() => {
@@ -3150,10 +3181,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         !options?.skipFirestorePush &&
         currentUser?.uid &&
         isEmailAuthorized(currentUser.email) &&
-        !isUntouchedSeedDatabase(sanitizedDb)
+        !isUntouchedSeedDatabase(sanitizedDb) &&
+        !firebaseInFlightRef.current
       ) {
         const nextHash = computeDatabaseContentHash(sanitizedDb);
-        setIsSyncingFirebase(true);
+        beginFirebaseSyncOp();
         firebaseInFlightRef.current = true;
         void saveDatabaseToFirestore(
           currentUser.uid,
@@ -3174,11 +3206,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           })
           .finally(() => {
             firebaseInFlightRef.current = false;
-            setIsSyncingFirebase(false);
+            endFirebaseSyncOp();
           });
       }
     },
-    [],
+    [beginFirebaseSyncOp, endFirebaseSyncOp],
   );
 
   const syncNowWithFirebase = useCallback(
@@ -3202,7 +3234,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return false;
       }
 
-      setIsSyncingFirebase(true);
+      beginFirebaseSyncOp();
       firebaseInFlightRef.current = true;
       try {
         window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
@@ -3245,10 +3277,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return false;
       } finally {
         firebaseInFlightRef.current = false;
-        setIsSyncingFirebase(false);
+        endFirebaseSyncOp();
       }
     },
-    [toast],
+    [beginFirebaseSyncOp, endFirebaseSyncOp, toast],
   );
 
   const restoreFromFirebase = useCallback(async (): Promise<boolean> => {
@@ -3262,7 +3294,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       currentUser = res.user;
     }
 
-    setIsSyncingFirebase(true);
+    beginFirebaseSyncOp();
     try {
       const loaded = await loadDatabaseFromFirestore(currentUser.uid);
       if (!loaded) {
@@ -3279,153 +3311,174 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       toast(`Falha ao restaurar do Firebase Firestore: ${(err as Error).message}`, true);
       return false;
     } finally {
-      setIsSyncingFirebase(false);
+      endFirebaseSyncOp();
     }
-  }, [applyRestoredDatabaseForScope, syncNowWithFirebase, toast]);
+  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, syncNowWithFirebase, toast]);
 
   // Automatic Firebase Firestore Hydration, Migration & Real-Time Listener on Auth
+  const googleUid = googleUser?.uid || null;
+  const googleEmail = googleUser?.email || null;
   useEffect(() => {
-    const uidKey = googleUser?.uid || null;
-    if (!uidKey || !isEmailAuthorized(googleUser?.email)) {
+    if (!googleUid || !isEmailAuthorized(googleEmail)) {
       firebaseHydratedUidRef.current = null;
       return;
     }
 
     let cancelled = false;
-    const scope = getUserScopeKey(googleUser);
+    const userObj = auth.currentUser || googleUser;
+    const scope = userObj ? getUserScopeKey(userObj) : `user_${googleUid}`;
 
-    void (async () => {
-      setIsSyncingFirebase(true);
-      try {
-        const [loadedFirestore, idbSnap] = await Promise.all([
-          loadDatabaseFromFirestore(uidKey),
-          loadScopedDatabaseJson(scope),
-        ]);
-        if (cancelled) return;
+    if (firebaseHydratedUidRef.current !== googleUid) {
+      void (async () => {
+        beginFirebaseSyncOp();
+        try {
+          const [loadedFirestore, idbSnap] = await Promise.all([
+            loadDatabaseFromFirestore(googleUid),
+            loadScopedDatabaseJson(scope),
+          ]);
+          if (cancelled) return;
 
-        let localDb = dbRef.current;
-        if (idbSnap?.raw && shouldPreferIdbSnapshot(scope, idbSnap, true)) {
-          try {
-            localDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
-          } catch {
-            // ignore
-          }
-        }
-
-        const localUntouched = isUntouchedSeedDatabase(localDb);
-        const localMeta = loadSyncMeta(scope);
-        const localEditMs = Date.parse(localMeta.lastLocalEditAt || '') || 0;
-
-        if (loadedFirestore) {
-          const rawRemoteDb = loadedFirestore.db as StudyDatabase;
-          const remoteNormalized = normalizeAndMergeDatabase(rawRemoteDb);
-          const remoteUntouched = isUntouchedSeedDatabase(remoteNormalized);
-          const remoteMs = Date.parse(loadedFirestore.updatedAt || '') || 0;
-          const remoteHash = computeDatabaseContentHash(remoteNormalized);
-          const localHash = computeDatabaseContentHash(localDb);
-
-          const rawLawFoldersCount = Object.keys(rawRemoteDb?.laws || {}).length;
-          const cleanLawFoldersCount = Object.keys(remoteNormalized.laws || {}).length;
-          const rawLawItemsTotal = Object.values(rawRemoteDb?.laws || {}).reduce(
-            (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
-            0,
-          );
-          const cleanLawItemsTotal = Object.values(remoteNormalized.laws || {}).reduce(
-            (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
-            0,
-          );
-          const remoteHadDirtyClassification =
-            cleanLawFoldersCount < rawLawFoldersCount ||
-            cleanLawItemsTotal < rawLawItemsTotal ||
-            (remoteNormalized.submittedSimulations || []).length <
-              (rawRemoteDb?.submittedSimulations || []).length ||
-            (remoteNormalized.proofFiles || []).length < (rawRemoteDb?.proofFiles || []).length;
-
-          if (remoteUntouched && !localUntouched) {
-            // Firestore only had default seed data while local/Drive has the user's real study database: push local/Drive DB to Firestore!
-            applyRestoredDatabaseForScope(scope, localDb, new Date().toISOString(), { skipFirestorePush: true });
-            const saved = await saveDatabaseToFirestore(
-              uidKey,
-              localDb,
-              localHash,
-              {
-                elapsed: timerStateRef.current.elapsed,
-                startedAt: timerStateRef.current.startedAt,
-                activeTopic: activeTimerTopicRef.current,
-              },
-              { forceFullWrite: true },
-            );
-            setLastFirebaseSyncAt(saved.updatedAt);
-            setFirebaseChunkCount(saved.totalChunks);
-          } else if (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500)) {
-            if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
-              applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
-                skipFirestorePush: !remoteHadDirtyClassification,
-              });
-            } else {
-              setLastFirebaseSyncAt(loadedFirestore.updatedAt);
+          let localDb = dbRef.current;
+          if (idbSnap?.raw && shouldPreferIdbSnapshot(scope, idbSnap, true)) {
+            try {
+              localDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+            } catch {
+              // ignore
             }
-            setFirebaseChunkCount(loadedFirestore.sectionCount);
-          } else {
-            // Merge local/Drive changes over Firestore baseline and push to Firestore
-            const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), localDb, {
-              updatedAt: new Date().toISOString(),
-              userEmail: googleUser?.email || undefined,
-            });
-            const mergedDb = delta.hasChanges
-              ? applyIncrementalDeltaToDatabase(remoteNormalized, delta.envelope)
-              : localDb;
-            const mergedHash = computeDatabaseContentHash(mergedDb);
-            applyRestoredDatabaseForScope(scope, mergedDb, new Date().toISOString(), { skipFirestorePush: true });
-            const saved = await saveDatabaseToFirestore(uidKey, mergedDb, mergedHash, {
-              elapsed: timerStateRef.current.elapsed,
-              startedAt: timerStateRef.current.startedAt,
-              activeTopic: activeTimerTopicRef.current,
-            });
-            setLastFirebaseSyncAt(saved.updatedAt);
-            setFirebaseChunkCount(saved.totalChunks);
           }
-        } else if (!localUntouched) {
-          // First-time migration when local/Drive DB already has user data: push the entire StudyDatabase to Firebase Firestore
-          const hash = computeDatabaseContentHash(localDb);
-          const saved = await saveDatabaseToFirestore(
-            uidKey,
-            localDb,
-            hash,
-            {
-              elapsed: timerStateRef.current.elapsed,
-              startedAt: timerStateRef.current.startedAt,
-              activeTopic: activeTimerTopicRef.current,
-            },
-            { forceFullWrite: true },
-          );
-          if (!cancelled) {
-            setLastFirebaseSyncAt(saved.updatedAt);
-            setFirebaseChunkCount(saved.totalChunks);
-            setLastCloudSyncAt(saved.updatedAt);
-            saveSyncMeta(scope, {
-              lastCloudSyncAt: saved.updatedAt,
-              lastCloudContentHash: hash,
-              hasPendingCloudSync: false,
-            });
+
+          const localUntouched = isUntouchedSeedDatabase(localDb);
+          const localMeta = loadSyncMeta(scope);
+          const localEditMs = Date.parse(localMeta.lastLocalEditAt || '') || 0;
+
+          if (loadedFirestore) {
+            const rawRemoteDb = loadedFirestore.db as StudyDatabase;
+            const remoteNormalized = normalizeAndMergeDatabase(rawRemoteDb);
+            const remoteUntouched = isUntouchedSeedDatabase(remoteNormalized);
+            const remoteMs = Date.parse(loadedFirestore.updatedAt || '') || 0;
+            const remoteHash = computeDatabaseContentHash(remoteNormalized);
+            const localHash = computeDatabaseContentHash(localDb);
+
+            const rawLawFoldersCount = Object.keys(rawRemoteDb?.laws || {}).length;
+            const cleanLawFoldersCount = Object.keys(remoteNormalized.laws || {}).length;
+            const rawLawItemsTotal = Object.values(rawRemoteDb?.laws || {}).reduce(
+              (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
+              0,
+            );
+            const cleanLawItemsTotal = Object.values(remoteNormalized.laws || {}).reduce(
+              (s, f) => s + (f?.items?.length || 0) + (f?.pdfs?.length || 0),
+              0,
+            );
+            const remoteHadDirtyClassification =
+              cleanLawFoldersCount < rawLawFoldersCount ||
+              cleanLawItemsTotal < rawLawItemsTotal ||
+              (remoteNormalized.submittedSimulations || []).length <
+                (rawRemoteDb?.submittedSimulations || []).length ||
+              (remoteNormalized.proofFiles || []).length < (rawRemoteDb?.proofFiles || []).length;
+
+            if (remoteUntouched && !localUntouched) {
+              // Firestore only had default seed data while local/Drive has the user's real study database: push local/Drive DB to Firestore!
+              applyRestoredDatabaseForScope(scope, localDb, new Date().toISOString(), { skipFirestorePush: true });
+              firebaseInFlightRef.current = true;
+              try {
+                const saved = await saveDatabaseToFirestore(
+                  googleUid,
+                  localDb,
+                  localHash,
+                  {
+                    elapsed: timerStateRef.current.elapsed,
+                    startedAt: timerStateRef.current.startedAt,
+                    activeTopic: activeTimerTopicRef.current,
+                  },
+                  { forceFullWrite: true },
+                );
+                if (!cancelled) {
+                  setLastFirebaseSyncAt(saved.updatedAt);
+                  setFirebaseChunkCount(saved.totalChunks);
+                }
+              } finally {
+                firebaseInFlightRef.current = false;
+              }
+            } else if (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500)) {
+              if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
+                applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
+                  skipFirestorePush: !remoteHadDirtyClassification,
+                });
+              } else {
+                setLastFirebaseSyncAt(loadedFirestore.updatedAt);
+              }
+              setFirebaseChunkCount(loadedFirestore.sectionCount);
+            } else {
+              // Merge local/Drive changes over Firestore baseline and push to Firestore
+              const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), localDb, {
+                updatedAt: new Date().toISOString(),
+                userEmail: googleEmail || undefined,
+              });
+              const mergedDb = delta.hasChanges
+                ? applyIncrementalDeltaToDatabase(remoteNormalized, delta.envelope)
+                : localDb;
+              const mergedHash = computeDatabaseContentHash(mergedDb);
+              applyRestoredDatabaseForScope(scope, mergedDb, new Date().toISOString(), { skipFirestorePush: true });
+              firebaseInFlightRef.current = true;
+              try {
+                const saved = await saveDatabaseToFirestore(googleUid, mergedDb, mergedHash, {
+                  elapsed: timerStateRef.current.elapsed,
+                  startedAt: timerStateRef.current.startedAt,
+                  activeTopic: activeTimerTopicRef.current,
+                });
+                if (!cancelled) {
+                  setLastFirebaseSyncAt(saved.updatedAt);
+                  setFirebaseChunkCount(saved.totalChunks);
+                }
+              } finally {
+                firebaseInFlightRef.current = false;
+              }
+            }
+          } else if (!localUntouched) {
+            // First-time migration when local/Drive DB already has user data: push the entire StudyDatabase to Firebase Firestore
+            const hash = computeDatabaseContentHash(localDb);
+            firebaseInFlightRef.current = true;
+            try {
+              const saved = await saveDatabaseToFirestore(
+                googleUid,
+                localDb,
+                hash,
+                {
+                  elapsed: timerStateRef.current.elapsed,
+                  startedAt: timerStateRef.current.startedAt,
+                  activeTopic: activeTimerTopicRef.current,
+                },
+                { forceFullWrite: true },
+              );
+              if (!cancelled) {
+                setLastFirebaseSyncAt(saved.updatedAt);
+                setFirebaseChunkCount(saved.totalChunks);
+                setLastCloudSyncAt(saved.updatedAt);
+                saveSyncMeta(scope, {
+                  lastCloudSyncAt: saved.updatedAt,
+                  lastCloudContentHash: hash,
+                  hasPendingCloudSync: false,
+                });
+              }
+            } finally {
+              firebaseInFlightRef.current = false;
+            }
           }
-        }
 
-        firebaseHydratedUidRef.current = uidKey;
-      } catch (err) {
-        console.warn('[Firebase Firestore] Aviso na hidratação inicial:', err);
-      } finally {
-        if (!cancelled) {
-          setIsSyncingFirebase(false);
+          firebaseHydratedUidRef.current = googleUid;
+        } catch (err) {
+          console.warn('[Firebase Firestore] Aviso na hidratação inicial:', err);
+        } finally {
+          endFirebaseSyncOp();
         }
-      }
-    })();
+      })();
+    }
 
-    const unsubscribeSnapshot = subscribeToFirestoreWorkspace(uidKey, (remoteMeta) => {
+    const unsubscribeSnapshot = subscribeToFirestoreWorkspace(googleUid, (remoteMeta) => {
       if (cancelled || firebaseInFlightRef.current) return;
       const curHash = computeDatabaseContentHash(dbRef.current);
       if (remoteMeta.contentHash && remoteMeta.contentHash !== curHash) {
-        void loadDatabaseFromFirestore(uidKey)
+        void loadDatabaseFromFirestore(googleUid)
           .then((reloaded) => {
             if (!reloaded || cancelled || firebaseInFlightRef.current) return;
             const normalized = normalizeAndMergeDatabase(reloaded.db);
@@ -3443,7 +3496,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       cancelled = true;
       unsubscribeSnapshot();
     };
-  }, [applyRestoredDatabaseForScope, googleUser]);
+  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, googleEmail, googleUid]);
 
   const syncAccountWithDriveOnAuth = useCallback(
     async (user: User, token: string, scope: string, hadLocalDbBeforeLoad: boolean) => {
@@ -4504,7 +4557,9 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
 
         setAuthError(null);
-        setGoogleUser(user);
+        setGoogleUser((prev) =>
+          prev?.uid === user.uid && prev?.email === user.email ? prev : user,
+        );
         setDriveConnected(true);
         setDriveTokenReady(Boolean(token));
 
@@ -4686,7 +4741,9 @@ function isEmailAuthorized(email?: string | null): boolean {
           if (silentToken) {
             const currentScope = getUserScopeKey(currentUser);
             setDriveConnected(true);
-            setGoogleUser(currentUser);
+            setGoogleUser((prev) =>
+              prev?.uid === currentUser.uid && prev?.email === currentUser.email ? prev : currentUser,
+            );
             setDriveTokenReady(true);
             if (syncedScopeOnceRef.current !== currentScope) {
               void syncAccountWithDriveOnAuth(currentUser, silentToken, currentScope, true);
@@ -4891,6 +4948,10 @@ function isEmailAuthorized(email?: string | null): boolean {
     setLastCloudSyncAt(null);
     setLastFirebaseSyncAt(null);
     setLastCacheVerifiedAt(null);
+    activeFirebaseOpsRef.current = 0;
+    firebaseInFlightRef.current = false;
+    firebaseHydratedUidRef.current = null;
+    setIsSyncingFirebase(false);
     clearUserFirestoreCacheState();
     toast('Conta desconectada. Alternado para ambiente local/offline.');
   }, [toast]);

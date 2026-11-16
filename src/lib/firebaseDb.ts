@@ -7,6 +7,7 @@ import {
   getDocFromServer,
   getDocs,
   getFirestore,
+  initializeFirestore,
   onSnapshot,
   query,
   serverTimestamp,
@@ -28,8 +29,45 @@ import {
 import { DEFAULT_PREFERENCES, createInitialDatabase } from '../data/seedData';
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-export const firestoreDb = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+function createFirestoreClient() {
+  try {
+    return initializeFirestore(
+      app,
+      { experimentalAutoDetectLongPolling: true },
+      firebaseConfig.firestoreDatabaseId,
+    );
+  } catch {
+    return getFirestore(app, firebaseConfig.firestoreDatabaseId);
+  }
+}
+export const firestoreDb = createFirestoreClient();
 export const firebaseAuth = getAuth(app);
+
+const FIRESTORE_READ_TIMEOUT_MS = 15_000;
+const FIRESTORE_WRITE_TIMEOUT_MS = 18_000;
+const FIRESTORE_BATCH_TIMEOUT_MS = 22_000;
+
+async function withFirestoreTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  operationLabel: string,
+): Promise<T> {
+  let timerId: number | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timerId = window.setTimeout(() => {
+          reject(new Error(`Tempo limite excedido (${Math.round(timeoutMs / 1000)}s) em ${operationLabel}.`));
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timerId !== undefined) {
+      window.clearTimeout(timerId);
+    }
+  }
+}
 
 export enum OperationType {
   CREATE = 'create',
@@ -681,7 +719,11 @@ export async function loadDatabaseFromFirestore(
 
   let workspaceSnap;
   try {
-    workspaceSnap = await getDoc(doc(firestoreDb, 'users', userId));
+    workspaceSnap = await withFirestoreTimeout(
+      getDoc(doc(firestoreDb, 'users', userId)),
+      FIRESTORE_READ_TIMEOUT_MS,
+      'leitura do workspace no Firestore',
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.GET, workspacePath);
   }
@@ -703,7 +745,11 @@ export async function loadDatabaseFromFirestore(
       collection(firestoreDb, 'users', userId, 'dbRecords'),
       where('ownerId', '==', userId),
     );
-    recordsSnap = await getDocs(q);
+    recordsSnap = await withFirestoreTimeout(
+      getDocs(q),
+      FIRESTORE_READ_TIMEOUT_MS,
+      'leitura das partições no Firestore',
+    );
   } catch (error) {
     handleFirestoreError(error, OperationType.LIST, recordsPath);
   }
@@ -790,7 +836,11 @@ export async function saveDatabaseToFirestore(
   // Verify whether the parent /users/{userId} document already exists on server
   if (!state.workspaceExists) {
     try {
-      const existingWs = await getDoc(workspaceRef);
+      const existingWs = await withFirestoreTimeout(
+        getDoc(workspaceRef),
+        FIRESTORE_READ_TIMEOUT_MS,
+        'verificação do workspace no Firestore',
+      );
       if (existingWs.exists()) {
         state.workspaceExists = true;
         const existingData = existingWs.data();
@@ -799,11 +849,15 @@ export async function saveDatabaseToFirestore(
         }
         // Also populate existing record IDs so we use updateDoc for existing docs and setDoc for new docs
         if (state.chunkHashes.size === 0) {
-          const existingRecords = await getDocs(
-            query(
-              collection(firestoreDb, 'users', userId, 'dbRecords'),
-              where('ownerId', '==', userId),
+          const existingRecords = await withFirestoreTimeout(
+            getDocs(
+              query(
+                collection(firestoreDb, 'users', userId, 'dbRecords'),
+                where('ownerId', '==', userId),
+              ),
             ),
+            FIRESTORE_READ_TIMEOUT_MS,
+            'listagem de partições no Firestore',
           );
           existingRecords.forEach((r) => {
             const d = r.data();
@@ -820,15 +874,19 @@ export async function saveDatabaseToFirestore(
   let createdWorkspaceNow = false;
   if (!state.workspaceExists) {
     try {
-      await setDoc(workspaceRef, {
-        ownerId: userId,
-        contentHash: safeContentHash,
-        schemaVersion: 2,
-        sectionCount: chunks.length,
-        timerState: safeTimerState,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp(),
-      });
+      await withFirestoreTimeout(
+        setDoc(workspaceRef, {
+          ownerId: userId,
+          contentHash: safeContentHash,
+          schemaVersion: 2,
+          sectionCount: chunks.length,
+          timerState: safeTimerState,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        'criação do workspace no Firestore',
+      );
       state.workspaceExists = true;
       state.workspaceContentHash = safeContentHash;
       createdWorkspaceNow = true;
@@ -905,7 +963,11 @@ export async function saveDatabaseToFirestore(
     }
 
     try {
-      await batch.commit();
+      await withFirestoreTimeout(
+        batch.commit(),
+        FIRESTORE_BATCH_TIMEOUT_MS,
+        `gravação em lote no Firestore (${i + 1}-${i + slice.length})`,
+      );
       for (const op of slice) {
         if (op.kind === 'create' || op.kind === 'update') {
           state.chunkHashes.set(op.chunk.recordId, op.chunk.contentHash);
@@ -921,13 +983,17 @@ export async function saveDatabaseToFirestore(
   // Step 3: Update the parent /users/{userId} workspace metadata if not just created or if chunks changed
   if (!createdWorkspaceNow && (allOps.length > 0 || state.workspaceContentHash !== safeContentHash || options?.forceFullWrite)) {
     try {
-      await updateDoc(workspaceRef, {
-        contentHash: safeContentHash,
-        schemaVersion: 2,
-        sectionCount: chunks.length,
-        timerState: safeTimerState,
-        updatedAt: serverTimestamp(),
-      });
+      await withFirestoreTimeout(
+        updateDoc(workspaceRef, {
+          contentHash: safeContentHash,
+          schemaVersion: 2,
+          sectionCount: chunks.length,
+          timerState: safeTimerState,
+          updatedAt: serverTimestamp(),
+        }),
+        FIRESTORE_WRITE_TIMEOUT_MS,
+        'atualização do workspace no Firestore',
+      );
       state.workspaceContentHash = safeContentHash;
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, workspacePath);
