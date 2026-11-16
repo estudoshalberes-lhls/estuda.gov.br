@@ -71,6 +71,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     localFolderWritable,
     localFolderName,
     isSyncingLocalFolder,
+    firestoreConnectionMonitor,
     toast,
   } = useStudy();
 
@@ -621,7 +622,10 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             }}
             aria-label="Desconectar do Google"
             title={
-              drivePermissionNeedsPicker
+              firestoreConnectionMonitor.status === 'expired' ||
+              firestoreConnectionMonitor.status === 'inconsistent'
+                ? `Alerta de autenticação (${googleUser?.email || ''}): ${firestoreConnectionMonitor.message || 'Sessão expirada ou inconsistente'}`
+                : drivePermissionNeedsPicker
                 ? `Conectado (${googleUser?.email || ''}) · Aguardando autorização da pasta — Clique para sair`
                 : isRenewingDriveToken
                 ? `Conectado (${googleUser?.email || ''}) · Renovando sessão automaticamente…`
@@ -632,7 +636,10 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
                 : `Sessão permanente ativa (${googleUser?.email || ''}) — Clique para sair`
             }
             className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 ${
-              drivePermissionNeedsPicker || (!driveTokenReady && !isRenewingDriveToken)
+              firestoreConnectionMonitor.status === 'expired' ||
+              firestoreConnectionMonitor.status === 'inconsistent'
+                ? 'border-[var(--bad)]/60 bg-[var(--bad)]/15 text-[var(--bad)]'
+                : drivePermissionNeedsPicker || (!driveTokenReady && !isRenewingDriveToken)
                 ? 'border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
                 : 'border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
             }`}

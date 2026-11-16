@@ -30,6 +30,22 @@ export interface StoredDatabaseSnapshot {
   byteLength: number;
 }
 
+export async function ensurePersistentBrowserStorage(): Promise<boolean> {
+  try {
+    if (typeof navigator === 'undefined' || !navigator.storage) return false;
+    if (typeof navigator.storage.persisted === 'function') {
+      const already = await navigator.storage.persisted();
+      if (already) return true;
+    }
+    if (typeof navigator.storage.persist === 'function') {
+      return await navigator.storage.persist();
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export async function saveScopedDatabaseJson(
   scope: string,
   jsonString: string,
@@ -39,6 +55,7 @@ export async function saveScopedDatabaseJson(
   try {
     const db = await openDatabase();
     const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
+    const redundantKey = `redundant_backup::${key}`;
     const record: StoredDatabaseSnapshot = {
       raw: jsonString,
       updatedAt,
@@ -46,7 +63,9 @@ export async function saveScopedDatabaseJson(
     };
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
-      tx.objectStore(STATE_STORE_NAME).put(record, key);
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(record, key);
+      store.put(record, redundantKey);
       tx.oncomplete = () => resolve();
       tx.onerror = () => reject(tx.error || new Error('Não foi possível gravar o banco no IndexedDB.'));
     });
@@ -55,16 +74,37 @@ export async function saveScopedDatabaseJson(
   }
 }
 
+function isValidStoredDatabaseSnapshot(res: StoredDatabaseSnapshot | undefined): res is StoredDatabaseSnapshot {
+  if (!res || typeof res.raw !== 'string' || !res.raw.trim()) return false;
+  try {
+    const parsed = JSON.parse(res.raw);
+    return Boolean(parsed && typeof parsed === 'object');
+  } catch {
+    return false;
+  }
+}
+
 export async function loadScopedDatabaseJson(scope: string): Promise<StoredDatabaseSnapshot | null> {
   try {
     const db = await openDatabase();
     const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
+    const redundantKey = `redundant_backup::${key}`;
     return await new Promise<StoredDatabaseSnapshot | null>((resolve, reject) => {
       const tx = db.transaction(STATE_STORE_NAME, 'readonly');
-      const req = tx.objectStore(STATE_STORE_NAME).get(key);
+      const store = tx.objectStore(STATE_STORE_NAME);
+      const req = store.get(key);
       req.onsuccess = () => {
         const res = req.result as StoredDatabaseSnapshot | undefined;
-        resolve(res && typeof res.raw === 'string' ? res : null);
+        if (isValidStoredDatabaseSnapshot(res)) {
+          resolve(res);
+          return;
+        }
+        const backupReq = store.get(redundantKey);
+        backupReq.onsuccess = () => {
+          const backupRes = backupReq.result as StoredDatabaseSnapshot | undefined;
+          resolve(isValidStoredDatabaseSnapshot(backupRes) ? backupRes : null);
+        };
+        backupReq.onerror = () => resolve(null);
       };
       req.onerror = () => reject(req.error || new Error('Falha ao ler banco do IndexedDB.'));
     });

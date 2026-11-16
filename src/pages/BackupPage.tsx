@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  AlertCircle,
   CheckCircle2,
   Clock,
   Cloud,
@@ -43,6 +44,8 @@ export const BackupPage: React.FC = () => {
     isSyncingFirebase,
     lastFirebaseSyncAt,
     firebaseChunkCount,
+    firebaseLastError,
+    clearFirebaseError,
     syncNowWithFirebase,
     restoreFromFirebase,
     migrateDriveToFirebase,
@@ -559,6 +562,49 @@ export const BackupPage: React.FC = () => {
               )}
             </div>
           </div>
+
+          {firebaseLastError && (
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300">
+              <div className="flex items-start gap-2 min-w-0">
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                <div className="min-w-0 text-[11.5px] leading-relaxed">
+                  <strong className="font-bold block">
+                    {firebaseLastError.category === 'auth'
+                      ? 'Falha de autenticação Firebase'
+                      : firebaseLastError.category === 'permission'
+                        ? 'Falha de permissão no Firestore'
+                        : firebaseLastError.category === 'config'
+                          ? 'Erro de configuração do Firebase'
+                          : firebaseLastError.category === 'quota'
+                            ? 'Limite de cota do Firestore'
+                            : 'Erro na última sincronização Firebase'}
+                    {firebaseLastError.code && firebaseLastError.code !== 'unknown'
+                      ? ` (${firebaseLastError.code})`
+                      : ''}
+                  </strong>
+                  <span>{firebaseLastError.userMessage}</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                {firebaseLastError.category === 'auth' && (
+                  <button
+                    type="button"
+                    onClick={() => void connectGoogleDrive()}
+                    className="px-2.5 py-1.5 rounded-md border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 text-[11px] font-bold cursor-pointer"
+                  >
+                    Reconectar Google
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={clearFirebaseError}
+                  className="px-2.5 py-1.5 rounded-md border border-red-500/30 hover:bg-red-500/15 text-[11px] font-semibold cursor-pointer"
+                >
+                  Dispensar
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </Panel>
 

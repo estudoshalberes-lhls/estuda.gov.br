@@ -159,6 +159,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
   };
 
   const displayedError = errorMessage || authError;
+  const isOriginMismatchError = Boolean(
+    displayedError &&
+      (displayedError.toLowerCase().includes('origin_mismatch') ||
+        displayedError.toLowerCase().includes('origens javascript autorizadas') ||
+        displayedError.toLowerCase().includes('redirect_uri_mismatch')),
+  );
   const isUnauthorizedDomainError = Boolean(
     displayedError &&
       (displayedError.includes('auth/unauthorized-domain') ||
@@ -166,17 +172,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
         displayedError.includes('não autorizado no Firebase Authentication')),
   );
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const copyValue = isOriginMismatchError ? currentOrigin : currentHost;
   const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`;
+  const googleCloudCredentialsUrl = `https://console.cloud.google.com/apis/credentials?project=${firebaseConfig.projectId}`;
 
   const handleCopyHost = async () => {
-    if (!currentHost) return;
+    if (!copyValue) return;
     try {
-      await navigator.clipboard.writeText(currentHost);
+      await navigator.clipboard.writeText(copyValue);
       setCopiedHost(true);
-      toast(`Domínio "${currentHost}" copiado!`);
+      toast(`${isOriginMismatchError ? 'Origem' : 'Domínio'} "${copyValue}" copiado!`);
       window.setTimeout(() => setCopiedHost(false), 2000);
     } catch {
-      toast('Não foi possível copiar automaticamente. Selecione e copie o domínio exibido.', true);
+      toast('Não foi possível copiar automaticamente. Selecione e copie o endereço exibido.', true);
     }
   };
 
@@ -477,7 +486,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   <span className="leading-relaxed">{displayedError}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {isUnauthorizedDomainError && currentHost && (
+                  {(isUnauthorizedDomainError || isOriginMismatchError) && copyValue && (
                     <>
                       <button
                         type="button"
@@ -489,15 +498,25 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                         ) : (
                           <Copy className="w-3.5 h-3.5 text-[var(--accent)]" aria-hidden="true" />
                         )}
-                        <span>{copiedHost ? 'Domínio copiado' : 'Copiar domínio'}</span>
+                        <span>
+                          {copiedHost
+                            ? isOriginMismatchError
+                              ? 'Origem copiada'
+                              : 'Domínio copiado'
+                            : isOriginMismatchError
+                              ? 'Copiar origem'
+                              : 'Copiar domínio'}
+                        </span>
                       </button>
                       <a
-                        href={firebaseAuthSettingsUrl}
+                        href={isOriginMismatchError ? googleCloudCredentialsUrl : firebaseAuthSettingsUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1.5 px-3 py-1 rounded border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-semibold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
                       >
-                        <span>Abrir Firebase Console</span>
+                        <span>
+                          {isOriginMismatchError ? 'Abrir Google Cloud Console' : 'Abrir Firebase Console'}
+                        </span>
                         <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
                       </a>
                     </>

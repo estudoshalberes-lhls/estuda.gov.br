@@ -28,7 +28,7 @@ const DRIVE_FOLDER_PREF_KEY = 'central_estudos_drive_folder_pref_v1';
 const KNOWN_DRIVE_ROOTS_KEY = 'central_estudos_known_drive_roots_v1';
 const DRIVE_TOKEN_CACHE_KEY = 'central_estudos_drive_token_v1';
 const LAST_GOOGLE_EMAIL_KEY = 'central_estudos_last_google_email_v1';
-const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 2 * 60 * 1000;
+const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
 const DRIVE_TOKEN_DEFAULT_TTL_MS = 55 * 60 * 1000;
 
 const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
@@ -452,7 +452,8 @@ export async function refreshDriveAccessTokenSilently(options?: {
                 finish(null);
               }
             },
-            error_callback: () => {
+            error_callback: (err: any) => {
+              console.warn('[Google Drive OAuth] Falha na renovação silenciosa do token:', err?.type || err?.message || err);
               lastSilentRefreshFailureAt = Date.now();
               finish(null);
             },
@@ -710,6 +711,10 @@ export function formatGoogleAuthError(error: any): string {
 
   if (code === 'auth/unauthorized-domain' || msg.includes('auth/unauthorized-domain')) {
     return `Domínio "${host}" não autorizado no Firebase Authentication (${code}). Adicione este domínio em Firebase Console > Authentication > Settings > Authorized Domains ou use o Modo Local.`;
+  }
+  if (msg.toLowerCase().includes('origin_mismatch') || msg.toLowerCase().includes('redirect_uri_mismatch')) {
+    const origin = typeof window !== 'undefined' ? window.location.origin : '';
+    return `Origem JavaScript "${origin}" não registrada no cliente OAuth 2.0 do Google Cloud (origin_mismatch). Adicione esta URL em Origens JavaScript autorizadas no Google Cloud Console.`;
   }
   if (code === 'auth/popup-blocked' || msg.includes('auth/popup-blocked')) {
     return 'O navegador bloqueou a janela popup de login do Google. Libere pop-ups para este site (ou abra o aplicativo em uma nova aba) e tente novamente.';

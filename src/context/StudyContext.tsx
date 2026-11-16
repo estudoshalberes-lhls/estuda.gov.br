@@ -17,6 +17,7 @@ import {
   clearAllFileBlobs,
   clearDriveJsonCacheForScope,
   deleteFileBlob,
+  ensurePersistentBrowserStorage,
   getAllFileBlobs,
   getFileBlob,
   loadLocalDirectoryHandle,
@@ -151,10 +152,17 @@ import {
 import {
   clearUserFirestoreCacheState,
   decomposeDatabaseToFirestoreChunks,
+  executeWithFirebaseBackoff,
+  FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+  FirestoreAuthHealthReport,
+  getFirestoreConfigDiagnostics,
   loadDatabaseFromFirestore,
+  ParsedFirestoreError,
+  parseFirestoreError,
   saveDatabaseToFirestore,
   subscribeToFirestoreWorkspace,
   syncTimerStateToFirestore,
+  validateFirestoreAuthConnection,
 } from '../lib/firebaseDb';
 import {
   ActiveTimerLink,
@@ -313,6 +321,10 @@ function saveSyncMeta(scope: string, patch: Partial<ScopeSyncMeta>): ScopeSyncMe
   return next;
 }
 
+function getDbBackupStorageKey(scope: string): string {
+  return `central-estudos-db-backup-${scope}`;
+}
+
 function persistLocalDatabaseForScope(
   scope: string,
   serialized: string,
@@ -320,14 +332,29 @@ function persistLocalDatabaseForScope(
   extraMeta?: Partial<ScopeSyncMeta>,
 ): void {
   let lsSaved = false;
+  const primaryKey = getDbStorageKey(scope);
+  const backupKey = getDbBackupStorageKey(scope);
   try {
-    localStorage.setItem(getDbStorageKey(scope), serialized);
+    localStorage.setItem(primaryKey, serialized);
     lsSaved = true;
+    // Keep a secondary redundant recovery copy in localStorage when payload fits comfortably (<1.8 MB)
+    if (serialized.length < 1_800_000) {
+      try {
+        localStorage.setItem(backupKey, serialized);
+      } catch {
+        try {
+          localStorage.removeItem(backupKey);
+        } catch {
+          // ignore
+        }
+      }
+    }
   } catch {
     // IndexedDB remains primary persistence when localStorage hits ~5 MB quota;
     // remove the stale smaller localStorage DB immediately so syncMeta never loses quota
     try {
-      localStorage.removeItem(getDbStorageKey(scope));
+      localStorage.removeItem(backupKey);
+      localStorage.removeItem(primaryKey);
       localStorage.removeItem(DB_STORAGE_KEY_LEGACY);
     } catch {
       // ignore
@@ -496,6 +523,17 @@ export interface LawDeepLink {
   tab?: 'continuous' | 'devices';
   onlyMatches?: boolean;
   nonce: number;
+}
+
+export interface FirestoreConnectionMonitorState {
+  status: 'idle' | 'healthy' | 'warning' | 'expired' | 'inconsistent';
+  code: string | null;
+  message: string | null;
+  lastCheckedAt: string | null;
+  tokenExpiresAt: string | null;
+  consecutiveFailures: number;
+  oauthDriveExpired: boolean;
+  dismissed: boolean;
 }
 
 interface StudyContextValue {
@@ -821,6 +859,11 @@ interface StudyContextValue {
   isSyncingFirebase: boolean;
   lastFirebaseSyncAt: string | null;
   firebaseChunkCount: number;
+  firebaseLastError: ParsedFirestoreError | null;
+  clearFirebaseError: () => void;
+  firestoreConnectionMonitor: FirestoreConnectionMonitorState;
+  validateFirestoreConnectionNow: (options?: { silent?: boolean }) => Promise<FirestoreAuthHealthReport | null>;
+  dismissFirestoreConnectionAlert: () => void;
   syncNowWithFirebase: (options?: { forceFullWrite?: boolean; silent?: boolean }) => Promise<boolean>;
   restoreFromFirebase: () => Promise<boolean>;
   migrateDriveToFirebase: () => Promise<boolean>;
@@ -1441,24 +1484,41 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
 }
 
 function loadStoredDatabase(scope: string): StudyDatabase {
+  const tryParseRaw = (raw: string | null): StudyDatabase | null => {
+    if (!raw) return null;
+    try {
+      return normalizeAndMergeDatabase(JSON.parse(raw));
+    } catch {
+      return null;
+    }
+  };
+
   try {
     const scopedKey = getDbStorageKey(scope);
     let raw = localStorage.getItem(scopedKey);
+    let parsed = tryParseRaw(raw);
+    if (parsed) return parsed;
+
+    // Fallback to secondary localStorage recovery copy if primary key is missing or corrupted
+    const backupRaw = localStorage.getItem(getDbBackupStorageKey(scope));
+    parsed = tryParseRaw(backupRaw);
+    if (parsed) return parsed;
+
     // Backwards compatibility: only adopt legacy DB once if not yet migrated
     if (!raw && !localStorage.getItem('central-estudos-legacy-adopted')) {
       const legacyRaw = localStorage.getItem(DB_STORAGE_KEY_LEGACY);
-      if (legacyRaw) {
-        raw = legacyRaw;
+      parsed = tryParseRaw(legacyRaw);
+      if (legacyRaw && parsed) {
         try {
           localStorage.setItem(scopedKey, legacyRaw);
           localStorage.setItem('central-estudos-legacy-adopted', '1');
         } catch {
           // ignore quota
         }
+        return parsed;
       }
     }
-    if (!raw) return createInitialDatabase();
-    return normalizeAndMergeDatabase(JSON.parse(raw));
+    return createInitialDatabase();
   } catch {
     return createInitialDatabase();
   }
@@ -2719,10 +2779,26 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [firebaseChunkCount, setFirebaseChunkCount] = useState<number>(() =>
     decomposeDatabaseToFirestoreChunks(db).length,
   );
+  const [firebaseLastError, setFirebaseLastError] = useState<ParsedFirestoreError | null>(null);
+  const [firestoreConnectionMonitor, setFirestoreConnectionMonitor] = useState<FirestoreConnectionMonitorState>({
+    status: 'idle',
+    code: null,
+    message: null,
+    lastCheckedAt: null,
+    tokenExpiresAt: null,
+    consecutiveFailures: 0,
+    oauthDriveExpired: false,
+    dismissed: false,
+  });
   const firebaseSyncTimerRef = useRef<number | null>(null);
   const firebaseInFlightRef = useRef<boolean>(false);
   const firebaseHydratedUidRef = useRef<string | null>(null);
   const activeFirebaseOpsRef = useRef<number>(0);
+  const lastFirebaseErrorToastAtRef = useRef<number>(0);
+  const monitorInFlightRef = useRef<boolean>(false);
+  const lastMonitorCheckAtRef = useRef<number>(0);
+  const googleUserRef = useRef<User | null>(googleUser);
+  googleUserRef.current = googleUser;
   const activeTimerTopicRef = useRef<ActiveTimerLink | null>(activeTimerTopic);
   activeTimerTopicRef.current = activeTimerTopic;
 
@@ -2738,14 +2814,26 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }
   }, []);
 
+  const clearFirebaseError = useCallback(() => {
+    setFirebaseLastError(null);
+  }, []);
+
+  const dismissFirestoreConnectionAlert = useCallback(() => {
+    setFirestoreConnectionMonitor((prev) => ({
+      ...prev,
+      dismissed: true,
+    }));
+  }, []);
+
   // Safety watchdog: never leave the Firebase UI locked in "Sincronizando..." indefinitely
   useEffect(() => {
     if (!isSyncingFirebase) return;
     const watchdogId = window.setTimeout(() => {
+      console.warn('[StudyProvider][Firebase] Watchdog liberou trava de sincronização após 180s.');
       activeFirebaseOpsRef.current = 0;
       firebaseInFlightRef.current = false;
       setIsSyncingFirebase(false);
-    }, 120_000);
+    }, 180_000);
     return () => window.clearTimeout(watchdogId);
   }, [isSyncingFirebase]);
 
@@ -2833,9 +2921,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   }, []);
 
-  // Seed sample PDFs and hydrate DB & sync metadata from IndexedDB if authoritative or newer than localStorage cache
+  // Seed sample PDFs, request persistent browser storage, and hydrate DB & sync metadata from IndexedDB if authoritative or newer than localStorage cache
   useEffect(() => {
     void ensureSeededBlobs();
+    void ensurePersistentBrowserStorage();
     const scope = activeScopeRef.current;
     void (async () => {
       const [idbSnap, idbMeta] = await Promise.all([
@@ -2902,15 +2991,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const scope = activeScopeRef.current;
     const serialized = JSON.stringify(db);
     const nowIso = new Date().toISOString();
+    const hasCustomOfflineData = scope !== 'offline_guest' || !isUntouchedSeedDatabase(db);
     persistLocalDatabaseForScope(scope, serialized, nowIso, {
       lastLocalEditAt: nowIso,
-      ...(scope !== 'offline_guest' ? { hasPendingCloudSync: true } : {}),
+      ...(hasCustomOfflineData ? { hasPendingCloudSync: true } : {}),
     });
-    if (scope !== 'offline_guest') {
+    if (hasCustomOfflineData) {
       pendingCloudSyncRef.current = true;
-      if (driveConnectedRef.current) {
-        setHasPendingCloudChanges(true);
-      }
+      setHasPendingCloudChanges(true);
     }
 
     // Automatically mirror every database change to the connected Local Folder on disk
@@ -2947,15 +3035,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }, 450);
     }
 
-    // Automatically persist every database change incrementally to Firebase Firestore when authenticated
+    // Automatically persist every database change incrementally to Firebase Firestore when authenticated & online
     const activeUser = auth.currentUser;
+    const isBrowserOnline = typeof navigator === 'undefined' ? true : navigator.onLine;
     if (activeUser?.uid && isEmailAuthorized(activeUser.email)) {
+      if (!isBrowserOnline) {
+        console.log('[StudyProvider][autoSync] Navegador offline — dados persistidos localmente em localStorage e IndexedDB para sincronização automática quando a rede voltar.', {
+          scope,
+          uid: activeUser.uid,
+          bytes: serialized.length,
+        });
+        return;
+      }
       if (firebaseSyncTimerRef.current) {
         window.clearTimeout(firebaseSyncTimerRef.current);
       }
       const scheduleIncrementalFirebaseSave = (delayMs: number) => {
         firebaseSyncTimerRef.current = window.setTimeout(() => {
           firebaseSyncTimerRef.current = null;
+          if (typeof navigator !== 'undefined' && !navigator.onLine) {
+            return;
+          }
           const currentUser = auth.currentUser;
           if (!currentUser?.uid) return;
           if (firebaseInFlightRef.current) {
@@ -2965,19 +3065,65 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const curDb = dbRef.current;
           const curScope = activeScopeRef.current;
           const curHash = computeDatabaseContentHash(curDb);
+          const configDiag = getFirestoreConfigDiagnostics();
+          const targetCollectionPath = `users/${currentUser.uid}/dbRecords`;
+          console.log('[StudyProvider][autoSync] Status da conexão e destino Firestore:', {
+            connectionStatus: {
+              online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+              firebaseAuthenticated: Boolean(currentUser.uid),
+              uid: currentUser.uid,
+              email: currentUser.email || null,
+              emailVerified: currentUser.emailVerified,
+              driveConnected: driveConnectedRef.current,
+              activeScope: curScope,
+            },
+            firestoreTarget: {
+              projectId: configDiag.projectId,
+              firestoreDatabaseId: configDiag.firestoreDatabaseId,
+              workspaceCollectionId: 'users',
+              recordsCollectionId: 'dbRecords',
+              targetCollectionPath,
+            },
+          });
           firebaseInFlightRef.current = true;
           beginFirebaseSyncOp();
-          void saveDatabaseToFirestore(
-            currentUser.uid,
-            curDb,
-            curHash,
-            {
-              elapsed: timerStateRef.current.elapsed,
-              startedAt: timerStateRef.current.startedAt,
-              activeTopic: activeTimerTopicRef.current,
-            },
-          )
-            .then((res) => {
+          void (async () => {
+            try {
+              const res = await executeWithFirebaseBackoff(
+                {
+                  operationName: 'StudyProvider.autoSync',
+                  delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+                  shouldCancel: () => auth.currentUser?.uid !== currentUser.uid,
+                  onBeforeRetry: async (info) => {
+                    console.log('[StudyProvider][autoSync] Tentativa de reconexão automática agendada:', {
+                      attempt: info.attempt,
+                      maxRetries: info.maxRetries,
+                      delaySeconds: info.delayMs / 1000,
+                      targetCollectionPath,
+                      errorCode: info.parsedError.code,
+                    });
+                    await ensureFirebaseSessionAlive(true);
+                  },
+                },
+                () =>
+                  saveDatabaseToFirestore(
+                    currentUser.uid,
+                    curDb,
+                    curHash,
+                    {
+                      elapsed: timerStateRef.current.elapsed,
+                      startedAt: timerStateRef.current.startedAt,
+                      activeTopic: activeTimerTopicRef.current,
+                    },
+                  ),
+              );
+              console.log('[StudyProvider][autoSync] Sincronização automática concluída:', {
+                targetCollectionPath,
+                writtenChunks: res.writtenChunks,
+                totalChunks: res.totalChunks,
+                updatedAt: res.updatedAt,
+              });
+              setFirebaseLastError(null);
               setLastFirebaseSyncAt(res.updatedAt);
               setFirebaseChunkCount(res.totalChunks);
               setLastCloudSyncAt(res.updatedAt);
@@ -2988,14 +3134,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 lastCloudContentHash: curHash,
                 hasPendingCloudSync: false,
               });
-            })
-            .catch((err) => {
-              console.warn('[Firebase Firestore] Falha ao sincronizar alteração incremental:', err);
-            })
-            .finally(() => {
+            } catch (err) {
+              console.log('[StudyProvider][autoSync] Erro capturado na comunicação com Firestore após retentativas:', {
+                online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+                uid: currentUser.uid,
+                firestoreDatabaseId: configDiag.firestoreDatabaseId,
+                targetCollectionPath,
+                error: err,
+              });
+              reportFirebaseSyncError('auto-incremental', err);
+            } finally {
               firebaseInFlightRef.current = false;
               endFirebaseSyncOp();
-            });
+            }
+          })();
         }, delayMs);
       };
       scheduleIncrementalFirebaseSave(600);
@@ -3019,13 +3171,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       // Ignore storage error
     }
     const currentUser = auth.currentUser;
-    if (currentUser?.uid && firebaseHydratedUidRef.current === currentUser.uid) {
-      void syncTimerStateToFirestore(currentUser.uid, {
+    if (!currentUser?.uid || firebaseHydratedUidRef.current !== currentUser.uid) {
+      return;
+    }
+    const timerId = window.setTimeout(() => {
+      if (firebaseInFlightRef.current) return;
+      const liveUser = auth.currentUser;
+      if (!liveUser?.uid || firebaseHydratedUidRef.current !== liveUser.uid) return;
+      void syncTimerStateToFirestore(liveUser.uid, {
         elapsed: timerState.elapsed,
         startedAt: timerState.startedAt,
         activeTopic: activeTimerTopicRef.current,
-      }).catch(() => {});
-    }
+      }).catch((err) => {
+        reportFirebaseSyncError('timer', err);
+      });
+    }, 1500);
+    return () => window.clearTimeout(timerId);
   }, [timerState]);
 
   useEffect(() => {
@@ -3137,6 +3298,66 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     setToasts((prev) => prev.filter((item) => item.id !== id));
   }, []);
 
+  const reportFirebaseSyncError = useCallback(
+    (
+      phase: string,
+      err: unknown,
+      options?: { notifyUser?: boolean; phaseLabel?: string },
+    ): ParsedFirestoreError => {
+      const parsed = parseFirestoreError(err);
+      const currentUser = auth.currentUser;
+      const configDiag = getFirestoreConfigDiagnostics();
+
+      console.error(`[StudyProvider][Firebase][${phase}] Falha na sincronização:`, {
+        category: parsed.category,
+        code: parsed.code,
+        operationType: parsed.operationType,
+        path: parsed.path,
+        userMessage: parsed.userMessage,
+        technicalMessage: parsed.technicalMessage,
+        auth: {
+          uid: currentUser?.uid || null,
+          email: currentUser?.email || null,
+          emailVerified: currentUser?.emailVerified ?? null,
+        },
+        config: {
+          projectId: configDiag.projectId,
+          firestoreDatabaseId: configDiag.firestoreDatabaseId,
+          isValid: configDiag.isValid,
+          issues: configDiag.issues,
+        },
+      });
+
+      setFirebaseLastError(parsed);
+
+      if (parsed.category === 'auth' && currentUser) {
+        void ensureFirebaseSessionAlive(true);
+      }
+
+      const isCriticalAuthOrPerm =
+        parsed.category === 'auth' ||
+        parsed.category === 'permission' ||
+        parsed.category === 'config';
+      const now = Date.now();
+      const canShowBackgroundToast =
+        isCriticalAuthOrPerm && now - lastFirebaseErrorToastAtRef.current > 25_000;
+
+      if (options?.notifyUser || canShowBackgroundToast) {
+        if (!options?.notifyUser) {
+          lastFirebaseErrorToastAtRef.current = now;
+        }
+        const prefix = options?.phaseLabel || 'Erro ao sincronizar com Firebase Firestore';
+        toast(`${prefix}: ${parsed.userMessage}`, true);
+      }
+
+      return parsed;
+    },
+    [toast],
+  );
+
+  const reportFirebaseErrorRef = useRef(reportFirebaseSyncError);
+  reportFirebaseErrorRef.current = reportFirebaseSyncError;
+
   const requestConfirm = useCallback((options: ConfirmOptions): Promise<boolean> => {
     return new Promise((resolve) => {
       setConfirmDialog({
@@ -3187,22 +3408,34 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const nextHash = computeDatabaseContentHash(sanitizedDb);
         beginFirebaseSyncOp();
         firebaseInFlightRef.current = true;
-        void saveDatabaseToFirestore(
-          currentUser.uid,
-          sanitizedDb,
-          nextHash,
+        void executeWithFirebaseBackoff(
           {
-            elapsed: timerStateRef.current.elapsed,
-            startedAt: timerStateRef.current.startedAt,
-            activeTopic: activeTimerTopicRef.current,
+            operationName: 'StudyProvider.mirrorRestored',
+            delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+            shouldCancel: () => auth.currentUser?.uid !== currentUser.uid,
+            onBeforeRetry: async () => {
+              await ensureFirebaseSessionAlive(true);
+            },
           },
+          () =>
+            saveDatabaseToFirestore(
+              currentUser.uid,
+              sanitizedDb,
+              nextHash,
+              {
+                elapsed: timerStateRef.current.elapsed,
+                startedAt: timerStateRef.current.startedAt,
+                activeTopic: activeTimerTopicRef.current,
+              },
+            ),
         )
           .then((saved) => {
+            setFirebaseLastError(null);
             setLastFirebaseSyncAt(saved.updatedAt);
             setFirebaseChunkCount(saved.totalChunks);
           })
           .catch((err) => {
-            console.warn('[Firebase Firestore] Falha ao espelhar banco restaurado do Drive/Local:', err);
+            reportFirebaseErrorRef.current('mirror-restored', err);
           })
           .finally(() => {
             firebaseInFlightRef.current = false;
@@ -3215,22 +3448,84 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const syncNowWithFirebase = useCallback(
     async (options?: { forceFullWrite?: boolean; silent?: boolean }): Promise<boolean> => {
-      let currentUser = auth.currentUser;
+      const configDiag = getFirestoreConfigDiagnostics();
+      console.log('[StudyProvider][syncNowWithFirebase] Iniciando sincronização:', {
+        connectionStatus: {
+          online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+          hasAuthUser: Boolean(auth.currentUser?.uid),
+          uid: auth.currentUser?.uid || null,
+          email: auth.currentUser?.email || null,
+          emailVerified: auth.currentUser?.emailVerified ?? null,
+          driveConnected: driveConnectedRef.current,
+          firebaseInFlight: firebaseInFlightRef.current,
+          activeScope: activeScopeRef.current,
+        },
+        firestoreTarget: {
+          projectId: configDiag.projectId,
+          firestoreDatabaseId: configDiag.firestoreDatabaseId,
+          workspaceCollectionId: 'users',
+          recordsCollectionId: 'dbRecords',
+          targetCollectionPath: auth.currentUser?.uid
+            ? `users/${auth.currentUser.uid}/dbRecords`
+            : 'users/{uid}/dbRecords',
+        },
+        options: {
+          forceFullWrite: Boolean(options?.forceFullWrite),
+          silent: Boolean(options?.silent),
+        },
+      });
+
+      let currentUser = await ensureFirebaseSessionAlive(false);
       if (!currentUser?.uid) {
-        const res = await googleSignIn();
-        if (!res?.user?.uid) {
-          if (!options?.silent) {
-            toast('Faça login com sua conta Google para sincronizar com o Firebase Firestore.', true);
+        try {
+          const res = await googleSignIn();
+          if (!res?.user?.uid) {
+            console.log('[StudyProvider][syncNowWithFirebase] Login cancelado ou sem UID retornado.');
+            if (!options?.silent) {
+              toast('Faça login com sua conta Google para sincronizar com o Firebase Firestore.', true);
+            }
+            return false;
           }
+          currentUser = res.user;
+        } catch (loginErr) {
+          console.log('[StudyProvider][syncNowWithFirebase] Erro capturado no try-catch de login:', {
+            online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+            firestoreDatabaseId: configDiag.firestoreDatabaseId,
+            error: loginErr,
+          });
+          reportFirebaseSyncError('manual-login', loginErr, {
+            notifyUser: !options?.silent,
+            phaseLabel: 'Erro de autenticação Google/Firebase',
+          });
           return false;
         }
-        currentUser = res.user;
       }
 
       if (!isEmailAuthorized(currentUser.email)) {
+        const msg = `O e-mail "${currentUser.email || 'informado'}" não está autorizado a gravar neste portal.`;
+        console.log('[StudyProvider][syncNowWithFirebase] Acesso bloqueado por e-mail não autorizado:', {
+          email: currentUser.email,
+          targetCollectionPath: `users/${currentUser.uid}/dbRecords`,
+        });
         if (!options?.silent) {
-          toast(`O e-mail "${currentUser.email || 'informado'}" não está autorizado.`, true);
+          toast(msg, true);
         }
+        return false;
+      }
+
+      if (currentUser.emailVerified === false) {
+        const err = new Error(
+          `A conta "${currentUser.email}" não possui e-mail verificado no Firebase Auth (exigido pelas regras do Firestore).`,
+        );
+        console.log('[StudyProvider][syncNowWithFirebase] Bloqueado: emailVerified=false:', {
+          uid: currentUser.uid,
+          email: currentUser.email,
+          targetCollectionPath: `users/${currentUser.uid}/dbRecords`,
+        });
+        reportFirebaseSyncError('manual-email-unverified', err, {
+          notifyUser: !options?.silent,
+          phaseLabel: 'Falha de autenticação Firebase',
+        });
         return false;
       }
 
@@ -3240,12 +3535,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       if (firebaseInFlightRef.current) {
+        console.log('[StudyProvider][syncNowWithFirebase] Aguardando gravação em andamento finalizar...');
         const waitStart = Date.now();
         while (firebaseInFlightRef.current && Date.now() - waitStart < 8000) {
           await new Promise((r) => window.setTimeout(r, 200));
         }
       }
 
+      const targetCollectionPath = `users/${currentUser.uid}/dbRecords`;
       beginFirebaseSyncOp();
       firebaseInFlightRef.current = true;
       try {
@@ -3253,17 +3550,53 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const curDb = dbRef.current;
         const curScope = activeScopeRef.current;
         const curHash = computeDatabaseContentHash(curDb);
-        const result = await saveDatabaseToFirestore(
-          currentUser.uid,
-          curDb,
-          curHash,
+        console.log('[StudyProvider][syncNowWithFirebase] Enviando gravação para coleção Firestore:', {
+          online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+          uid: currentUser.uid,
+          email: currentUser.email,
+          firestoreDatabaseId: configDiag.firestoreDatabaseId,
+          workspaceCollectionId: 'users',
+          recordsCollectionId: 'dbRecords',
+          targetCollectionPath,
+          contentHash: curHash,
+          forceFullWrite: Boolean(options?.forceFullWrite),
+        });
+        const result = await executeWithFirebaseBackoff(
           {
-            elapsed: timerStateRef.current.elapsed,
-            startedAt: timerStateRef.current.startedAt,
-            activeTopic: activeTimerTopicRef.current,
+            operationName: 'StudyProvider.syncNowWithFirebase',
+            delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+            shouldCancel: () => auth.currentUser?.uid !== currentUser.uid,
+            onBeforeRetry: async (info) => {
+              console.log('[StudyProvider][syncNowWithFirebase] Tentativa de reconexão automática agendada:', {
+                attempt: info.attempt,
+                maxRetries: info.maxRetries,
+                delaySeconds: info.delayMs / 1000,
+                targetCollectionPath,
+                errorCode: info.parsedError.code,
+              });
+              await ensureFirebaseSessionAlive(true);
+            },
           },
-          { forceFullWrite: options?.forceFullWrite },
+          () =>
+            saveDatabaseToFirestore(
+              currentUser.uid,
+              curDb,
+              curHash,
+              {
+                elapsed: timerStateRef.current.elapsed,
+                startedAt: timerStateRef.current.startedAt,
+                activeTopic: activeTimerTopicRef.current,
+              },
+              { forceFullWrite: options?.forceFullWrite },
+            ),
         );
+        console.log('[StudyProvider][syncNowWithFirebase] Gravação concluída com sucesso:', {
+          targetCollectionPath,
+          writtenChunks: result.writtenChunks,
+          totalChunks: result.totalChunks,
+          updatedAt: result.updatedAt,
+        });
+        setFirebaseLastError(null);
         setLastFirebaseSyncAt(result.updatedAt);
         setFirebaseChunkCount(result.totalChunks);
         setLastCloudSyncAt(result.updatedAt);
@@ -3283,63 +3616,129 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
         return true;
       } catch (err) {
-        if (!options?.silent) {
-          let readable = (err as Error)?.message || 'Falha na sincronização';
-          try {
-            const parsed = JSON.parse(readable);
-            if (parsed?.error) readable = String(parsed.error);
-          } catch {
-            // keep raw message
-          }
-          toast(`Erro ao gravar no Firebase Firestore: ${readable}`, true);
-        }
+        const parsedErr = reportFirebaseSyncError('manual', err, {
+          notifyUser: !options?.silent,
+          phaseLabel: 'Erro ao gravar no Firebase Firestore',
+        });
+        console.log('[StudyProvider][syncNowWithFirebase] Erro capturado no try-catch após retentativas:', {
+          connectionStatus: {
+            online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+            uid: currentUser.uid,
+            email: currentUser.email,
+            emailVerified: currentUser.emailVerified,
+            driveConnected: driveConnectedRef.current,
+          },
+          firestoreTarget: {
+            projectId: configDiag.projectId,
+            firestoreDatabaseId: configDiag.firestoreDatabaseId,
+            targetCollectionPath,
+          },
+          parsedError: parsedErr,
+          rawError: err,
+        });
         return false;
       } finally {
         firebaseInFlightRef.current = false;
         endFirebaseSyncOp();
       }
     },
-    [beginFirebaseSyncOp, endFirebaseSyncOp, toast],
+    [beginFirebaseSyncOp, endFirebaseSyncOp, reportFirebaseSyncError, toast],
   );
 
   const restoreFromFirebase = useCallback(async (): Promise<boolean> => {
-    let currentUser = auth.currentUser;
+    const configDiag = getFirestoreConfigDiagnostics();
+    console.log('[StudyProvider][restoreFromFirebase] Iniciando restauração do Firestore:', {
+      online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+      hasAuthUser: Boolean(auth.currentUser?.uid),
+      uid: auth.currentUser?.uid || null,
+      firestoreDatabaseId: configDiag.firestoreDatabaseId,
+      targetCollectionPath: auth.currentUser?.uid
+        ? `users/${auth.currentUser.uid}/dbRecords`
+        : 'users/{uid}/dbRecords',
+    });
+    let currentUser = await ensureFirebaseSessionAlive(false);
     if (!currentUser?.uid) {
-      const res = await googleSignIn();
-      if (!res?.user?.uid) {
-        toast('Faça login com sua conta Google para restaurar do Firebase Firestore.', true);
+      try {
+        const res = await googleSignIn();
+        if (!res?.user?.uid) {
+          toast('Faça login com sua conta Google para restaurar do Firebase Firestore.', true);
+          return false;
+        }
+        currentUser = res.user;
+      } catch (loginErr) {
+        console.log('[StudyProvider][restoreFromFirebase] Erro capturado no try-catch de login:', loginErr);
+        reportFirebaseSyncError('restore-login', loginErr, {
+          notifyUser: true,
+          phaseLabel: 'Erro de autenticação Google/Firebase',
+        });
         return false;
       }
-      currentUser = res.user;
     }
 
+    if (!isEmailAuthorized(currentUser.email)) {
+      toast(`O e-mail "${currentUser.email || 'informado'}" não está autorizado.`, true);
+      return false;
+    }
+
+    const targetCollectionPath = `users/${currentUser.uid}/dbRecords`;
     beginFirebaseSyncOp();
     try {
-      const loaded = await loadDatabaseFromFirestore(currentUser.uid);
+      const loaded = await executeWithFirebaseBackoff(
+        {
+          operationName: 'StudyProvider.restoreFromFirebase',
+          delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+          shouldCancel: () => auth.currentUser?.uid !== currentUser.uid,
+          onBeforeRetry: async (info) => {
+            console.log('[StudyProvider][restoreFromFirebase] Tentativa de reconexão automática agendada:', {
+              attempt: info.attempt,
+              maxRetries: info.maxRetries,
+              delaySeconds: info.delayMs / 1000,
+              targetCollectionPath,
+              errorCode: info.parsedError.code,
+            });
+            await ensureFirebaseSessionAlive(true);
+          },
+        },
+        () => loadDatabaseFromFirestore(currentUser.uid),
+      );
       if (!loaded) {
+        console.log('[StudyProvider][restoreFromFirebase] Nenhum registro encontrado na coleção:', {
+          firestoreDatabaseId: configDiag.firestoreDatabaseId,
+          targetCollectionPath,
+        });
         toast('Nenhum banco de dados encontrado no Firebase Firestore para esta conta. Gravando dados atuais...', false);
         return await syncNowWithFirebase({ forceFullWrite: true });
       }
       const normalized = normalizeAndMergeDatabase(loaded.db);
       const scope = getUserScopeKey(currentUser);
       applyRestoredDatabaseForScope(scope, normalized, loaded.updatedAt, { skipFirestorePush: true });
+      setFirebaseLastError(null);
       setFirebaseChunkCount(loaded.sectionCount);
+      console.log('[StudyProvider][restoreFromFirebase] Restauração concluída:', {
+        targetCollectionPath,
+        sectionCount: loaded.sectionCount,
+        updatedAt: loaded.updatedAt,
+      });
       toast(`Banco de dados restaurado do Firebase Firestore (${loaded.sectionCount} partições carregadas)!`);
       return true;
     } catch (err) {
-      let readable = (err as Error)?.message || 'Falha na restauração';
-      try {
-        const parsed = JSON.parse(readable);
-        if (parsed?.error) readable = String(parsed.error);
-      } catch {
-        // keep raw message
-      }
-      toast(`Falha ao restaurar do Firebase Firestore: ${readable}`, true);
+      const parsedErr = reportFirebaseSyncError('restore', err, {
+        notifyUser: true,
+        phaseLabel: 'Falha ao restaurar do Firebase Firestore',
+      });
+      console.log('[StudyProvider][restoreFromFirebase] Erro capturado no try-catch após retentativas:', {
+        online: typeof navigator !== 'undefined' ? navigator.onLine : true,
+        uid: currentUser.uid,
+        firestoreDatabaseId: configDiag.firestoreDatabaseId,
+        targetCollectionPath,
+        parsedError: parsedErr,
+        rawError: err,
+      });
       return false;
     } finally {
       endFirebaseSyncOp();
     }
-  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, syncNowWithFirebase, toast]);
+  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, reportFirebaseSyncError, syncNowWithFirebase, toast]);
 
   // Automatic Firebase Firestore Hydration, Migration & Real-Time Listener on Auth
   const googleUid = googleUser?.uid || null;
@@ -3358,9 +3757,26 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       void (async () => {
         beginFirebaseSyncOp();
         try {
-          const [loadedFirestore, idbSnap] = await Promise.all([
-            loadDatabaseFromFirestore(googleUid),
+          console.info('[StudyProvider][Firebase][hydrate] Validando sessão Auth e carregando Firestore...', {
+            uid: googleUid,
+            email: googleEmail,
+          });
+          await ensureFirebaseSessionAlive(false);
+          const [loadedFirestore, idbSnap, guestIdbSnap, guestIdbMeta] = await Promise.all([
+            executeWithFirebaseBackoff(
+              {
+                operationName: 'StudyProvider.hydrate.load',
+                delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+                shouldCancel: () => cancelled,
+                onBeforeRetry: async () => {
+                  await ensureFirebaseSessionAlive(true);
+                },
+              },
+              () => loadDatabaseFromFirestore(googleUid),
+            ),
             loadScopedDatabaseJson(scope),
+            loadScopedDatabaseJson('offline_guest'),
+            loadScopedSyncMeta<ScopeSyncMeta>('offline_guest'),
           ]);
           if (cancelled) return;
 
@@ -3373,8 +3789,80 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           }
 
+          let localMeta = loadSyncMeta(scope);
+          const guestPending = pendingGuestDbRef.current;
+          pendingGuestDbRef.current = null;
+          const guestLsMeta = loadSyncMeta('offline_guest');
+          const persistedGuestEditMs = Math.max(
+            Date.parse(guestLsMeta.lastLocalEditAt || '') || 0,
+            Date.parse(guestIdbMeta?.lastLocalEditAt || '') || 0,
+            Date.parse(guestIdbSnap?.updatedAt || '') || 0,
+          );
+          let persistedGuestDb: StudyDatabase | null = null;
+          if (guestIdbSnap?.raw && shouldPreferIdbSnapshot('offline_guest', guestIdbSnap, true)) {
+            try {
+              persistedGuestDb = normalizeAndMergeDatabase(JSON.parse(guestIdbSnap.raw));
+            } catch {
+              persistedGuestDb = null;
+            }
+          } else {
+            try {
+              if (localStorage.getItem(getDbStorageKey('offline_guest'))) {
+                persistedGuestDb = loadStoredDatabase('offline_guest');
+              }
+            } catch {
+              persistedGuestDb = null;
+            }
+          }
+
+          const candidateGuestDb =
+            guestPending && (!persistedGuestDb || guestPending.updatedAtMs >= persistedGuestEditMs)
+              ? guestPending.db
+              : persistedGuestDb;
+          const candidateGuestMs = Math.max(guestPending?.updatedAtMs || 0, persistedGuestEditMs);
+          const lastMergedGuestMs = Date.parse(localMeta.lastMergedGuestEditAt || '') || 0;
+
+          let rescuedGuestEdits = false;
+          if (
+            candidateGuestDb &&
+            !isUntouchedSeedDatabase(candidateGuestDb) &&
+            (Boolean(guestPending) || candidateGuestMs > lastMergedGuestMs + 500 || isUntouchedSeedDatabase(localDb))
+          ) {
+            if (isUntouchedSeedDatabase(localDb)) {
+              localDb = candidateGuestDb;
+            } else {
+              const guestDelta = buildIncrementalDatabaseBackup(createInitialDatabase(), candidateGuestDb, {
+                updatedAt: new Date(candidateGuestMs || Date.now()).toISOString(),
+                userEmail: googleEmail || undefined,
+              });
+              if (guestDelta.hasChanges) {
+                const additiveGuestEnvelope = {
+                  ...guestDelta.envelope,
+                  delta: Object.fromEntries(
+                    Object.entries(guestDelta.envelope.delta).map(([sec, val]) => {
+                      if (val && typeof val === 'object' && !Array.isArray(val)) {
+                        const copy = { ...(val as Record<string, any>) };
+                        delete copy.deletedIds;
+                        delete copy.deletedKeys;
+                        return [sec, copy];
+                      }
+                      return [sec, val];
+                    }),
+                  ),
+                };
+                localDb = applyIncrementalDeltaToDatabase(localDb, additiveGuestEnvelope);
+              }
+            }
+            rescuedGuestEdits = true;
+            const mergedIso = new Date(Math.max(candidateGuestMs, Date.now())).toISOString();
+            localMeta = saveSyncMeta(scope, {
+              lastMergedGuestEditAt: mergedIso,
+              lastLocalEditAt: mergedIso,
+              hasPendingCloudSync: true,
+            });
+          }
+
           const localUntouched = isUntouchedSeedDatabase(localDb);
-          const localMeta = loadSyncMeta(scope);
           const localEditMs = Date.parse(localMeta.lastLocalEditAt || '') || 0;
 
           if (loadedFirestore) {
@@ -3407,16 +3895,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               applyRestoredDatabaseForScope(scope, localDb, new Date().toISOString(), { skipFirestorePush: true });
               firebaseInFlightRef.current = true;
               try {
-                const saved = await saveDatabaseToFirestore(
-                  googleUid,
-                  localDb,
-                  localHash,
+                const saved = await executeWithFirebaseBackoff(
                   {
-                    elapsed: timerStateRef.current.elapsed,
-                    startedAt: timerStateRef.current.startedAt,
-                    activeTopic: activeTimerTopicRef.current,
+                    operationName: 'StudyProvider.hydrate.pushSeedReplace',
+                    delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+                    shouldCancel: () => cancelled,
+                    onBeforeRetry: async () => {
+                      await ensureFirebaseSessionAlive(true);
+                    },
                   },
-                  { forceFullWrite: true },
+                  () =>
+                    saveDatabaseToFirestore(
+                      googleUid,
+                      localDb,
+                      localHash,
+                      {
+                        elapsed: timerStateRef.current.elapsed,
+                        startedAt: timerStateRef.current.startedAt,
+                        activeTopic: activeTimerTopicRef.current,
+                      },
+                      { forceFullWrite: true },
+                    ),
                 );
                 if (!cancelled) {
                   setLastFirebaseSyncAt(saved.updatedAt);
@@ -3425,7 +3924,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               } finally {
                 firebaseInFlightRef.current = false;
               }
-            } else if (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500)) {
+            } else if (!rescuedGuestEdits && (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))) {
               if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
                 applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
                   skipFirestorePush: !remoteHadDirtyClassification,
@@ -3435,26 +3934,56 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               }
               setFirebaseChunkCount(loadedFirestore.sectionCount);
             } else {
-              // Merge local/Drive changes over Firestore baseline and push to Firestore
+              // Merge local/folder/Drive changes additively over Firestore baseline and push to Firestore
               const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), localDb, {
                 updatedAt: new Date().toISOString(),
                 userEmail: googleEmail || undefined,
               });
+              const additiveEnvelope = {
+                ...delta.envelope,
+                delta: Object.fromEntries(
+                  Object.entries(delta.envelope.delta).map(([sec, val]) => {
+                    if (val && typeof val === 'object' && !Array.isArray(val)) {
+                      const copy = { ...(val as Record<string, any>) };
+                      delete copy.deletedIds;
+                      delete copy.deletedKeys;
+                      return [sec, copy];
+                    }
+                    return [sec, val];
+                  }),
+                ),
+              };
               const mergedDb = delta.hasChanges
-                ? applyIncrementalDeltaToDatabase(remoteNormalized, delta.envelope)
+                ? applyIncrementalDeltaToDatabase(remoteNormalized, additiveEnvelope)
                 : localDb;
               const mergedHash = computeDatabaseContentHash(mergedDb);
               applyRestoredDatabaseForScope(scope, mergedDb, new Date().toISOString(), { skipFirestorePush: true });
               firebaseInFlightRef.current = true;
               try {
-                const saved = await saveDatabaseToFirestore(googleUid, mergedDb, mergedHash, {
-                  elapsed: timerStateRef.current.elapsed,
-                  startedAt: timerStateRef.current.startedAt,
-                  activeTopic: activeTimerTopicRef.current,
-                });
+                const saved = await executeWithFirebaseBackoff(
+                  {
+                    operationName: 'StudyProvider.hydrate.pushMerge',
+                    delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+                    shouldCancel: () => cancelled,
+                    onBeforeRetry: async () => {
+                      await ensureFirebaseSessionAlive(true);
+                    },
+                  },
+                  () =>
+                    saveDatabaseToFirestore(googleUid, mergedDb, mergedHash, {
+                      elapsed: timerStateRef.current.elapsed,
+                      startedAt: timerStateRef.current.startedAt,
+                      activeTopic: activeTimerTopicRef.current,
+                    }),
+                );
                 if (!cancelled) {
                   setLastFirebaseSyncAt(saved.updatedAt);
                   setFirebaseChunkCount(saved.totalChunks);
+                  saveSyncMeta(scope, {
+                    lastCloudSyncAt: saved.updatedAt,
+                    lastCloudContentHash: mergedHash,
+                    hasPendingCloudSync: false,
+                  });
                 }
               } finally {
                 firebaseInFlightRef.current = false;
@@ -3465,16 +3994,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             const hash = computeDatabaseContentHash(localDb);
             firebaseInFlightRef.current = true;
             try {
-              const saved = await saveDatabaseToFirestore(
-                googleUid,
-                localDb,
-                hash,
+              const saved = await executeWithFirebaseBackoff(
                 {
-                  elapsed: timerStateRef.current.elapsed,
-                  startedAt: timerStateRef.current.startedAt,
-                  activeTopic: activeTimerTopicRef.current,
+                  operationName: 'StudyProvider.hydrate.firstMigration',
+                  delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+                  shouldCancel: () => cancelled,
+                  onBeforeRetry: async () => {
+                    await ensureFirebaseSessionAlive(true);
+                  },
                 },
-                { forceFullWrite: true },
+                () =>
+                  saveDatabaseToFirestore(
+                    googleUid,
+                    localDb,
+                    hash,
+                    {
+                      elapsed: timerStateRef.current.elapsed,
+                      startedAt: timerStateRef.current.startedAt,
+                      activeTopic: activeTimerTopicRef.current,
+                    },
+                    { forceFullWrite: true },
+                  ),
               );
               if (!cancelled) {
                 setLastFirebaseSyncAt(saved.updatedAt);
@@ -3491,38 +4031,66 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           }
 
+          if (rescuedGuestEdits && !cancelled) {
+            toast('Dados salvos na pasta local/modo offline foram mesclados e preservados na sua conta Google!');
+          }
+
           firebaseHydratedUidRef.current = googleUid;
+          setFirebaseLastError(null);
         } catch (err) {
-          console.warn('[Firebase Firestore] Aviso na hidratação inicial:', err);
+          reportFirebaseSyncError('hydrate', err, {
+            phaseLabel: 'Erro ao carregar dados do Firebase Firestore',
+          });
         } finally {
           endFirebaseSyncOp();
         }
       })();
     }
 
-    const unsubscribeSnapshot = subscribeToFirestoreWorkspace(googleUid, (remoteMeta) => {
-      if (cancelled || firebaseInFlightRef.current) return;
-      const curHash = computeDatabaseContentHash(dbRef.current);
-      if (remoteMeta.contentHash && remoteMeta.contentHash !== curHash) {
-        void loadDatabaseFromFirestore(googleUid)
-          .then((reloaded) => {
-            if (!reloaded || cancelled || firebaseInFlightRef.current) return;
-            const normalized = normalizeAndMergeDatabase(reloaded.db);
-            if (isUntouchedSeedDatabase(normalized) && !isUntouchedSeedDatabase(dbRef.current)) {
-              return;
-            }
-            applyRestoredDatabaseForScope(scope, normalized, reloaded.updatedAt, { skipFirestorePush: true });
-            setFirebaseChunkCount(reloaded.sectionCount);
-          })
-          .catch(() => {});
-      }
-    });
+    const unsubscribeSnapshot = subscribeToFirestoreWorkspace(
+      googleUid,
+      (remoteMeta) => {
+        if (cancelled || firebaseInFlightRef.current) return;
+        const curHash = computeDatabaseContentHash(dbRef.current);
+        if (remoteMeta.contentHash && remoteMeta.contentHash !== curHash) {
+          void executeWithFirebaseBackoff(
+            {
+              operationName: 'StudyProvider.realtimeReload',
+              delaysMs: FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+              shouldCancel: () => cancelled,
+              onBeforeRetry: async () => {
+                await ensureFirebaseSessionAlive(true);
+              },
+            },
+            () => loadDatabaseFromFirestore(googleUid),
+          )
+            .then((reloaded) => {
+              if (!reloaded || cancelled || firebaseInFlightRef.current) return;
+              const normalized = normalizeAndMergeDatabase(reloaded.db);
+              if (isUntouchedSeedDatabase(normalized) && !isUntouchedSeedDatabase(dbRef.current)) {
+                return;
+              }
+              applyRestoredDatabaseForScope(scope, normalized, reloaded.updatedAt, { skipFirestorePush: true });
+              setFirebaseLastError(null);
+              setFirebaseChunkCount(reloaded.sectionCount);
+            })
+            .catch((err) => {
+              reportFirebaseSyncError('realtime-reload', err);
+            });
+        }
+      },
+      (listenerErr) => {
+        reportFirebaseSyncError('realtime-listener', listenerErr, {
+          phaseLabel: 'Erro na escuta em tempo real do Firestore',
+        });
+      },
+    );
 
     return () => {
       cancelled = true;
       unsubscribeSnapshot();
     };
-  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, googleEmail, googleUid]);
+  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, googleEmail, googleUid, reportFirebaseSyncError, toast]);
 
   const syncAccountWithDriveOnAuth = useCallback(
     async (user: User, token: string, scope: string, hadLocalDbBeforeLoad: boolean) => {
@@ -4441,13 +5009,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             activeTopic: activeTimerTopicRef.current,
           })
             .then((res) => {
+              setFirebaseLastError(null);
               saveSyncMeta(scope, {
                 lastCloudSyncAt: res.updatedAt,
                 lastCloudContentHash: curHash,
                 hasPendingCloudSync: false,
               });
             })
-            .catch(() => {})
+            .catch((err) => {
+              reportFirebaseErrorRef.current('pagehide-flush', err);
+            })
             .finally(() => {
               firebaseInFlightRef.current = false;
             });
@@ -4753,6 +5324,278 @@ function isEmailAuthorized(email?: string | null): boolean {
     };
   }, [driveConnected, flushCloudSyncNow, syncAccountWithDriveOnAuth]);
 
+  // Persistent Firestore Auth & OAuth Session Health Monitor (every 30s)
+  const validateFirestoreConnectionNow = useCallback(
+    async (options?: { silent?: boolean }): Promise<FirestoreAuthHealthReport | null> => {
+      if (monitorInFlightRef.current) return null;
+
+      const expectedUid = googleUserRef.current?.uid || auth.currentUser?.uid || null;
+      const expectedEmail = googleUserRef.current?.email || auth.currentUser?.email || null;
+      const expectsSession = Boolean(expectedUid || driveConnectedRef.current);
+
+      if (!expectsSession) {
+        setFirestoreConnectionMonitor((prev) =>
+          prev.status === 'idle'
+            ? prev
+            : {
+                status: 'idle',
+                code: null,
+                message: null,
+                lastCheckedAt: null,
+                tokenExpiresAt: null,
+                consecutiveFailures: 0,
+                oauthDriveExpired: false,
+                dismissed: false,
+              },
+        );
+        return null;
+      }
+
+      monitorInFlightRef.current = true;
+      lastMonitorCheckAtRef.current = Date.now();
+      const configDiag = getFirestoreConfigDiagnostics();
+
+      try {
+        if (expectedEmail && !isEmailAuthorized(expectedEmail)) {
+          const checkedAt = new Date().toISOString();
+          const unauthorizedReport: FirestoreAuthHealthReport = {
+            status: 'inconsistent',
+            code: 'auth/unauthorized-email',
+            message: `Inconsistência de conta: o e-mail "${expectedEmail}" não está autorizado neste portal.`,
+            checkedAt,
+            uid: expectedUid,
+            email: expectedEmail,
+            emailVerified: auth.currentUser?.emailVerified ?? null,
+            tokenExpiresAt: null,
+          };
+          setFirestoreConnectionMonitor((prev) => ({
+            status: 'inconsistent',
+            code: unauthorizedReport.code,
+            message: unauthorizedReport.message,
+            lastCheckedAt: checkedAt,
+            tokenExpiresAt: null,
+            consecutiveFailures: prev.consecutiveFailures + 1,
+            oauthDriveExpired: false,
+            dismissed:
+              prev.status === 'inconsistent' && prev.code === unauthorizedReport.code
+                ? prev.dismissed
+                : false,
+          }));
+          return unauthorizedReport;
+        }
+
+        const report = await validateFirestoreAuthConnection(expectedUid, expectedEmail);
+
+        let oauthDriveExpired = false;
+        if (driveConnectedRef.current && report.status === 'healthy') {
+          if (isDriveAccessTokenExpiringSoon(90_000)) {
+            await refreshDriveAccessTokenSilently({ email: expectedEmail }).catch(() => null);
+          }
+          oauthDriveExpired = isDriveAccessTokenExpiringSoon(15_000);
+        }
+
+        console.log('[StudyProvider][AuthMonitor] Validação periódica de autenticação Firestore (30s):', {
+          status: oauthDriveExpired ? 'oauth-expired' : report.status,
+          code: oauthDriveExpired ? 'oauth/drive-token-expired' : report.code,
+          uid: report.uid,
+          email: report.email,
+          emailVerified: report.emailVerified,
+          tokenExpiresAt: report.tokenExpiresAt,
+          firestoreDatabaseId: configDiag.firestoreDatabaseId,
+          oauthDriveExpired,
+          checkedAt: report.checkedAt,
+        });
+
+        setFirestoreConnectionMonitor((prev) => {
+          if (report.status === 'expired' || report.status === 'inconsistent') {
+            const sameIssue = prev.status === report.status && prev.code === report.code;
+            return {
+              status: report.status,
+              code: report.code,
+              message: report.message,
+              lastCheckedAt: report.checkedAt,
+              tokenExpiresAt: report.tokenExpiresAt,
+              consecutiveFailures: prev.consecutiveFailures + 1,
+              oauthDriveExpired,
+              dismissed: sameIssue ? prev.dismissed : false,
+            };
+          }
+
+          if (report.status === 'warning') {
+            const nextFailures = prev.consecutiveFailures + 1;
+            const sameIssue = prev.status === 'warning' && prev.code === report.code;
+            return {
+              status: 'warning',
+              code: report.code,
+              message: report.message,
+              lastCheckedAt: report.checkedAt,
+              tokenExpiresAt: report.tokenExpiresAt,
+              consecutiveFailures: nextFailures,
+              oauthDriveExpired,
+              dismissed: nextFailures >= 2 ? (sameIssue ? prev.dismissed : false) : true,
+            };
+          }
+
+          if (oauthDriveExpired) {
+            const sameOAuthIssue = prev.code === 'oauth/drive-token-expired';
+            return {
+              status: 'expired',
+              code: 'oauth/drive-token-expired',
+              message:
+                'A sessão OAuth do Google Drive expirou neste navegador. Clique em "Reconectar Conta Google" para restaurar o envio completo de backups e PDFs.',
+              lastCheckedAt: report.checkedAt,
+              tokenExpiresAt: report.tokenExpiresAt,
+              consecutiveFailures: prev.consecutiveFailures + 1,
+              oauthDriveExpired: true,
+              dismissed: sameOAuthIssue ? prev.dismissed : false,
+            };
+          }
+
+          return {
+            status: 'healthy',
+            code: report.code,
+            message: report.message,
+            lastCheckedAt: report.checkedAt,
+            tokenExpiresAt: report.tokenExpiresAt,
+            consecutiveFailures: 0,
+            oauthDriveExpired: false,
+            dismissed: false,
+          };
+        });
+
+        if (report.status === 'healthy' && !oauthDriveExpired) {
+          setFirebaseLastError((prev) => (prev?.category === 'auth' ? null : prev));
+        }
+
+        if (!options?.silent) {
+          if (report.status === 'healthy' && !oauthDriveExpired) {
+            toast('Autenticação e conexão com o Firebase Firestore validadas!');
+          } else if (report.status === 'expired' || report.status === 'inconsistent' || oauthDriveExpired) {
+            toast(
+              oauthDriveExpired
+                ? 'Sessão OAuth do Google Drive expirada. Reconecte sua conta.'
+                : report.message,
+              true,
+            );
+          }
+        }
+
+        return report;
+      } finally {
+        monitorInFlightRef.current = false;
+      }
+    },
+    [toast],
+  );
+
+  const monitorUid = googleUser?.uid || null;
+  useEffect(() => {
+    if (!monitorUid && !driveConnected) {
+      setFirestoreConnectionMonitor((prev) =>
+        prev.status === 'idle'
+          ? prev
+          : {
+              status: 'idle',
+              code: null,
+              message: null,
+              lastCheckedAt: null,
+              tokenExpiresAt: null,
+              consecutiveFailures: 0,
+              oauthDriveExpired: false,
+              dismissed: false,
+            },
+      );
+      return;
+    }
+
+    const initialTimerId = window.setTimeout(() => {
+      void validateFirestoreConnectionNow({ silent: true });
+    }, 1500);
+
+    const intervalId = window.setInterval(() => {
+      void validateFirestoreConnectionNow({ silent: true });
+    }, 30_000);
+
+    const handleResumeCheck = () => {
+      if (document.visibilityState === 'visible' && Date.now() - lastMonitorCheckAtRef.current >= 15_000) {
+        void validateFirestoreConnectionNow({ silent: true });
+      }
+    };
+    const handleOnlineCheck = () => {
+      if (Date.now() - lastMonitorCheckAtRef.current >= 5_000) {
+        void validateFirestoreConnectionNow({ silent: true });
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleResumeCheck);
+    window.addEventListener('focus', handleResumeCheck);
+    window.addEventListener('online', handleOnlineCheck);
+
+    return () => {
+      window.clearTimeout(initialTimerId);
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', handleResumeCheck);
+      window.removeEventListener('focus', handleResumeCheck);
+      window.removeEventListener('online', handleOnlineCheck);
+    };
+  }, [driveConnected, monitorUid, validateFirestoreConnectionNow]);
+
+  // Flush locally queued edits to Firebase Firestore & Google Drive automatically as soon as network connectivity is restored
+  useEffect(() => {
+    let flushInProgress = false;
+    const syncPendingOfflineChanges = async (reason: 'online-event' | 'mount-check') => {
+      if (flushInProgress) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+      const currentUser = auth.currentUser;
+      const scope = activeScopeRef.current;
+      if (!currentUser?.uid || !isEmailAuthorized(currentUser.email) || scope === 'offline_guest') {
+        return;
+      }
+
+      const meta = loadSyncMeta(scope);
+      const hasPending = pendingCloudSyncRef.current || hasPersistedPendingSync(meta);
+      if (!hasPending) return;
+      if (firebaseHydratedUidRef.current !== currentUser.uid || firebaseInFlightRef.current) {
+        return;
+      }
+
+      flushInProgress = true;
+      try {
+        console.log('[StudyProvider][OfflineQueue] Rede detectada — sincronizando alterações locais pendentes com a nuvem...', {
+          reason,
+          uid: currentUser.uid,
+          scope,
+        });
+        const ok = await syncNowWithFirebase({ silent: true });
+        if (ok && reason === 'online-event') {
+          toast('Conexão restabelecida! Alterações salvas offline foram sincronizadas com o Firebase.');
+        }
+        if (driveConnectedRef.current && pendingCloudSyncRef.current) {
+          void flushCloudSyncNow();
+        }
+      } finally {
+        flushInProgress = false;
+      }
+    };
+
+    const handleNetworkRestored = () => {
+      window.setTimeout(() => {
+        void syncPendingOfflineChanges('online-event');
+      }, 800);
+    };
+
+    window.addEventListener('online', handleNetworkRestored);
+    const startupFlushId = window.setTimeout(() => {
+      void syncPendingOfflineChanges('mount-check');
+    }, 3500);
+
+    return () => {
+      window.clearTimeout(startupFlushId);
+      window.removeEventListener('online', handleNetworkRestored);
+    };
+  }, [flushCloudSyncNow, googleUid, syncNowWithFirebase, toast]);
+
   const connectGoogleDrive = useCallback(async (options?: { forceAccountPicker?: boolean }): Promise<boolean> => {
     setAuthError(null);
     try {
@@ -4776,6 +5619,7 @@ function isEmailAuthorized(email?: string | null): boolean {
             } else if (pendingCloudSyncRef.current) {
               void flushCloudSyncNow();
             }
+            void validateFirestoreConnectionNow({ silent: true });
             toast(`Sessão do Google Drive renovada automaticamente (${currentUser.email})!`);
             return true;
           }
@@ -12027,6 +12871,11 @@ function isEmailAuthorized(email?: string | null): boolean {
         isSyncingFirebase,
         lastFirebaseSyncAt,
         firebaseChunkCount,
+        firebaseLastError,
+        clearFirebaseError,
+        firestoreConnectionMonitor,
+        validateFirestoreConnectionNow,
+        dismissFirestoreConnectionAlert,
         syncNowWithFirebase,
         restoreFromFirebase,
         migrateDriveToFirebase,
