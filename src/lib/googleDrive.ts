@@ -94,10 +94,13 @@ export function getPreferredStudyFolder(): DriveFolderPreference {
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<DriveFolderPreference>;
       const name = typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : DRIVE_FOLDER_NAME;
+      const hasExplicitNullId = Object.prototype.hasOwnProperty.call(parsed, 'id') && parsed.id === null;
       const id =
         typeof parsed?.id === 'string' && parsed.id.trim()
           ? parsed.id.trim()
-          : DEFAULT_STUDY_FOLDER_ID;
+          : hasExplicitNullId
+            ? null
+            : DEFAULT_STUDY_FOLDER_ID;
       return { id, name };
     }
   } catch {
@@ -544,6 +547,7 @@ async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphRes
     const lower = folder.name.trim().toLowerCase();
     if (
       (pref.id && folder.id === pref.id) ||
+      folder.id === DEFAULT_STUDY_FOLDER_ID ||
       lower === normalizedPrefName ||
       lower === normalizedDefaultName
     ) {
@@ -726,26 +730,34 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
   }
 
   const task = (async (): Promise<{ id: string; name: string; webViewLink?: string }> => {
+    let fallbackTargetName = pref.name || DRIVE_FOLDER_NAME;
+
     if (pref.id) {
       const byId = await getDriveFolderMetadata(pref.id, activeToken);
       if (byId) {
-        const link = byId.webViewLink || `https://drive.google.com/drive/folders/${byId.id}`;
-        cachedFolderId = byId.id;
-        cachedFolderLink = link;
-        cachedFolderName = byId.name;
-        rememberKnownStudyDriveFolderName(byId.name);
-        if (byId.name && byId.name !== pref.name) {
-          try {
-            localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: byId.id, name: byId.name }));
-          } catch {
-            // ignore storage errors
-          }
+        if (byId.name) {
+          fallbackTargetName = byId.name;
+          rememberKnownStudyDriveFolderName(byId.name);
         }
-        return { id: byId.id, name: byId.name, webViewLink: link };
+        const isWritable = await verifyDriveFolderWritable(byId.id, activeToken).catch(() => false);
+        if (isWritable) {
+          const link = byId.webViewLink || `https://drive.google.com/drive/folders/${byId.id}`;
+          cachedFolderId = byId.id;
+          cachedFolderLink = link;
+          cachedFolderName = byId.name;
+          if (byId.name && byId.name !== pref.name) {
+            try {
+              localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: byId.id, name: byId.name }));
+            } catch {
+              // ignore storage errors
+            }
+          }
+          return { id: byId.id, name: byId.name, webViewLink: link };
+        }
       }
     }
 
-    const targetName = pref.name || DRIVE_FOLDER_NAME;
+    const targetName = fallbackTargetName || DRIVE_FOLDER_NAME;
     const escapedName = targetName.replace(/'/g, "\\'");
     const searchRes = await fetchDriveFilesList(activeToken, {
       q: `mimeType = 'application/vnd.google-apps.folder' and name = '${escapedName}' and trashed = false`,
@@ -763,6 +775,7 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
     const matches = (searchData.files || []) as Array<{ id: string; name: string; webViewLink?: string }>;
     const writableMatches: Array<{ id: string; name: string; webViewLink?: string }> = [];
     for (const folder of matches) {
+      if (pref.id && folder.id === pref.id) continue;
       const writable = await verifyDriveFolderWritable(folder.id, activeToken);
       if (writable) {
         writableMatches.push(folder);
@@ -810,6 +823,13 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
       const link = chosen.webViewLink || `https://drive.google.com/drive/folders/${chosen.id}`;
       cachedFolderId = chosen.id;
       cachedFolderLink = link;
+      cachedFolderName = chosen.name;
+      rememberKnownStudyDriveFolderName(chosen.name);
+      try {
+        localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: chosen.id, name: chosen.name }));
+      } catch {
+        // ignore storage errors
+      }
       return { id: chosen.id, name: chosen.name, webViewLink: link };
     }
 
@@ -834,10 +854,18 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
     }
 
     const newFolder = (await createRes.json()) as { id: string; name?: string; webViewLink?: string };
+    const resolvedName = newFolder.name || targetName;
     const link = newFolder.webViewLink || `https://drive.google.com/drive/folders/${newFolder.id}`;
     cachedFolderId = newFolder.id;
     cachedFolderLink = link;
-    return { id: newFolder.id, name: newFolder.name || targetName, webViewLink: link };
+    cachedFolderName = resolvedName;
+    rememberKnownStudyDriveFolderName(resolvedName);
+    try {
+      localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: newFolder.id, name: resolvedName }));
+    } catch {
+      // ignore storage errors
+    }
+    return { id: newFolder.id, name: resolvedName, webViewLink: link };
   })();
 
   inflightStudyFolderPromise = task;

@@ -56,6 +56,7 @@ import { User } from 'firebase/auth';
 import {
   CLOUD_SYNC_FILENAME,
   DEFAULT_STUDY_FOLDER_ID,
+  DRIVE_FOLDER_NAME,
   initDriveAuth,
   googleSignIn,
   googleSignOut,
@@ -4189,119 +4190,141 @@ function isEmailAuthorized(email?: string | null): boolean {
 
     const targetFolderId =
       drivePermissionNeedsPicker?.folderId || getPreferredStudyFolder().id || DEFAULT_STUDY_FOLDER_ID;
-    try {
-      const picked = await openDrivePicker({
-        token,
-        parentFolderId: targetFolderId,
-        mode: 'folders-and-files',
-        title: 'Selecione a pasta/arquivos de backup para autorizar a sincronização',
-      });
-      if (!picked || (picked.folders.length === 0 && picked.files.length === 0)) {
-        return false;
+    const isMobileViewport =
+      typeof window !== 'undefined' &&
+      (window.innerWidth <= 768 || /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent));
+
+    let picked: { folders: Array<{ id: string; name: string; url?: string }>; files: Array<{ id: string; name: string; mimeType: string }> } | null = null;
+    if (!isMobileViewport) {
+      try {
+        picked = await openDrivePicker({
+          token,
+          parentFolderId: targetFolderId,
+          mode: 'folders-and-files',
+          title: 'Selecione a pasta/arquivos de backup para autorizar a sincronização',
+        });
+      } catch {
+        picked = null;
       }
-      if (picked.folders[0]) {
+    }
+
+    setIsSyncingDrive(true);
+    try {
+      const scope = activeScopeRef.current;
+      let activeFolderId = picked?.folders?.[0]?.id || targetFolderId;
+      let activeFolderName =
+        picked?.folders?.[0]?.name || drivePermissionNeedsPicker?.folderName || DRIVE_FOLDER_NAME;
+
+      if (picked?.folders?.[0]) {
         const pickedFolder = picked.folders[0];
         setPreferredStudyFolder({ id: pickedFolder.id, name: pickedFolder.name });
         setActiveDriveFolderName(pickedFolder.name);
         setDriveFolderUrl(pickedFolder.url || `https://drive.google.com/drive/folders/${pickedFolder.id}`);
       }
 
-      setIsSyncingDrive(true);
-      try {
-        const scope = activeScopeRef.current;
-        const activePref = getPreferredStudyFolder();
-        const activeFolderId = picked.folders[0]?.id || activePref.id || targetFolderId;
-        const jsonCandidates = picked.files.filter(
-          (f) => f.name.toLowerCase().endsWith('.json') || f.mimeType === 'application/json',
-        );
-        const backupsList = await listDatabaseBackupsFromDrive(token, { activeFolderId });
-        const latestCloud = await downloadLatestCloudSync(token, {
-          activeFolderId,
-          expectedEmail: googleUser?.email || undefined,
-          prefetchedBackups: backupsList,
+      const jsonCandidates = (picked?.files || []).filter(
+        (f) => f.name.toLowerCase().endsWith('.json') || f.mimeType === 'application/json',
+      );
+      const backupsList = await listDatabaseBackupsFromDrive(token, { activeFolderId }).catch(() => []);
+      const latestCloud = await downloadLatestCloudSync(token, {
+        activeFolderId,
+        expectedEmail: googleUser?.email || undefined,
+        prefetchedBackups: backupsList,
+        bypassCache: true,
+      }).catch(() => null);
+
+      let restoredAny = false;
+      let nextDb = dbRef.current;
+      if (latestCloud?.payload || latestCloud?.incrementalDeltas?.length) {
+        let cloudDb = latestCloud.payload ? normalizeAndMergeDatabase(latestCloud.payload) : nextDb;
+        if (latestCloud.incrementalDeltas?.length) {
+          for (const incDelta of latestCloud.incrementalDeltas) {
+            cloudDb = applyIncrementalDeltaToDatabase(cloudDb, incDelta);
+          }
+        }
+        nextDb = cloudDb;
+        restoredAny = true;
+      } else if (jsonCandidates.length > 0) {
+        const pickedPayload = await downloadBackupFileFromDrive(jsonCandidates[0].id, token, {
           bypassCache: true,
-        });
-
-        let restoredAny = false;
-        let nextDb = dbRef.current;
-        if (latestCloud?.payload || latestCloud?.incrementalDeltas?.length) {
-          let cloudDb = latestCloud.payload ? normalizeAndMergeDatabase(latestCloud.payload) : nextDb;
-          if (latestCloud.incrementalDeltas?.length) {
-            for (const incDelta of latestCloud.incrementalDeltas) {
-              cloudDb = applyIncrementalDeltaToDatabase(cloudDb, incDelta);
-            }
-          }
-          nextDb = cloudDb;
+        }).catch(() => null);
+        if (pickedPayload && typeof pickedPayload === 'object') {
+          nextDb = isIncrementalBackupPayload(pickedPayload)
+            ? applyIncrementalDeltaToDatabase(dbRef.current, pickedPayload)
+            : normalizeAndMergeDatabase(pickedPayload);
           restoredAny = true;
-        } else if (jsonCandidates.length > 0) {
-          const pickedPayload = await downloadBackupFileFromDrive(jsonCandidates[0].id, token, {
-            bypassCache: true,
-          });
-          if (pickedPayload && typeof pickedPayload === 'object') {
-            nextDb = isIncrementalBackupPayload(pickedPayload)
-              ? applyIncrementalDeltaToDatabase(dbRef.current, pickedPayload)
-              : normalizeAndMergeDatabase(pickedPayload);
-            restoredAny = true;
-          }
         }
-
-        const driveFiles = await listAllStudyFilesInDrive(token);
-        const studyFiles = picked.files.filter((f) => !jsonCandidates.some((j) => j.id === f.id));
-        const res = await restoreFilesAndOrphansFromDriveList(
-          nextDb,
-          driveFiles,
-          token,
-          scope,
-          (current, total, label) => setRestoreProgress({ current, total, label }),
-          studyFiles.length > 0
-            ? {
-                onlyFileIds: studyFiles.map((f) => f.id),
-                importFromAnyFolder: true,
-                skipTargetDbBlobs: !restoredAny,
-              }
-            : { importFromAnyFolder: false, skipTargetDbBlobs: !restoredAny },
-        );
-
-        if (restoredAny || res.filesRestored > 0 || res.orphansImported > 0) {
-          applyRestoredDatabaseForScope(scope, res.updatedDb);
-        }
-        const writableNow = await verifyDriveFolderWritable(activeFolderId, token).catch(() => false);
-        setDrivePermissionNeedsPicker(
-          writableNow
-            ? null
-            : {
-                folderId: activeFolderId,
-                folderName: picked.folders[0]?.name || activeDriveFolderNameRef.current,
-                count: 1,
-              },
-        );
-        syncedScopeOnceRef.current = scope;
-        if (writableNow && (pendingCloudSyncRef.current || !restoredAny)) {
-          await saveCloudSyncSnapshot(
-            {
-              version: 2,
-              app: 'Central de Estudos',
-              updatedAt: new Date().toISOString(),
-              contentHash: computeDatabaseContentHash(res.updatedDb),
-              userEmail: googleUser?.email || undefined,
-              data: res.updatedDb,
-            },
-            token,
-          ).catch(() => {});
-          pendingCloudSyncRef.current = false;
-          setHasPendingCloudChanges(false);
-        }
-        toast('Permissão do Google Drive atualizada e arquivos verificados!');
-        return true;
-      } finally {
-        setRestoreProgress(null);
-        setIsSyncingDrive(false);
       }
+
+      const driveFiles = await listAllStudyFilesInDrive(token).catch(() => []);
+      const studyFiles = (picked?.files || []).filter((f) => !jsonCandidates.some((j) => j.id === f.id));
+      const res = await restoreFilesAndOrphansFromDriveList(
+        nextDb,
+        driveFiles,
+        token,
+        scope,
+        (current, total, label) => setRestoreProgress({ current, total, label }),
+        studyFiles.length > 0
+          ? {
+              onlyFileIds: studyFiles.map((f) => f.id),
+              importFromAnyFolder: true,
+              skipTargetDbBlobs: !restoredAny,
+            }
+          : { importFromAnyFolder: false, skipTargetDbBlobs: !restoredAny },
+      );
+
+      if (restoredAny || res.filesRestored > 0 || res.orphansImported > 0) {
+        applyRestoredDatabaseForScope(scope, res.updatedDb);
+      }
+
+      let writableNow = await verifyDriveFolderWritable(activeFolderId, token).catch(() => false);
+      if (!writableNow) {
+        // Automatically create or switch to an app-owned writable study folder so mobile/Drive never stays blocked
+        setPreferredStudyFolder({ id: null, name: activeFolderName || DRIVE_FOLDER_NAME });
+        const resolvedFolder = await getOrCreateStudyFolder(token);
+        activeFolderId = resolvedFolder.id;
+        activeFolderName = resolvedFolder.name;
+        setPreferredStudyFolder({ id: resolvedFolder.id, name: resolvedFolder.name });
+        setActiveDriveFolderName(resolvedFolder.name);
+        setDriveFolderUrl(resolvedFolder.webViewLink || `https://drive.google.com/drive/folders/${resolvedFolder.id}`);
+        await syncStudySubFoldersInDrive(resolvedFolder.id, token).catch(() => ({}));
+        writableNow = true;
+      }
+
+      setDrivePermissionNeedsPicker(null);
+      syncedScopeOnceRef.current = scope;
+      if (writableNow) {
+        const nowIso = new Date().toISOString();
+        const payload = {
+          version: 2,
+          app: 'Central de Estudos',
+          updatedAt: nowIso,
+          contentHash: computeDatabaseContentHash(res.updatedDb),
+          userEmail: googleUser?.email || undefined,
+          data: res.updatedDb,
+        };
+        await saveCloudSyncSnapshot(payload, token).catch(() => {});
+        setLastCloudSyncAt(nowIso);
+        pendingCloudSyncRef.current = false;
+        setHasPendingCloudChanges(false);
+      }
+      toast(`Pasta sincronizada "${activeFolderName}" ativada e gravação liberada no Google Drive!`);
+      return true;
     } catch (err: any) {
-      toast(`Não foi possível abrir o seletor do Drive: ${err?.message || 'Erro'}`, true);
+      toast(`Não foi possível ativar a pasta do Drive: ${err?.message || 'Erro'}`, true);
       return false;
+    } finally {
+      setRestoreProgress(null);
+      setIsSyncingDrive(false);
     }
-  }, [applyRestoredDatabaseForScope, drivePermissionNeedsPicker?.folderId, ensureDriveToken, googleUser?.email, toast]);
+  }, [
+    applyRestoredDatabaseForScope,
+    drivePermissionNeedsPicker?.folderId,
+    drivePermissionNeedsPicker?.folderName,
+    ensureDriveToken,
+    googleUser?.email,
+    toast,
+  ]);
 
   const syncAllLocalFilesToDrive = useCallback(async (): Promise<{
     synced: number;
@@ -4473,10 +4496,18 @@ function isEmailAuthorized(email?: string | null): boolean {
           const meta = await getDriveFolderMetadata(rawId, activeToken);
           if (!meta) {
             toast(
-              'Não foi possível acessar essa pasta por link/ID. Verifique se ela foi criada ou liberada para este aplicativo no Google Drive.',
-              true,
+              'Não foi possível acessar essa pasta por link/ID. Criando ou vinculando pasta gravável no seu Google Drive...',
             );
-            return false;
+            setPreferredStudyFolder({ id: null, name: DRIVE_FOLDER_NAME });
+            const fallbackResolved = await getOrCreateStudyFolder(activeToken);
+            setPreferredStudyFolder({ id: fallbackResolved.id, name: fallbackResolved.name });
+            setActiveDriveFolderName(fallbackResolved.name);
+            setDriveFolderUrl(
+              fallbackResolved.webViewLink || `https://drive.google.com/drive/folders/${fallbackResolved.id}`,
+            );
+            setDrivePermissionNeedsPicker(null);
+            toast(`Pasta gravável ativada no Google Drive: "${fallbackResolved.name}".`);
+            return true;
           }
 
           let targetId = meta.id;
@@ -4485,33 +4516,13 @@ function isEmailAuthorized(email?: string | null): boolean {
           const writable = await verifyDriveFolderWritable(meta.id, activeToken);
 
           if (!writable) {
-            toast(
-              `A pasta "${meta.name}" não foi criada por este app. Selecione-a no seletor do Google Drive para autorizar o salvamento de arquivos nela.`,
-            );
-            const picked = await openDrivePicker({
-              token: activeToken,
-              mode: 'folders-only',
-              title: `Clique em "${meta.name}" e depois em Selecionar para liberar a gravação`,
-            });
-            const pickedFolder = picked?.folders?.[0];
-            if (!pickedFolder) {
-              toast(
-                `Permissão não autorizada para gravar em "${meta.name}". Use "Escolher pasta de salvamento no Drive" para selecionar uma pasta liberada.`,
-                true,
-              );
-              return false;
-            }
-            const pickedWritable = await verifyDriveFolderWritable(pickedFolder.id, activeToken);
-            if (!pickedWritable) {
-              toast(
-                `O Google Drive ainda não liberou gravação em "${pickedFolder.name}". Escolha uma pasta do seu Meu Drive com permissão de edição.`,
-                true,
-              );
-              return false;
-            }
-            targetId = pickedFolder.id;
-            targetName = pickedFolder.name;
-            targetUrl = pickedFolder.url || `https://drive.google.com/drive/folders/${pickedFolder.id}`;
+            // Automatically create/resolve a writable folder with the same name so mobile users never get blocked by Google Picker
+            setPreferredStudyFolder({ id: null, name: meta.name || DRIVE_FOLDER_NAME });
+            const resolvedWritable = await getOrCreateStudyFolder(activeToken);
+            targetId = resolvedWritable.id;
+            targetName = resolvedWritable.name;
+            targetUrl =
+              resolvedWritable.webViewLink || `https://drive.google.com/drive/folders/${resolvedWritable.id}`;
           }
 
           const scope = activeScopeRef.current;
@@ -4519,6 +4530,7 @@ function isEmailAuthorized(email?: string | null): boolean {
           setPreferredStudyFolder({ id: targetId, name: targetName });
           setActiveDriveFolderName(targetName);
           setDriveFolderUrl(targetUrl);
+          setDrivePermissionNeedsPicker(null);
           if (prevSyncedFolder && prevSyncedFolder !== targetId) {
             invalidateDriveBrowserCacheMeta(scope);
             syncedScopeOnceRef.current = null;
@@ -4536,6 +4548,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         setPreferredStudyFolder({ id: resolved.id, name: resolved.name });
         setActiveDriveFolderName(resolved.name);
         setDriveFolderUrl(resolved.webViewLink || `https://drive.google.com/drive/folders/${resolved.id}`);
+        setDrivePermissionNeedsPicker(null);
         if (prevSyncedFolder && prevSyncedFolder !== resolved.id) {
           invalidateDriveBrowserCacheMeta(scope);
           syncedScopeOnceRef.current = null;
