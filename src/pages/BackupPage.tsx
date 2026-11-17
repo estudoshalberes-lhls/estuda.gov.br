@@ -30,6 +30,8 @@ import {
   getLocalCategoryList,
   LocalBackupFileInfo,
 } from '../lib/localFolderSync';
+import { usePWAInstall } from '../hooks/usePWAInstall';
+import { triggerBlobDownload } from '../lib/fileStorage';
 import { formatUploadSize } from '../lib/parsers';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 
@@ -393,6 +395,76 @@ export const BackupPage: React.FC = () => {
     } finally {
       setImporting(false);
     }
+  };
+
+  const { isInstallable: pwaInstallable, isInstalled: pwaInstalled, install: installPwa } = usePWAInstall();
+
+  const handleDownloadOfflineLauncherBat = () => {
+    const batContent = [
+      '@echo off',
+      'chcp 65001 >nul',
+      'title estuda.gov.br - Modo Local 100%% Offline',
+      'cd /d "%~dp0"',
+      'echo ========================================================',
+      'echo   estuda.gov.br - Inicializador Desktop 100%% Offline',
+      'echo ========================================================',
+      'if not exist "node_modules" (',
+      '  echo [1/2] Instalando dependencias na primeira execucao...',
+      '  call npm install',
+      ')',
+      'if not exist "dist\\index.html" (',
+      '  echo [2/2] Compilando versao offline de producao...',
+      '  call npm run build',
+      ')',
+      'echo Iniciando servidor local na porta 3000...',
+      'start "EstudaGovServer" /min cmd /c "set NODE_ENV=production&& set PORT=3000&& npx tsx server.ts"',
+      'timeout /t 2 /nobreak >nul',
+      'where msedge >nul 2>nul',
+      'if %errorlevel%==0 (',
+      '  start "" msedge --app=http://localhost:3000 --new-window',
+      ') else (',
+      '  start "" http://localhost:3000',
+      ')',
+      'exit',
+    ].join('\r\n');
+    const blob = new Blob([batContent], { type: 'text/plain;charset=utf-8' });
+    triggerBlobDownload(blob, 'Iniciar_EstudaGov_Offline.bat');
+    toast('Lançador Iniciar_EstudaGov_Offline.bat baixado! Coloque-o na pasta do projeto no seu PC.');
+  };
+
+  const handleDownloadElectronBuilderBat = () => {
+    const batContent = [
+      '@echo off',
+      'chcp 65001 >nul',
+      'title Gerador de Executavel (.exe) - estuda.gov.br',
+      'cd /d "%~dp0"',
+      'echo ========================================================',
+      'echo   Gerando Executavel Portatil (.exe) para Windows',
+      'echo ========================================================',
+      'call npm install',
+      'call npm run build',
+      'if not exist "electron-main.cjs" (',
+      '  echo Criando wrapper Electron local...',
+      '  (',
+      '    echo const { app, BrowserWindow } = require("electron"^);',
+      '    echo const path = require("path"^);',
+      '    echo function createWindow(^) {',
+      '    echo   const win = new BrowserWindow({ width: 1360, height: 860, autoHideMenuBar: true }^);',
+      '    echo   win.loadFile(path.join(__dirname, "dist", "index.html"^)^);',
+      '    echo }',
+      '    echo app.whenReady(^).then(createWindow^);',
+      '    echo app.on("window-all-closed", (^) =^> { if (process.platform !== "darwin"^) app.quit(^); }^);',
+      '  ) > electron-main.cjs',
+      ')',
+      'echo Empacotando aplicativo desktop com electron-packager...',
+      'call npx --yes electron-packager . EstudaGov --platform=win32 --arch=x64 --out=Executavel_Desktop --overwrite',
+      'echo.',
+      'echo Concluido! Seu executavel (.exe) esta dentro da pasta Executavel_Desktop.',
+      'pause',
+    ].join('\r\n');
+    const blob = new Blob([batContent], { type: 'text/plain;charset=utf-8' });
+    triggerBlobDownload(blob, 'Gerar_Executavel_Windows.bat');
+    toast('Script Gerar_Executavel_Windows.bat baixado!');
   };
 
   return (
@@ -1676,6 +1748,103 @@ export const BackupPage: React.FC = () => {
           </button>
         </Panel>
       </div>
+
+      <Panel
+        title="Modo Executável Desktop & Uso 100% Offline no Computador"
+        subtitle="Rode o sistema sem conexão com a internet mantendo o salvamento automático de questões, revisões, lei seca e PDFs rabiscados diretamente nos arquivos do seu PC."
+        className="mt-4"
+      >
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-3.5">
+          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col justify-between gap-3">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <strong className="text-[13px] font-bold text-[var(--text)]">
+                  Opção 1 · Instalar App Offline (Mais rápido)
+                </strong>
+                <span className="px-2 py-0.5 rounded bg-[var(--good)]/15 text-[var(--good)] text-[10.5px] font-bold">
+                  Zero configuração
+                </span>
+              </div>
+              <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
+                Instala o portal como um aplicativo dedicado na Área de Trabalho e Menu Iniciar do Windows (via Edge/Chrome). Todo o motor de PDFs, marca-texto e banco local fica em cache no PC para abrir mesmo sem Wi-Fi.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+              {pwaInstalled ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[var(--good)]/15 text-[var(--good)] text-[11.5px] font-bold">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  Aplicativo já instalado neste computador
+                </span>
+              ) : pwaInstallable ? (
+                <button
+                  type="button"
+                  onClick={() => void installPwa()}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)]"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Instalar Aplicativo no PC agora
+                </button>
+              ) : (
+                <span className="text-[11px] text-[var(--muted)]">
+                  No Edge ou Chrome, clique no ícone de instalação na barra de endereços (ou menu <strong>⋯ → Aplicativos → Instalar este site como um aplicativo</strong>).
+                </span>
+              )}
+            </div>
+          </article>
+
+          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col justify-between gap-3">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <strong className="text-[13px] font-bold text-[var(--text)]">
+                  Opção 2 · Inicializador Local (.bat)
+                </strong>
+                <span className="px-2 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] text-[10.5px] font-bold">
+                  Portátil
+                </span>
+              </div>
+              <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
+                Se você baixou o código do projeto no computador (ou num pendrive/HD externo), coloque este arquivo <strong>.bat</strong> na pasta do projeto. Com 2 cliques ele inicia o sistema em janela própria sem precisar de internet.
+              </p>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={handleDownloadOfflineLauncherBat}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
+              >
+                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Baixar Iniciar_EstudaGov_Offline.bat
+              </button>
+            </div>
+          </article>
+
+          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col justify-between gap-3">
+            <div>
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <strong className="text-[13px] font-bold text-[var(--text)]">
+                  Opção 3 · Gerar Executável (.exe)
+                </strong>
+                <span className="px-2 py-0.5 rounded bg-[var(--panel)] border border-[var(--line)] text-[var(--muted)] text-[10.5px] font-bold">
+                  Electron Win64
+                </span>
+              </div>
+              <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
+                Empacota o projeto inteiro em um arquivo <strong>EstudaGov.exe</strong> independente na sua máquina Windows usando Electron. Basta colocar na pasta do projeto baixado e executar uma vez.
+              </p>
+            </div>
+            <div>
+              <button
+                type="button"
+                onClick={handleDownloadElectronBuilderBat}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
+              >
+                <HardDrive className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Baixar Gerar_Executavel_Windows.bat
+              </button>
+            </div>
+          </article>
+        </div>
+      </Panel>
     </div>
   );
 };

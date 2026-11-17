@@ -57,11 +57,11 @@ export default defineConfig(() => {
         },
         workbox: {
           globPatterns: [
-            '**/*.{js,css,html,ico,svg,woff,woff2}',
+            '**/*.{js,mjs,css,html,ico,svg,woff,woff2}',
             'pwa-*.png',
             'apple-touch-icon.png',
           ],
-          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
+          maximumFileSizeToCacheInBytes: 8 * 1024 * 1024,
           navigateFallback: '/index.html',
           navigateFallbackDenylist: [/^\/api\//, /^\/__/],
           runtimeCaching: [
