@@ -47,11 +47,207 @@ export interface FirestoreErrorInfo {
   };
 }
 
+const QUOTA_COOLDOWN_STORAGE_KEY = 'ce_firestore_quota_cooldown_v1';
+const DAILY_QUOTA_USAGE_STORAGE_KEY = 'ce_firestore_daily_usage_v1';
+const QUOTA_COOLDOWN_STEPS_MS = [5 * 60_000, 15 * 60_000, 45 * 60_000, 120 * 60_000] as const;
+
+interface QuotaCooldownRecord {
+  blockedUntilMs: number;
+  consecutiveHits: number;
+  lastErrorAtMs: number;
+}
+
+export interface FirestoreDailyUsageStats {
+  pacificDate: string;
+  reads: number;
+  writes: number;
+  deletes: number;
+}
+
+let inMemoryQuotaCooldown: QuotaCooldownRecord = {
+  blockedUntilMs: 0,
+  consecutiveHits: 0,
+  lastErrorAtMs: 0,
+};
+
+function getPacificDateKey(nowMs = Date.now()): string {
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(new Date(nowMs));
+  } catch {
+    return new Date(nowMs).toISOString().slice(0, 10);
+  }
+}
+
+function readQuotaCooldownRecord(): QuotaCooldownRecord {
+  try {
+    const raw = localStorage.getItem(QUOTA_COOLDOWN_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<QuotaCooldownRecord>;
+      const rec: QuotaCooldownRecord = {
+        blockedUntilMs: Number(parsed?.blockedUntilMs || 0),
+        consecutiveHits: Number(parsed?.consecutiveHits || 0),
+        lastErrorAtMs: Number(parsed?.lastErrorAtMs || 0),
+      };
+      if (rec.blockedUntilMs > inMemoryQuotaCooldown.blockedUntilMs) {
+        inMemoryQuotaCooldown = rec;
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return inMemoryQuotaCooldown;
+}
+
+function writeQuotaCooldownRecord(next: QuotaCooldownRecord): void {
+  inMemoryQuotaCooldown = next;
+  try {
+    localStorage.setItem(QUOTA_COOLDOWN_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function getFirestoreQuotaCooldownStatus(): {
+  blocked: boolean;
+  blockedUntilMs: number;
+  remainingMs: number;
+  consecutiveHits: number;
+} {
+  const rec = readQuotaCooldownRecord();
+  const now = Date.now();
+  const remainingMs = Math.max(0, rec.blockedUntilMs - now);
+  return {
+    blocked: remainingMs > 0,
+    blockedUntilMs: rec.blockedUntilMs,
+    remainingMs,
+    consecutiveHits: rec.consecutiveHits,
+  };
+}
+
+export function activateFirestoreQuotaCooldown(): number {
+  const now = Date.now();
+  const prev = readQuotaCooldownRecord();
+  const recentWindow = now - prev.lastErrorAtMs < 4 * 60 * 60_000;
+  const consecutiveHits = recentWindow ? prev.consecutiveHits + 1 : 1;
+  const stepIdx = Math.min(consecutiveHits - 1, QUOTA_COOLDOWN_STEPS_MS.length - 1);
+  const durationMs = QUOTA_COOLDOWN_STEPS_MS[stepIdx];
+  const blockedUntilMs = now + durationMs;
+  writeQuotaCooldownRecord({
+    blockedUntilMs,
+    consecutiveHits,
+    lastErrorAtMs: now,
+  });
+  console.warn('[Firebase Quota Guard] Cota do Firestore protegida — pausa automática ativada.', {
+    cooldownMinutes: Math.round(durationMs / 60_000),
+    consecutiveHits,
+    resumeAt: new Date(blockedUntilMs).toISOString(),
+  });
+  return blockedUntilMs;
+}
+
+export function clearFirestoreQuotaCooldown(): void {
+  if (inMemoryQuotaCooldown.blockedUntilMs === 0 && inMemoryQuotaCooldown.consecutiveHits === 0) {
+    try {
+      localStorage.removeItem(QUOTA_COOLDOWN_STORAGE_KEY);
+    } catch {
+      // ignore
+    }
+    return;
+  }
+  writeQuotaCooldownRecord({
+    blockedUntilMs: 0,
+    consecutiveHits: 0,
+    lastErrorAtMs: 0,
+  });
+}
+
+export function getFirestoreDailyUsageEstimate(): FirestoreDailyUsageStats {
+  const today = getPacificDateKey();
+  try {
+    const raw = localStorage.getItem(DAILY_QUOTA_USAGE_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Partial<FirestoreDailyUsageStats>;
+      if (parsed?.pacificDate === today) {
+        return {
+          pacificDate: today,
+          reads: Number(parsed.reads || 0),
+          writes: Number(parsed.writes || 0),
+          deletes: Number(parsed.deletes || 0),
+        };
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return { pacificDate: today, reads: 0, writes: 0, deletes: 0 };
+}
+
+function recordFirestoreQuotaOps(delta: { reads?: number; writes?: number; deletes?: number }): void {
+  const r = Math.max(0, Number(delta.reads || 0));
+  const w = Math.max(0, Number(delta.writes || 0));
+  const d = Math.max(0, Number(delta.deletes || 0));
+  if (r === 0 && w === 0 && d === 0) return;
+  const cur = getFirestoreDailyUsageEstimate();
+  const next: FirestoreDailyUsageStats = {
+    pacificDate: cur.pacificDate,
+    reads: cur.reads + r,
+    writes: cur.writes + w,
+    deletes: cur.deletes + d,
+  };
+  try {
+    localStorage.setItem(DAILY_QUOTA_USAGE_STORAGE_KEY, JSON.stringify(next));
+  } catch {
+    // ignore
+  }
+}
+
+function isQuotaErrorLike(error: unknown): boolean {
+  const rawCode =
+    error && typeof error === 'object' && 'code' in error
+      ? String((error as { code?: unknown }).code || '').toLowerCase()
+      : '';
+  const msg = (error instanceof Error ? error.message : String(error || '')).toLowerCase();
+  return (
+    rawCode === 'resource-exhausted' ||
+    msg.includes('resource-exhausted') ||
+    msg.includes('quota exceeded')
+  );
+}
+
+function throwIfFirestoreQuotaBlocked(
+  operationType: OperationType,
+  path: string | null,
+  bypassCooldown = false,
+): void {
+  if (bypassCooldown) return;
+  const status = getFirestoreQuotaCooldownStatus();
+  if (!status.blocked) return;
+  const mins = Math.max(1, Math.ceil(status.remainingMs / 60_000));
+  const err = Object.assign(
+    new Error(
+      `Quota exceeded (proteção local ativa por mais ${mins} min para evitar estouro do teto diário gratuito).`,
+    ),
+    { code: 'resource-exhausted' },
+  );
+  handleFirestoreError(err, operationType, path);
+}
+
 function handleFirestoreError(
   error: unknown,
   operationType: OperationType,
   path: string | null,
 ): never {
+  if (isQuotaErrorLike(error)) {
+    const status = getFirestoreQuotaCooldownStatus();
+    if (!status.blocked) {
+      activateFirestoreQuotaCooldown();
+    }
+  }
   const errInfo: FirestoreErrorInfo = {
     error: error instanceof Error ? error.message : String(error),
     authInfo: {
@@ -86,6 +282,7 @@ async function testConnection() {
   });
   try {
     await getDocFromServer(doc(db, 'test', 'connection'));
+    recordFirestoreQuotaOps({ reads: 1 });
     console.log('[Firebase Firestore] Conectividade confirmada com o servidor Firestore.');
   } catch (error) {
     if (error instanceof Error && error.message.includes('the client is offline')) {
@@ -97,9 +294,10 @@ async function testConnection() {
 }
 void testConnection();
 
-const MAX_ITEMS_PER_CHUNK = 45;
-const MAX_LAW_ITEMS_PER_SLICE = 25;
-const MAX_CHUNK_BYTES = 95_000;
+const MAX_ITEMS_PER_CHUNK = 180;
+const MAX_RECORD_ENTRIES_PER_CHUNK = 80;
+const MAX_LAW_ITEMS_PER_SLICE = 75;
+const MAX_CHUNK_BYTES = 320_000;
 const SCHEMA_VERSION = 2;
 
 const ARRAY_SECTIONS = [
@@ -144,6 +342,14 @@ export interface StudyDbRecordChunk {
   payload: Record<string, unknown>;
 }
 
+export interface LoadedFirestoreDatabase {
+  db: Partial<StudyDatabase>;
+  updatedAt: string;
+  sectionCount: number;
+  contentHash: string;
+  timerSig: string;
+}
+
 export interface UserFirestoreCacheState {
   workspaceExists: boolean;
   chunkHashes: Map<string, string>;
@@ -152,9 +358,13 @@ export interface UserFirestoreCacheState {
   lastWorkspaceTimerSig: string;
   lastUpdatedAt: string;
   lastLocalWriteMs: number;
+  lastLoadCompletedMs: number;
+  lastLoadedSnapshot: LoadedFirestoreDatabase | null;
 }
 
+const LOAD_COALESCE_TTL_MS = 15_000;
 const userCacheByUid = new Map<string, UserFirestoreCacheState>();
+const inFlightLoadByUid = new Map<string, Promise<LoadedFirestoreDatabase | null>>();
 
 function getOrCreateUserCache(userId: string): UserFirestoreCacheState {
   let entry = userCacheByUid.get(userId);
@@ -167,6 +377,8 @@ function getOrCreateUserCache(userId: string): UserFirestoreCacheState {
       lastWorkspaceTimerSig: '',
       lastUpdatedAt: '',
       lastLocalWriteMs: 0,
+      lastLoadCompletedMs: 0,
+      lastLoadedSnapshot: null,
     };
     userCacheByUid.set(userId, entry);
   }
@@ -182,8 +394,10 @@ export function markLocalFirestoreActivity(userId: string): void {
 export function clearUserFirestoreCacheState(userId?: string): void {
   if (userId) {
     userCacheByUid.delete(userId);
+    inFlightLoadByUid.delete(userId);
   } else {
     userCacheByUid.clear();
+    inFlightLoadByUid.clear();
   }
 }
 
@@ -366,7 +580,7 @@ export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): Stud
       currentMap[k] = cleanVal;
       currentCount += 1;
 
-      const exceedsCount = currentCount >= 25;
+      const exceedsCount = currentCount >= MAX_RECORD_ENTRIES_PER_CHUNK;
       const exceedsBytes = currentCount > 1 && estimatePayloadBytes(currentMap) >= MAX_CHUNK_BYTES;
       if (exceedsCount || exceedsBytes) {
         if (exceedsBytes && currentCount > 1) {
@@ -757,13 +971,8 @@ function reassembleDatabaseFromDocs(
 export async function loadDatabaseFromFirestore(
   userId: string,
   _fallbackEmail?: string | null,
-): Promise<{
-  db: Partial<StudyDatabase>;
-  updatedAt: string;
-  sectionCount: number;
-  contentHash: string;
-  timerSig: string;
-} | null> {
+  options?: { forceRefresh?: boolean; bypassQuotaCooldown?: boolean },
+): Promise<LoadedFirestoreDatabase | null> {
   const diag = getFirestoreConfigDiagnostics();
   if (!diag.isValid) {
     throw Object.assign(new Error(`FIREBASE_CONFIG_MISSING: ${diag.issues.join(' ')}`), {
@@ -771,89 +980,132 @@ export async function loadDatabaseFromFirestore(
     });
   }
 
-  await ensureFirebaseSessionAlive(false);
   const workspacePath = `users/${userId}`;
-  const recordsPath = `users/${userId}/dbRecords`;
-
-  console.log('[Firebase Sync][Load] Lendo workspace e partições...', {
-    workspacePath,
-    recordsPath,
-  });
-
-  const userDocRef = doc(db, 'users', userId);
-  let workspaceSnap;
-  try {
-    workspaceSnap = await getDoc(userDocRef);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.GET, workspacePath);
-  }
-
   const cache = getOrCreateUserCache(userId);
-  cache.workspaceExists = workspaceSnap.exists();
 
-  if (!workspaceSnap.exists()) {
-    cache.hydratedFromServer = true;
-    cache.chunkHashes.clear();
-    cache.lastWorkspaceContentHash = '';
-    cache.lastWorkspaceTimerSig = '';
-    cache.lastUpdatedAt = '';
-    return null;
+  if (
+    !options?.forceRefresh &&
+    cache.hydratedFromServer &&
+    cache.lastLoadCompletedMs > 0 &&
+    Date.now() - cache.lastLoadCompletedMs < LOAD_COALESCE_TTL_MS
+  ) {
+    return cache.lastLoadedSnapshot;
   }
 
-  const workspaceData = workspaceSnap.data();
-  const workspaceUpdatedAt = timestampToIso(workspaceData?.updatedAt);
-  const workspaceContentHash = String(workspaceData?.contentHash || '');
-  const workspaceTimerSig = computeTimerSyncSignature(workspaceData?.timerState);
-  cache.lastWorkspaceContentHash = workspaceContentHash;
-  cache.lastWorkspaceTimerSig = workspaceTimerSig;
-  cache.lastUpdatedAt = workspaceUpdatedAt;
+  const existingInFlight = inFlightLoadByUid.get(userId);
+  if (existingInFlight && !options?.forceRefresh) {
+    return existingInFlight;
+  }
 
-  const recordsQuery = query(
-    collection(db, 'users', userId, 'dbRecords'),
-    where('ownerId', '==', userId),
+  throwIfFirestoreQuotaBlocked(
+    OperationType.GET,
+    workspacePath,
+    Boolean(options?.bypassQuotaCooldown),
   );
 
-  let recordsSnap;
-  try {
-    recordsSnap = await getDocs(recordsQuery);
-  } catch (error) {
-    handleFirestoreError(error, OperationType.LIST, recordsPath);
-  }
+  const task = (async (): Promise<LoadedFirestoreDatabase | null> => {
+    await ensureFirebaseSessionAlive(false);
+    const recordsPath = `users/${userId}/dbRecords`;
 
-  cache.chunkHashes.clear();
-  const rawDocs: RawRecordDoc[] = [];
-  recordsSnap.forEach((docSnap) => {
-    const data = docSnap.data();
-    const contentHash = String(data?.contentHash || '');
-    cache.chunkHashes.set(docSnap.id, contentHash);
-    rawDocs.push({
-      id: docSnap.id,
-      section: String(data?.section || ''),
-      chunkIndex: Number(data?.chunkIndex || 0),
-      chunkTotal: Number(data?.chunkTotal || 1),
-      contentHash,
-      payload: data?.payload,
-      updatedAt: timestampToIso(data?.updatedAt),
+    console.log('[Firebase Sync][Load] Lendo workspace e partições...', {
+      workspacePath,
+      recordsPath,
     });
-  });
-  cache.hydratedFromServer = true;
 
-  console.log('[Firebase Sync][Load] Leitura concluída.', {
-    workspacePath,
-    recordCount: rawDocs.length,
-    workspaceUpdatedAt,
-  });
+    const userDocRef = doc(db, 'users', userId);
+    let workspaceSnap;
+    try {
+      workspaceSnap = await getDoc(userDocRef);
+      recordFirestoreQuotaOps({ reads: 1 });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, workspacePath);
+    }
 
-  if (rawDocs.length === 0) {
-    return null;
+    cache.workspaceExists = workspaceSnap.exists();
+
+    if (!workspaceSnap.exists()) {
+      cache.hydratedFromServer = true;
+      cache.chunkHashes.clear();
+      cache.lastWorkspaceContentHash = '';
+      cache.lastWorkspaceTimerSig = '';
+      cache.lastUpdatedAt = '';
+      cache.lastLoadCompletedMs = Date.now();
+      cache.lastLoadedSnapshot = null;
+      return null;
+    }
+
+    const workspaceData = workspaceSnap.data();
+    const workspaceUpdatedAt = timestampToIso(workspaceData?.updatedAt);
+    const workspaceContentHash = String(workspaceData?.contentHash || '');
+    const workspaceTimerSig = computeTimerSyncSignature(workspaceData?.timerState);
+    cache.lastWorkspaceContentHash = workspaceContentHash;
+    cache.lastWorkspaceTimerSig = workspaceTimerSig;
+    cache.lastUpdatedAt = workspaceUpdatedAt;
+
+    const recordsQuery = query(
+      collection(db, 'users', userId, 'dbRecords'),
+      where('ownerId', '==', userId),
+    );
+
+    let recordsSnap;
+    try {
+      recordsSnap = await getDocs(recordsQuery);
+      recordFirestoreQuotaOps({ reads: Math.max(1, recordsSnap.size) });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.LIST, recordsPath);
+    }
+
+    cache.chunkHashes.clear();
+    const rawDocs: RawRecordDoc[] = [];
+    recordsSnap.forEach((docSnap) => {
+      const data = docSnap.data();
+      const contentHash = String(data?.contentHash || '');
+      cache.chunkHashes.set(docSnap.id, contentHash);
+      rawDocs.push({
+        id: docSnap.id,
+        section: String(data?.section || ''),
+        chunkIndex: Number(data?.chunkIndex || 0),
+        chunkTotal: Number(data?.chunkTotal || 1),
+        contentHash,
+        payload: data?.payload,
+        updatedAt: timestampToIso(data?.updatedAt),
+      });
+    });
+    cache.hydratedFromServer = true;
+    cache.lastLoadCompletedMs = Date.now();
+    if (options?.bypassQuotaCooldown) {
+      clearFirestoreQuotaCooldown();
+    }
+
+    console.log('[Firebase Sync][Load] Leitura concluída.', {
+      workspacePath,
+      recordCount: rawDocs.length,
+      workspaceUpdatedAt,
+    });
+
+    if (rawDocs.length === 0) {
+      cache.lastLoadedSnapshot = null;
+      return null;
+    }
+
+    const reassembled = reassembleDatabaseFromDocs(rawDocs, workspaceUpdatedAt);
+    const result: LoadedFirestoreDatabase = {
+      ...reassembled,
+      contentHash: workspaceContentHash,
+      timerSig: workspaceTimerSig,
+    };
+    cache.lastLoadedSnapshot = result;
+    return result;
+  })();
+
+  inFlightLoadByUid.set(userId, task);
+  try {
+    return await task;
+  } finally {
+    if (inFlightLoadByUid.get(userId) === task) {
+      inFlightLoadByUid.delete(userId);
+    }
   }
-
-  const reassembled = reassembleDatabaseFromDocs(rawDocs, workspaceUpdatedAt);
-  return {
-    ...reassembled,
-    contentHash: workspaceContentHash,
-    timerSig: workspaceTimerSig,
-  };
 }
 
 export async function saveDatabaseToFirestore(
@@ -861,7 +1113,7 @@ export async function saveDatabaseToFirestore(
   studyDb: StudyDatabase,
   contentHash: string,
   timerState?: { elapsed: number; startedAt: number; activeTopic?: unknown },
-  options?: { forceFullWrite?: boolean; forceRefreshToken?: boolean },
+  options?: { forceFullWrite?: boolean; forceRefreshToken?: boolean; bypassQuotaCooldown?: boolean },
 ): Promise<{
   updatedAt: string;
   writtenChunks: number;
@@ -874,13 +1126,21 @@ export async function saveDatabaseToFirestore(
     });
   }
 
+  const workspacePath = `users/${userId}`;
+  throwIfFirestoreQuotaBlocked(
+    OperationType.WRITE,
+    workspacePath,
+    Boolean(options?.bypassQuotaCooldown),
+  );
+
   await ensureFirebaseSessionAlive(Boolean(options?.forceRefreshToken));
 
-  const workspacePath = `users/${userId}`;
   const recordsPath = `users/${userId}/dbRecords`;
   const userDocRef = doc(db, 'users', userId);
   const cache = getOrCreateUserCache(userId);
   cache.lastLocalWriteMs = Date.now();
+  cache.lastLoadCompletedMs = 0;
+  cache.lastLoadedSnapshot = null;
   const rawChunks = decomposeDatabaseToFirestoreChunks(studyDb);
   const safeContentHash = (contentHash || computeFastHash(JSON.stringify(rawChunks))).slice(0, 128);
   const timerSig = computeTimerSyncSignature(timerState);
@@ -890,6 +1150,7 @@ export async function saveDatabaseToFirestore(
     let wsSnap;
     try {
       wsSnap = await getDoc(userDocRef);
+      recordFirestoreQuotaOps({ reads: 1 });
     } catch (error) {
       handleFirestoreError(error, OperationType.GET, workspacePath);
     }
@@ -907,6 +1168,7 @@ export async function saveDatabaseToFirestore(
       let existingSnap;
       try {
         existingSnap = await getDocs(existingQuery);
+        recordFirestoreQuotaOps({ reads: Math.max(1, existingSnap.size) });
       } catch (error) {
         handleFirestoreError(error, OperationType.LIST, recordsPath);
       }
@@ -936,6 +1198,7 @@ export async function saveDatabaseToFirestore(
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
+      recordFirestoreQuotaOps({ writes: 1 });
       cache.workspaceExists = true;
       cache.lastWorkspaceContentHash = safeContentHash;
       cache.lastWorkspaceTimerSig = timerSig;
@@ -1005,6 +1268,8 @@ export async function saveDatabaseToFirestore(
     const slice = ops.slice(i, i + BATCH_LIMIT);
     const isLastSlice = i + BATCH_LIMIT >= ops.length;
     const batch = writeBatch(db);
+    let batchWrites = 0;
+    let batchDeletes = 0;
     for (const op of slice) {
       const id = op.type === 'delete' ? op.recordId : op.chunk.recordId;
       const ref = doc(db, 'users', userId, 'dbRecords', id);
@@ -1019,6 +1284,7 @@ export async function saveDatabaseToFirestore(
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+        batchWrites += 1;
       } else if (op.type === 'update') {
         batch.update(ref, {
           chunkIndex: op.chunk.chunkIndex,
@@ -1027,8 +1293,10 @@ export async function saveDatabaseToFirestore(
           payload: op.chunk.payload,
           updatedAt: serverTimestamp(),
         });
+        batchWrites += 1;
       } else {
         batch.delete(ref);
+        batchDeletes += 1;
       }
     }
 
@@ -1042,11 +1310,13 @@ export async function saveDatabaseToFirestore(
         timerState: safeTimerState,
         updatedAt: serverTimestamp(),
       });
+      batchWrites += 1;
     }
 
     try {
       cache.lastLocalWriteMs = Date.now();
       await batch.commit();
+      recordFirestoreQuotaOps({ writes: batchWrites, deletes: batchDeletes });
       if (includeWorkspaceMetaInBatch) {
         workspaceMetaCommittedInBatch = true;
       }
@@ -1078,6 +1348,7 @@ export async function saveDatabaseToFirestore(
         timerState: safeTimerState,
         updatedAt: serverTimestamp(),
       });
+      recordFirestoreQuotaOps({ writes: 1 });
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, workspacePath);
     }
@@ -1088,6 +1359,7 @@ export async function saveDatabaseToFirestore(
   cache.lastWorkspaceTimerSig = timerSig;
   cache.lastUpdatedAt = updatedAt;
   cache.lastLocalWriteMs = Date.now();
+  clearFirestoreQuotaCooldown();
 
   console.log('[Firebase Sync][Save] Sincronização concluída com sucesso:', {
     workspacePath,
@@ -1106,6 +1378,7 @@ export async function saveDatabaseToFirestore(
 export const syncTimerStateToFirestore = async (userId: string, timerState: any): Promise<void> => {
   const diag = getFirestoreConfigDiagnostics();
   if (!diag.isValid) return;
+  if (getFirestoreQuotaCooldownStatus().blocked) return;
   const activeUser = auth.currentUser;
   if (!activeUser?.uid || activeUser.uid !== userId) return;
 
@@ -1116,6 +1389,9 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
 
   const cache = getOrCreateUserCache(userId);
   const timerSig = computeTimerSyncSignature(timerState);
+  if (cache.hydratedFromServer && !cache.workspaceExists) {
+    return;
+  }
   if (cache.hydratedFromServer && cache.workspaceExists && cache.lastWorkspaceTimerSig === timerSig) {
     return;
   }
@@ -1127,7 +1403,9 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
   if (!cache.workspaceExists) {
     try {
       const snap = await getDoc(userDocRef);
+      recordFirestoreQuotaOps({ reads: 1 });
       cache.workspaceExists = snap.exists();
+      cache.hydratedFromServer = true;
       if (snap.exists()) {
         const wsData = snap.data();
         cache.lastWorkspaceContentHash = String(wsData?.contentHash || '');
@@ -1145,6 +1423,7 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
       timerState: buildSafeTimerState(timerState),
       updatedAt: serverTimestamp(),
     });
+    recordFirestoreQuotaOps({ writes: 1 });
     cache.lastWorkspaceTimerSig = timerSig;
     cache.lastUpdatedAt = new Date().toISOString();
     cache.lastLocalWriteMs = Date.now();
@@ -1187,8 +1466,13 @@ export const subscribeToFirestoreWorkspace = (
         return;
       }
       const data = snapshot.data();
+      const remoteContentHash = String(data?.contentHash || '');
+      if (remoteContentHash && remoteContentHash !== cache.lastWorkspaceContentHash) {
+        cache.lastLoadCompletedMs = 0;
+        cache.lastLoadedSnapshot = null;
+      }
       onRemoteUpdate({
-        contentHash: String(data?.contentHash || ''),
+        contentHash: remoteContentHash,
         updatedAt: timestampToIso(data?.updatedAt) || new Date().toISOString(),
       });
     },

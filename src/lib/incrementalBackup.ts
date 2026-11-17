@@ -472,6 +472,82 @@ function mergeLawFolderIncrementally(prev: LawFolderData, next: LawFolderData): 
   };
 }
 
+function mergeUniqueStrings(prev: string[] | undefined, next: string[] | undefined): string[] {
+  return Array.from(new Set([...(prev || []), ...(next || [])].filter(Boolean)));
+}
+
+function mergeLawReadDatesArrays(
+  prev: LawReadingEntry[] | undefined,
+  next: LawReadingEntry[] | undefined,
+): LawReadingEntry[] {
+  const byKey = new Map<string, LawReadingEntry>();
+  for (const item of prev || []) {
+    if (!item) continue;
+    const k = item.id || `${item.data || ''}::${item.observacao || ''}`;
+    if (k) byKey.set(k, item);
+  }
+  for (const item of next || []) {
+    if (!item) continue;
+    const k = item.id || `${item.data || ''}::${item.observacao || ''}`;
+    if (k) byKey.set(k, item);
+  }
+  return Array.from(byKey.values());
+}
+
+function mergeLawHighlightsArrays(
+  prev: LawHighlight[] | undefined,
+  next: LawHighlight[] | undefined,
+): LawHighlight[] {
+  const byText = new Map<string, LawHighlight>();
+  for (const h of prev || []) {
+    const t = typeof h === 'string' ? h : h?.text;
+    if (!t) continue;
+    byText.set(t, typeof h === 'string' ? { text: t, color: 'yellow' } : h);
+  }
+  for (const h of next || []) {
+    const t = typeof h === 'string' ? h : h?.text;
+    if (!t) continue;
+    byText.set(t, typeof h === 'string' ? { text: t, color: 'yellow' } : h);
+  }
+  return Array.from(byText.values());
+}
+
+function mergePersonalPdfArrays(
+  prev: PersonalPdfFile[] | undefined,
+  next: PersonalPdfFile[] | undefined,
+): PersonalPdfFile[] {
+  const byKey = new Map<string, PersonalPdfFile>();
+  for (const f of prev || []) {
+    if (!f) continue;
+    const k = f.id || f.blobKey || f.name;
+    if (k) byKey.set(k, f);
+  }
+  for (const f of next || []) {
+    if (!f) continue;
+    const k = f.id || f.blobKey || f.name;
+    if (k) byKey.set(k, f);
+  }
+  return Array.from(byKey.values());
+}
+
+function mergeSummaryFileArrays(
+  prev: SummaryFile[] | undefined,
+  next: SummaryFile[] | undefined,
+): SummaryFile[] {
+  const byKey = new Map<string, SummaryFile>();
+  for (const f of prev || []) {
+    if (!f) continue;
+    const k = f.id || f.blobKey || f.name;
+    if (k) byKey.set(k, f);
+  }
+  for (const f of next || []) {
+    if (!f) continue;
+    const k = f.id || f.blobKey || f.name;
+    if (k) byKey.set(k, f);
+  }
+  return Array.from(byKey.values());
+}
+
 function mergeRecordDelta<T>(
   existing: Record<string, T> | undefined,
   delta: RecordDelta<T> | undefined,
@@ -508,6 +584,7 @@ function isSeedScheduleTopic(topic: ScheduleTopic): boolean {
 function mergeScheduleDayIncrementally(
   baseTopics: ScheduleTopic[] | undefined,
   deltaTopics: ScheduleTopic[],
+  additiveMerge = false,
 ): ScheduleTopic[] {
   const prev = baseTopics || [];
   const prevHasCustom = prev.some((t) => !isSeedScheduleTopic(t));
@@ -515,6 +592,29 @@ function mergeScheduleDayIncrementally(
   // Never overwrite custom user schedule topics with default seed topics (sch-1..sch-8)
   if (prevHasCustom && deltaOnlySeed) {
     return prev;
+  }
+  if (additiveMerge && prevHasCustom) {
+    const customDelta = deltaTopics.filter((t) => !isSeedScheduleTopic(t));
+    if (customDelta.length === 0) {
+      return prev;
+    }
+    const deltaById = new Map<string, ScheduleTopic>();
+    for (const t of customDelta) {
+      if (t?.id) deltaById.set(t.id, t);
+    }
+    const seen = new Set<string>();
+    const merged: ScheduleTopic[] = [];
+    for (const t of prev) {
+      if (t?.id) seen.add(t.id);
+      merged.push(t?.id && deltaById.has(t.id) ? deltaById.get(t.id)! : t);
+    }
+    for (const t of customDelta) {
+      if (!t?.id || !seen.has(t.id)) {
+        if (t?.id) seen.add(t.id);
+        merged.push(t);
+      }
+    }
+    return merged;
   }
   return deltaTopics;
 }
@@ -526,13 +626,19 @@ function mergeScheduleDayIncrementally(
 export function applyIncrementalDeltaToDatabase(
   baseDb: StudyDatabase,
   envelope: IncrementalBackupEnvelope,
+  options?: { additiveMerge?: boolean },
 ): StudyDatabase {
+  const additive = Boolean(options?.additiveMerge);
   const d = envelope.delta || {};
   const nextSchedule: ScheduleMap = { ...baseDb.schedule };
   if (d.schedule) {
     (Object.keys(d.schedule) as WeekdayName[]).forEach((day) => {
       if (Array.isArray(d.schedule?.[day])) {
-        nextSchedule[day] = mergeScheduleDayIncrementally(baseDb.schedule?.[day], d.schedule[day]!);
+        nextSchedule[day] = mergeScheduleDayIncrementally(
+          baseDb.schedule?.[day],
+          d.schedule[day]!,
+          additive,
+        );
       }
     });
   }
@@ -544,7 +650,7 @@ export function applyIncrementalDeltaToDatabase(
     (Object.keys(d.scheduleDayDates) as WeekdayName[]).forEach((day) => {
       const val = d.scheduleDayDates?.[day];
       if (val) nextScheduleDayDates[day] = val;
-      else delete nextScheduleDayDates[day];
+      else if (!additive) delete nextScheduleDayDates[day];
     });
   }
 
@@ -568,20 +674,55 @@ export function applyIncrementalDeltaToDatabase(
     weeklySchedules: mergeRecordDelta(baseDb.weeklySchedules, d.weeklySchedules),
     weeklyGoalNotes: mergeRecordDelta(baseDb.weeklyGoalNotes, d.weeklyGoalNotes),
     laws: mergeRecordDelta(baseDb.laws, d.laws, mergeLawFolderIncrementally),
-    lawHighlights: mergeRecordDelta(baseDb.lawHighlights, d.lawHighlights as RecordDelta<LawHighlight[]>),
-    readLawItems: mergeRecordDelta(baseDb.readLawItems, d.readLawItems),
-    lawReadDates: mergeRecordDelta(baseDb.lawReadDates, d.lawReadDates),
+    lawHighlights: mergeRecordDelta(
+      baseDb.lawHighlights as Record<string, LawHighlight[]> | undefined,
+      d.lawHighlights as RecordDelta<LawHighlight[]>,
+      additive ? mergeLawHighlightsArrays : undefined,
+    ),
+    readLawItems: mergeRecordDelta(
+      baseDb.readLawItems,
+      d.readLawItems,
+      additive ? mergeUniqueStrings : undefined,
+    ),
+    lawReadDates: mergeRecordDelta(
+      baseDb.lawReadDates,
+      d.lawReadDates,
+      additive ? mergeLawReadDatesArrays : undefined,
+    ),
     savedIncidenceFilters: mergeArrayByKey(
       baseDb.savedIncidenceFilters,
       d.savedIncidenceFilters,
       (x) => x.id,
     ),
     lawLastReadPosition: mergeRecordDelta(baseDb.lawLastReadPosition, d.lawLastReadPosition),
-    pdfFolders: mergeRecordDelta(baseDb.pdfFolders, d.pdfFolders),
-    summaryFolders: mergeRecordDelta(baseDb.summaryFolders, d.summaryFolders),
-    proofBanks: d.proofBanks !== undefined ? d.proofBanks : baseDb.proofBanks,
-    fixedSubjects: d.fixedSubjects !== undefined ? d.fixedSubjects : baseDb.fixedSubjects,
-    phrases: d.phrases !== undefined ? d.phrases : baseDb.phrases,
+    pdfFolders: mergeRecordDelta(
+      baseDb.pdfFolders,
+      d.pdfFolders,
+      additive ? mergePersonalPdfArrays : undefined,
+    ),
+    summaryFolders: mergeRecordDelta(
+      baseDb.summaryFolders,
+      d.summaryFolders,
+      additive ? mergeSummaryFileArrays : undefined,
+    ),
+    proofBanks:
+      d.proofBanks !== undefined
+        ? additive
+          ? mergeUniqueStrings(baseDb.proofBanks, d.proofBanks)
+          : d.proofBanks
+        : baseDb.proofBanks,
+    fixedSubjects:
+      d.fixedSubjects !== undefined
+        ? additive
+          ? mergeUniqueStrings(baseDb.fixedSubjects, d.fixedSubjects)
+          : d.fixedSubjects
+        : baseDb.fixedSubjects,
+    phrases:
+      d.phrases !== undefined
+        ? additive
+          ? mergeUniqueStrings(baseDb.phrases, d.phrases)
+          : d.phrases
+        : baseDb.phrases,
     preferences: d.preferences
       ? {
           ...baseDb.preferences,
