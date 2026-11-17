@@ -201,11 +201,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 
 const MainApp: React.FC = () => {
   const { firebaseConnected, driveConnected, localFolderConnected } = useStudy();
-  const [offlineMode, setOfflineMode] = useState<boolean>(() => {
-    if (typeof window === 'undefined') return false;
-    const host = window.location.hostname.toLowerCase();
-    return host === 'localhost' || host === '127.0.0.1';
-  });
+  const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [forceLoginScreen, setForceLoginScreen] = useState<boolean>(false);
 
   React.useEffect(() => {

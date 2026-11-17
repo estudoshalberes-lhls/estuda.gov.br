@@ -46,54 +46,15 @@ export async function ensurePersistentBrowserStorage(): Promise<boolean> {
   }
 }
 
-function isLocalOfflineServerRuntime(): boolean {
-  if (typeof window === 'undefined') return false;
-  const host = window.location.hostname.toLowerCase();
-  return host === 'localhost' || host === '127.0.0.1';
-}
-
-export async function mirrorReadableFileToLocalServer(
-  blob: Blob,
-  fileName: string,
-  subfolders: string[],
-): Promise<boolean> {
-  if (!isLocalOfflineServerRuntime()) return false;
-  try {
-    const res = await fetch('/api/local-disk/readable-file', {
-      method: 'POST',
-      headers: {
-        'Content-Type': blob.type || 'application/octet-stream',
-        'x-file-name': encodeURIComponent(fileName || 'arquivo.pdf'),
-        'x-subfolders': encodeURIComponent(subfolders.filter(Boolean).join('/')),
-      },
-      body: blob,
-    });
-    return res.ok;
-  } catch {
-    return false;
-  }
-}
-
 export async function saveScopedDatabaseJson(
   scope: string,
   jsonString: string,
   updatedAt = new Date().toISOString(),
 ): Promise<void> {
   if (!jsonString) return;
-  const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
-
-  if (isLocalOfflineServerRuntime()) {
-    void fetch('/api/local-disk/db', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ scope: key, raw: jsonString, updatedAt }),
-    }).catch(() => {
-      // Ignore if local server is unreachable
-    });
-  }
-
   try {
     const db = await openDatabase();
+    const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
     const redundantKey = `redundant_backup::${key}`;
     const record: StoredDatabaseSnapshot = {
       raw: jsonString,
@@ -124,13 +85,11 @@ function isValidStoredDatabaseSnapshot(res: StoredDatabaseSnapshot | undefined):
 }
 
 export async function loadScopedDatabaseJson(scope: string): Promise<StoredDatabaseSnapshot | null> {
-  const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
-  let idbSnapshot: StoredDatabaseSnapshot | null = null;
-
   try {
     const db = await openDatabase();
+    const key = scope && scope.trim() ? scope.trim() : 'offline_guest';
     const redundantKey = `redundant_backup::${key}`;
-    idbSnapshot = await new Promise<StoredDatabaseSnapshot | null>((resolve, reject) => {
+    return await new Promise<StoredDatabaseSnapshot | null>((resolve, reject) => {
       const tx = db.transaction(STATE_STORE_NAME, 'readonly');
       const store = tx.objectStore(STATE_STORE_NAME);
       const req = store.get(key);
@@ -150,26 +109,8 @@ export async function loadScopedDatabaseJson(scope: string): Promise<StoredDatab
       req.onerror = () => reject(req.error || new Error('Falha ao ler banco do IndexedDB.'));
     });
   } catch {
-    idbSnapshot = null;
+    return null;
   }
-
-  if (isLocalOfflineServerRuntime()) {
-    try {
-      const res = await fetch(`/api/local-disk/db?scope=${encodeURIComponent(key)}`);
-      if (res.ok) {
-        const data = (await res.json()) as { found?: boolean; snapshot?: StoredDatabaseSnapshot };
-        if (data?.found && isValidStoredDatabaseSnapshot(data.snapshot)) {
-          if (!idbSnapshot || (data.snapshot.updatedAt || '') >= (idbSnapshot.updatedAt || '')) {
-            return data.snapshot;
-          }
-        }
-      }
-    } catch {
-      // Ignore network error
-    }
-  }
-
-  return idbSnapshot;
 }
 
 export async function saveScopedSyncMeta(scope: string, meta: unknown): Promise<void> {
@@ -319,22 +260,8 @@ function stripScope(fullKey: string): string {
 }
 
 export async function saveFileBlob(key: string, blob: Blob, customScope?: string): Promise<void> {
-  const scopedKey = makeScopedKey(key, customScope);
-
-  if (isLocalOfflineServerRuntime()) {
-    void fetch(`/api/local-disk/blob?key=${encodeURIComponent(scopedKey)}`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': blob.type || 'application/octet-stream',
-        'x-blob-key': scopedKey,
-      },
-      body: blob,
-    }).catch(() => {
-      // Ignore if local server is unreachable
-    });
-  }
-
   const db = await openDatabase();
+  const scopedKey = makeScopedKey(key, customScope);
   await new Promise<void>((resolve, reject) => {
     const tx = db.transaction(STORE_NAME, 'readwrite');
     tx.objectStore(STORE_NAME).put(blob, scopedKey);
@@ -345,9 +272,9 @@ export async function saveFileBlob(key: string, blob: Blob, customScope?: string
 
 export async function getFileBlob(key: string, customScope?: string): Promise<Blob | null> {
   if (!key) return null;
-  const scopedKey = makeScopedKey(key, customScope);
   try {
     const db = await openDatabase();
+    const scopedKey = makeScopedKey(key, customScope);
     const scopedResult = await new Promise<Blob | null>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readonly');
       const req = tx.objectStore(STORE_NAME).get(scopedKey);
@@ -376,36 +303,11 @@ export async function getFileBlob(key: string, customScope?: string): Promise<Bl
         return legacyResult;
       }
     }
+
+    return null;
   } catch {
-    // Fall through to local disk fallback if available
+    return null;
   }
-
-  if (isLocalOfflineServerRuntime()) {
-    try {
-      const res = await fetch(`/api/local-disk/blob?key=${encodeURIComponent(scopedKey)}`);
-      if (res.ok) {
-        const diskBlob = await res.blob();
-        if (diskBlob && diskBlob.size > 0) {
-          try {
-            const db = await openDatabase();
-            await new Promise<void>((resolve) => {
-              const tx = db.transaction(STORE_NAME, 'readwrite');
-              tx.objectStore(STORE_NAME).put(diskBlob, scopedKey);
-              tx.oncomplete = () => resolve();
-              tx.onerror = () => resolve();
-            });
-          } catch {
-            // ignore cache restore error
-          }
-          return diskBlob;
-        }
-      }
-    } catch {
-      // ignore
-    }
-  }
-
-  return null;
 }
 
 export async function getAllFileBlobs(customScope?: string): Promise<Array<{ key: string; blob: Blob }>> {
@@ -449,16 +351,9 @@ export async function getAllFileBlobs(customScope?: string): Promise<Array<{ key
 
 export async function deleteFileBlob(key: string, customScope?: string): Promise<void> {
   if (!key) return;
-  const scopedKey = makeScopedKey(key, customScope);
-  if (isLocalOfflineServerRuntime()) {
-    void fetch(`/api/local-disk/blob?key=${encodeURIComponent(scopedKey)}`, {
-      method: 'DELETE',
-    }).catch(() => {
-      // ignore
-    });
-  }
   try {
     const db = await openDatabase();
+    const scopedKey = makeScopedKey(key, customScope);
     await new Promise<void>((resolve, reject) => {
       const tx = db.transaction(STORE_NAME, 'readwrite');
       const store = tx.objectStore(STORE_NAME);

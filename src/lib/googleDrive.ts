@@ -170,61 +170,24 @@ function persistDriveAccessToken(
   lastSilentRefreshFailureAt = 0;
   const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
   if (email) rememberLastGoogleEmail(email);
+  // Segurança: mantém o Access Token estritamente em memória (nunca persiste tokens OAuth brutos em localStorage)
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.setItem(
-        DRIVE_TOKEN_CACHE_KEY,
-        JSON.stringify({
-          token,
-          expiresAt,
-          uid: user?.uid || auth.currentUser?.uid || null,
-          email: email || null,
-        }),
-      );
-    }
   } catch {
     // ignore storage errors
   }
   notifyDriveTokenListeners();
 }
 
-function restorePersistedDriveAccessToken(user?: User | null): string | null {
+function restorePersistedDriveAccessToken(_user?: User | null): string | null {
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-    if (
-      cachedAccessToken &&
-      (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)
-    ) {
-      return cachedAccessToken;
-    }
-    if (typeof sessionStorage !== 'undefined') {
-      const raw = sessionStorage.getItem(DRIVE_TOKEN_CACHE_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as {
-          token?: string;
-          expiresAt?: number;
-          uid?: string | null;
-          email?: string | null;
-        };
-        const exp = Number(parsed?.expiresAt) || 0;
-        const tok = typeof parsed?.token === 'string' ? parsed.token.trim() : '';
-        const sameUser =
-          !user ||
-          (!parsed.uid && !parsed.email) ||
-          parsed.uid === user.uid ||
-          (parsed.email && user.email && parsed.email.toLowerCase() === user.email.toLowerCase());
-        if (tok && sameUser && (!exp || Date.now() < exp - 60_000)) {
-          cachedAccessToken = tok;
-          cachedAccessTokenExpiresAt = exp;
-          return tok;
-        }
-      }
-    }
   } catch {
     // ignore storage errors
   }
-  return null;
+  return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)
+    ? cachedAccessToken
+    : null;
 }
 
 export interface DriveFolderPreference {
@@ -331,9 +294,6 @@ export function clearAccessTokenOnly(): void {
   cachedAccessTokenExpiresAt = 0;
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-    if (typeof sessionStorage !== 'undefined') {
-      sessionStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-    }
   } catch {
     // ignore storage errors
   }
@@ -425,17 +385,116 @@ export async function ensureFirebaseSessionAlive(forceRefresh = false): Promise<
   return auth.currentUser;
 }
 
-export async function refreshDriveAccessTokenSilently(_options?: {
+export async function refreshDriveAccessTokenSilently(options?: {
   email?: string | null;
   force?: boolean;
 }): Promise<string | null> {
   if (typeof window === 'undefined') return null;
-  const restored = restorePersistedDriveAccessToken(auth.currentUser);
-  if (restored && !isDriveAccessTokenExpiringSoon(60 * 1000)) {
-    notifyDriveTokenListeners();
-    return restored;
+
+  if (!options?.force) {
+    if (!cachedAccessToken) {
+      restorePersistedDriveAccessToken(auth.currentUser);
+    }
+    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(3 * 60 * 1000)) {
+      return cachedAccessToken;
+    }
+    if (
+      lastSilentRefreshFailureAt &&
+      Date.now() - lastSilentRefreshFailureAt < SILENT_REFRESH_FAILURE_COOLDOWN_MS
+    ) {
+      return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt)
+        ? cachedAccessToken
+        : null;
+    }
+  } else if (
+    lastSilentRefreshFailureAt &&
+    Date.now() - lastSilentRefreshFailureAt < 15_000
+  ) {
+    return null;
   }
-  return null;
+
+  if (inflightSilentRefreshPromise) {
+    return inflightSilentRefreshPromise;
+  }
+
+  const clientId = GOOGLE_CLIENT_ID;
+  const loginHint = (options?.email || auth.currentUser?.email || readLastGoogleEmail() || '').trim();
+  if (!clientId || !loginHint) {
+    return null;
+  }
+
+  const task = (async (): Promise<string | null> => {
+    try {
+      await loadGoogleIdentityServices();
+      const win = window as any;
+      const initTokenClient = win.google?.accounts?.oauth2?.initTokenClient;
+      if (!initTokenClient) return null;
+
+      return await new Promise<string | null>((resolve) => {
+        let settled = false;
+        const finish = (token: string | null) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timeoutId);
+          resolve(token);
+        };
+
+        const timeoutId = window.setTimeout(() => {
+          lastSilentRefreshFailureAt = Date.now();
+          finish(null);
+        }, 9000);
+
+        try {
+          const tokenClient = initTokenClient({
+            client_id: clientId,
+            scope: DRIVE_SCOPES.join(' '),
+            hint: loginHint,
+            prompt: '',
+            callback: (resp: any) => {
+              if (resp?.access_token) {
+                const ttlSeconds = Number(resp.expires_in) || 3500;
+                const safeTtlMs = Math.max(5 * 60 * 1000, (ttlSeconds - 120) * 1000);
+                persistDriveAccessToken(resp.access_token, Date.now() + safeTtlMs, {
+                  uid: auth.currentUser?.uid,
+                  email: loginHint,
+                });
+                finish(resp.access_token);
+              } else {
+                lastSilentRefreshFailureAt = Date.now();
+                finish(null);
+              }
+            },
+            error_callback: (err: any) => {
+              const errType = err?.type || err?.message || String(err || '');
+              if (!errType.includes('popup_failed_to_open')) {
+                console.debug('[Google Drive OAuth] Renovação silenciosa adiada:', errType);
+              }
+              lastSilentRefreshFailureAt = Date.now();
+              finish(null);
+            },
+          });
+
+          tokenClient.requestAccessToken({
+            prompt: '',
+            hint: loginHint,
+          });
+        } catch {
+          lastSilentRefreshFailureAt = Date.now();
+          finish(null);
+        }
+      });
+    } catch {
+      lastSilentRefreshFailureAt = Date.now();
+      return null;
+    }
+  })();
+
+  inflightSilentRefreshPromise = task;
+  try {
+    return await task;
+  } finally {
+    inflightSilentRefreshPromise = null;
+  }
 }
 
 export interface DriveFileInfo {
@@ -735,8 +794,8 @@ export const googleSignIn = async (options?: {
   const provider = new GoogleAuthProvider();
   DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
   provider.setCustomParameters({
-    prompt: 'select_account',
-    ...(hint && !options?.forceAccountPicker ? { login_hint: hint } : {}),
+    prompt: options?.forceAccountPicker ? 'select_account' : hint ? 'consent' : 'select_account',
+    ...(hint ? { login_hint: hint } : {}),
   });
 
   try {
