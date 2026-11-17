@@ -398,54 +398,33 @@ export const BackupPage: React.FC = () => {
   };
 
   const { isInstallable: pwaInstallable, isInstalled: pwaInstalled, install: installPwa } = usePWAInstall();
+  const [downloadingPortableBat, setDownloadingPortableBat] = useState(false);
 
-  const handleDownloadOfflineLauncherBat = () => {
-    const batContent = [
-      '@echo off',
-      'chcp 65001 >nul',
-      'title estuda.gov.br - Modo Portatil 100%% Offline',
-      'cd /d "%~dp0"',
-      'echo ====================================================================',
-      'echo   estuda.gov.br - Inicializador Portatil 100%% Offline (Opcao 2)',
-      'echo   Pasta de dados automatica: %~dp0Dados_Estudo_Local',
-      'echo ====================================================================',
-      'where node >nul 2>nul',
-      'if %errorlevel% neq 0 (',
-      '  echo [ERRO] Node.js nao encontrado neste computador. Instale o Node.js LTS em https://nodejs.org',
-      '  pause',
-      '  exit /b 1',
-      ')',
-      'if not exist "node_modules" (',
-      '  echo [1/2] Instalando dependencias na primeira execucao...',
-      '  call npm install',
-      ')',
-      'if not exist "dist\\index.html" (',
-      '  echo [2/2] Compilando versao offline de producao...',
-      '  call npm run build',
-      ')',
-      'if not exist "Dados_Estudo_Local" mkdir "Dados_Estudo_Local"',
-      'netstat -ano | findstr ":3000 " | findstr "LISTENING" >nul 2>nul',
-      'if %errorlevel% neq 0 (',
-      '  echo Iniciando motor local na porta 3000...',
-      '  start "EstudaGov_Motor_Offline" /min cmd /c "set NODE_ENV=production&& set LOCAL_OFFLINE_MODE=true&& set PORT=3000&& npx tsx server.ts"',
-      '  timeout /t 2 /nobreak >nul',
-      ')',
-      'where msedge >nul 2>nul',
-      'if %errorlevel%==0 (',
-      '  start "" msedge --app=http://localhost:3000 --new-window',
-      '  exit /b 0',
-      ')',
-      'where chrome >nul 2>nul',
-      'if %errorlevel%==0 (',
-      '  start "" chrome --app=http://localhost:3000 --new-window',
-      '  exit /b 0',
-      ')',
-      'start "" http://localhost:3000',
-      'exit /b 0',
-    ].join('\r\n');
-    const blob = new Blob([batContent], { type: 'text/plain;charset=utf-8' });
-    triggerBlobDownload(blob, 'Iniciar_EstudaGov_Offline.bat');
-    toast('Lançador Iniciar_EstudaGov_Offline.bat baixado! Coloque-o na pasta do projeto no seu PC.');
+  const handleDownloadOfflineLauncherBat = async () => {
+    setDownloadingPortableBat(true);
+    try {
+      const res = await fetch('/api/offline-portable-bat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          scope: googleUser?.email || 'offline_guest',
+          raw: JSON.stringify(db),
+          updatedAt: new Date().toISOString(),
+        }),
+      });
+      if (!res.ok) {
+        throw new Error('Não foi possível empacotar o instalador portátil offline.');
+      }
+      const blob = await res.blob();
+      triggerBlobDownload(blob, 'Iniciar_EstudaGov_Offline.bat');
+      toast(
+        'Aplicativo Portátil Iniciar_EstudaGov_Offline.bat baixado! Basta dar 2 cliques nele em qualquer pasta do seu PC.',
+      );
+    } catch (err) {
+      toast((err as Error).message || 'Erro ao gerar o aplicativo portátil.', true);
+    } finally {
+      setDownloadingPortableBat(false);
+    }
   };
 
   const handleDownloadElectronBuilderBat = () => {
@@ -1808,28 +1787,31 @@ export const BackupPage: React.FC = () => {
             </div>
           </article>
 
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col justify-between gap-3">
+          <article className="rounded-xl border border-[var(--accent)]/45 bg-[var(--panel-soft)] p-3.5 flex flex-col justify-between gap-3">
             <div>
               <div className="flex items-center justify-between gap-2 mb-1.5">
                 <strong className="text-[13px] font-bold text-[var(--text)]">
-                  Opção 2 · Inicializador Local (.bat)
+                  Opção 2 · Aplicativo Portátil Auto-Instalável (.bat)
                 </strong>
                 <span className="px-2 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] text-[10.5px] font-bold">
-                  Portátil
+                  1 Arquivo Completo
                 </span>
               </div>
               <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-                Se você baixou o código do projeto no computador (ou num pendrive/HD externo), coloque este arquivo <strong>.bat</strong> na pasta do projeto. Com 2 cliques ele inicia o sistema em janela própria sem precisar de internet.
+                Baixa um único arquivo <strong>.bat auto-extraível</strong> já contendo todo o sistema compilado, servidor local zero-dependência e seus dados atuais. Basta dar 2 cliques nele em qualquer pasta do Windows (não precisa baixar ZIP nem rodar npm install).
               </p>
             </div>
             <div>
               <button
                 type="button"
-                onClick={handleDownloadOfflineLauncherBat}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
+                disabled={downloadingPortableBat}
+                onClick={() => void handleDownloadOfflineLauncherBat()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60"
               >
-                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Baixar Iniciar_EstudaGov_Offline.bat
+                <Download className="w-3.5 h-3.5" />
+                {downloadingPortableBat
+                  ? 'Empacotando aplicativo offline…'
+                  : 'Baixar Iniciar_EstudaGov_Offline.bat'}
               </button>
             </div>
           </article>

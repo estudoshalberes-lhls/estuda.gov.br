@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import fs from 'node:fs';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
 
@@ -429,6 +430,211 @@ async function startServer() {
       projectId: firebaseConfig.projectId || null,
       timestamp: new Date().toISOString(),
     });
+  });
+
+  const buildPortableOfflineBat = (initialDb?: {
+    scope?: string;
+    raw?: string;
+    updatedAt?: string;
+  }): string => {
+    const rootDir = process.cwd();
+    const distDir = path.join(rootDir, 'dist');
+    const filesMap: Record<string, string> = {};
+    const initOnlyMap: Record<string, string> = {};
+
+    const skipAistudioPrefixes = [
+      'image_00ef',
+      'image_11c8',
+      'image_13c4',
+      'image_205e',
+      'image_37fe',
+      'image_478e',
+      'image_6f1f',
+      'image_8612',
+      'image_8b49',
+      'image_9672',
+      'image_a09a',
+      'image_a794',
+      'image_e12e',
+      'image_f0a6',
+      'Gemini_Generated_Image_',
+      'app_054d',
+      'index_ee79',
+      'styles_a5b2',
+      'web_server_',
+    ];
+
+    const collectDistFiles = (dir: string, relBase = 'dist') => {
+      if (!fs.existsSync(dir)) return;
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fullPath = path.join(dir, entry.name);
+        const relPath = `${relBase}/${entry.name}`;
+        if (entry.isDirectory()) {
+          collectDistFiles(fullPath, relPath);
+        } else if (entry.isFile()) {
+          if (
+            relPath.startsWith('dist/assets/aistudio/') &&
+            skipAistudioPrefixes.some((pref) => entry.name.startsWith(pref))
+          ) {
+            continue;
+          }
+          filesMap[relPath] = fs.readFileSync(fullPath).toString('base64');
+        }
+      }
+    };
+
+    collectDistFiles(distDir, 'dist');
+
+    for (const helperFile of ['servidor-offline.mjs', 'servidor-offline.ps1']) {
+      const p = path.join(rootDir, helperFile);
+      if (fs.existsSync(p)) {
+        filesMap[helperFile] = fs.readFileSync(p).toString('base64');
+      }
+    }
+
+    if (initialDb?.raw && typeof initialDb.raw === 'string') {
+      const payloadStr = JSON.stringify(
+        {
+          scope: initialDb.scope || 'offline_guest',
+          updatedAt: initialDb.updatedAt || new Date().toISOString(),
+          raw: initialDb.raw,
+        },
+        null,
+        2,
+      );
+      initOnlyMap['Dados_Estudo_Local/Backup_Automatico/estuda-gov-db-atual.json'] =
+        Buffer.from(payloadStr, 'utf-8').toString('base64');
+    }
+
+    const streamLines: string[] = [];
+    for (const [relPath, b64] of Object.entries(filesMap)) {
+      streamLines.push(`FILE\t${relPath}\t${b64}`);
+    }
+    for (const [relPath, b64] of Object.entries(initOnlyMap)) {
+      streamLines.push(`INIT\t${relPath}\t${b64}`);
+    }
+
+    const compressedB64 = zlib
+      .gzipSync(Buffer.from(streamLines.join('\n'), 'utf-8'), {
+        level: 9,
+      })
+      .toString('base64');
+
+    const batLines = [
+      '@echo off',
+      'chcp 65001 >nul',
+      'title estuda.gov.br - Aplicativo Portatil 100%% Offline',
+      'set "ESTUDAGOV_BAT_PATH=%~f0"',
+      'set "ESTUDAGOV_BASE_DIR=%~dp0"',
+      '',
+      'echo ====================================================================',
+      'echo   estuda.gov.br - Inicializador Portatil 100%% Offline',
+      'echo ====================================================================',
+      'echo.',
+      '',
+      'powershell -NoProfile -ExecutionPolicy Bypass -Command ^',
+      '  "$ErrorActionPreference = \'Stop\'; ^',
+      '   $batPath = $env:ESTUDAGOV_BAT_PATH; ^',
+      '   $baseDir = $env:ESTUDAGOV_BASE_DIR; ^',
+      '   $appDir = if (Test-Path -LiteralPath (Join-Path $baseDir \'package.json\')) { $baseDir } else { Join-Path $baseDir \'EstudaGov_Portatil\' }; ^',
+      '   if (!(Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Path $appDir -Force | Out-Null }; ^',
+      '   Write-Host (\'Pasta do aplicativo: \' + $appDir) -ForegroundColor Cyan; ^',
+      '   $distIndex = Join-Path $appDir \'dist\\index.html\'; ^',
+      '   $srvMjs = Join-Path $appDir \'servidor-offline.mjs\'; ^',
+      '   if (!(Test-Path -LiteralPath $distIndex) -or !(Test-Path -LiteralPath $srvMjs)) { ^',
+      '     Write-Host \'[1/2] Extraindo pacote offline (primeira execucao)...\' -ForegroundColor Yellow; ^',
+      '     $payloadB64 = $null; ^',
+      '     $fsReader = [System.IO.File]::OpenText($batPath); ^',
+      '     try { while ($null -ne ($ln = $fsReader.ReadLine())) { if ($ln.StartsWith(\'::ESTUDAGOV_PAYLOAD_B64::\')) { $payloadB64 = $ln.Substring(25); break } } } finally { $fsReader.Close() }; ^',
+      '     if (-not $payloadB64) { throw \'Pacote offline embutido nao encontrado neste arquivo .bat.\' }; ^',
+      '     $gzBytes = [Convert]::FromBase64String($payloadB64); ^',
+      '     $ms = New-Object System.IO.MemoryStream(,$gzBytes); ^',
+      '     $gz = New-Object System.IO.Compression.GZipStream($ms, [System.IO.Compression.CompressionMode]::Decompress); ^',
+      '     $sr = New-Object System.IO.StreamReader($gz, [System.Text.Encoding]::UTF8); ^',
+      '     try { ^',
+      '       while ($null -ne ($entry = $sr.ReadLine())) { ^',
+      '         if ([string]::IsNullOrWhiteSpace($entry)) { continue }; ^',
+      '         $parts = $entry.Split([char]9); ^',
+      '         if ($parts.Length -lt 3) { continue }; ^',
+      '         $kind = $parts[0]; ^',
+      '         $rel = $parts[1] -replace \'/\', \'\\\'; ^',
+      '         $outPath = Join-Path $appDir $rel; ^',
+      '         if ($kind -eq \'INIT\' -and (Test-Path -LiteralPath $outPath)) { continue }; ^',
+      '         $outDir = Split-Path -Parent $outPath; ^',
+      '         if (!(Test-Path -LiteralPath $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }; ^',
+      '         [System.IO.File]::WriteAllBytes($outPath, [Convert]::FromBase64String($parts[2])); ^',
+      '       } ^',
+      '     } finally { $sr.Close(); $gz.Close(); $ms.Close() }; ^',
+      '     Write-Host \'Arquivos extraidos com sucesso!\' -ForegroundColor Green; ^',
+      '   }; ^',
+      '   $dataDir = Join-Path $appDir \'Dados_Estudo_Local\'; ^',
+      '   if (!(Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }; ^',
+      '   Write-Host (\'Pasta de dados: \' + $dataDir) -ForegroundColor Gray; ^',
+      '   $running = $false; ^',
+      '   try { $null = Invoke-WebRequest -Uri \'http://localhost:3000/api/health\' -UseBasicParsing -TimeoutSec 1; $running = $true } catch {}; ^',
+      '   if (-not $running) { ^',
+      '     Write-Host \'[2/2] Iniciando servidor local na porta 3000...\' -ForegroundColor Yellow; ^',
+      '     $nodeCmd = Get-Command node -ErrorAction SilentlyContinue; ^',
+      '     if ($nodeCmd) { ^',
+      '       Start-Process -FilePath $nodeCmd.Source -ArgumentList @(\'servidor-offline.mjs\') -WorkingDirectory $appDir -WindowStyle Minimized; ^',
+      '     } else { ^',
+      '       $psExe = Join-Path $PSHOME \'powershell.exe\'; ^',
+      '       Start-Process -FilePath $psExe -ArgumentList @(\'-NoProfile\', \'-ExecutionPolicy\', \'Bypass\', \'-File\', \'servidor-offline.ps1\') -WorkingDirectory $appDir -WindowStyle Minimized; ^',
+      '     }; ^',
+      '     for ($i = 0; $i -lt 20; $i++) { ^',
+      '       Start-Sleep -Milliseconds 600; ^',
+      '       try { $null = Invoke-WebRequest -Uri \'http://localhost:3000/api/health\' -UseBasicParsing -TimeoutSec 1; $running = $true; break } catch {} ^',
+      '     }; ^',
+      '   }; ^',
+      '   if (-not $running) { throw \'O servidor local na porta 3000 nao respondeu a tempo.\' }; ^',
+      '   Write-Host \'Abrindo estuda.gov.br...\' -ForegroundColor Green; ^',
+      '   $edgeCmd = Get-Command msedge -ErrorAction SilentlyContinue; ^',
+      '   $chromeCmd = Get-Command chrome -ErrorAction SilentlyContinue; ^',
+      '   if ($edgeCmd) { Start-Process $edgeCmd.Source -ArgumentList @(\'--app=http://localhost:3000\', \'--new-window\') } ^',
+      '   elseif ($chromeCmd) { Start-Process $chromeCmd.Source -ArgumentList @(\'--app=http://localhost:3000\', \'--new-window\') } ^',
+      '   else { Start-Process \'http://localhost:3000\' }"',
+      '',
+      'if %errorlevel% neq 0 (',
+      '  echo.',
+      '  echo [ERRO] Ocorreu um problema ao iniciar o modo offline. Veja a mensagem acima.',
+      '  pause',
+      '  exit /b 1',
+      ')',
+      'exit /b 0',
+      `::ESTUDAGOV_PAYLOAD_B64::${compressedB64}`,
+      '',
+    ];
+
+    return batLines.join('\r\n');
+  };
+
+  app.get('/api/offline-portable-bat', (_req: Request, res: Response) => {
+    try {
+      const bat = buildPortableOfflineBat();
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment; filename="Iniciar_EstudaGov_Offline.bat"');
+      res.send(Buffer.from(bat, 'utf-8'));
+    } catch (err: any) {
+      console.error('[Offline Portable Bat GET] Erro:', err);
+      res.status(500).json({ error: err?.message || 'Erro ao gerar instalador portátil.' });
+    }
+  });
+
+  app.post('/api/offline-portable-bat', (req: Request, res: Response) => {
+    try {
+      const { scope, raw, updatedAt } = (req.body || {}) as {
+        scope?: string;
+        raw?: string;
+        updatedAt?: string;
+      };
+      const bat = buildPortableOfflineBat({ scope, raw, updatedAt });
+      res.setHeader('Content-Type', 'application/octet-stream');
+      res.setHeader('Content-Disposition', 'attachment; filename="Iniciar_EstudaGov_Offline.bat"');
+      res.send(Buffer.from(bat, 'utf-8'));
+    } catch (err: any) {
+      console.error('[Offline Portable Bat POST] Erro:', err);
+      res.status(500).json({ error: err?.message || 'Erro ao gerar instalador portátil.' });
+    }
   });
 
   app.post('/api/ai/analyze-edital', requireAuthorizedFirebaseUser, async (req: Request, res: Response) => {
