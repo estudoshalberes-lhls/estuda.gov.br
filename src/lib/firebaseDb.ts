@@ -495,6 +495,48 @@ interface RawRecordDoc {
   updatedAt?: string;
 }
 
+const ARRAY_VALUED_RECORD_SECTIONS = new Set<string>([
+  'lawHighlights',
+  'readLawItems',
+  'lawReadDates',
+  'pdfFolders',
+  'summaryFolders',
+]);
+
+function coerceFirestoreArray<T = any>(val: unknown): T[] {
+  if (Array.isArray(val)) return val as T[];
+  if (!val || typeof val !== 'object') return [];
+  const obj = val as Record<string, unknown>;
+  if ('entries' in obj && obj.entries && typeof obj.entries === 'object') {
+    return coerceFirestoreArray<T>(obj.entries);
+  }
+  const numericEntries: Array<{ idx: number; item: T }> = [];
+  for (const [k, v] of Object.entries(obj)) {
+    if (/^\d+$/.test(k)) {
+      numericEntries.push({ idx: Number(k), item: v as T });
+    }
+  }
+  if (numericEntries.length > 0) {
+    numericEntries.sort((a, b) => a.idx - b.idx);
+    return numericEntries.map((e) => e.item);
+  }
+  return [];
+}
+
+function normalizeWeeklyScheduleEntry(rawRec: unknown): unknown {
+  if (!rawRec || typeof rawRec !== 'object') return rawRec;
+  const rec = rawRec as Record<string, any>;
+  if (!rec.schedule || typeof rec.schedule !== 'object') return rec;
+  const nextSchedule: Record<string, any[]> = {};
+  for (const [day, list] of Object.entries(rec.schedule as Record<string, unknown>)) {
+    nextSchedule[day] = coerceFirestoreArray(list);
+  }
+  return {
+    ...rec,
+    schedule: nextSchedule,
+  };
+}
+
 function reassembleDatabaseFromDocs(
   docsList: RawRecordDoc[],
   workspaceUpdatedAt?: string,
@@ -512,6 +554,29 @@ function reassembleDatabaseFromDocs(
     return Number(a.chunkIndex || 0) - Number(b.chunkIndex || 0);
   });
 
+  const mergeLawSlice = (folderKey: string, slice: any) => {
+    if (!slice || typeof slice !== 'object') return;
+    if (!reconstructed.laws || typeof reconstructed.laws !== 'object') {
+      reconstructed.laws = {};
+    }
+    const existingRaw = reconstructed.laws[folderKey];
+    const existingItems = coerceFirestoreArray(existingRaw?.items);
+    const existingPdfs = coerceFirestoreArray(existingRaw?.pdfs);
+    const nextItems = coerceFirestoreArray(slice.items);
+    const nextPdfs = coerceFirestoreArray(slice.pdfs);
+    const mergedPdfs = [...existingPdfs];
+    for (const p of nextPdfs) {
+      if (p && !mergedPdfs.some((ep: any) => ep?.id && ep.id === p.id)) {
+        mergedPdfs.push(p);
+      }
+    }
+    reconstructed.laws[folderKey] = {
+      name: slice.name || existingRaw?.name || folderKey,
+      items: [...existingItems, ...nextItems],
+      pdfs: mergedPdfs,
+    };
+  };
+
   for (const row of sortedDocs) {
     if (!row?.section) continue;
     const rowTs = String(row.updatedAt || '');
@@ -525,62 +590,77 @@ function reassembleDatabaseFromDocs(
 
     if (payload.kind === 'array') {
       if (!arrayBuckets[section]) arrayBuckets[section] = [];
-      const entriesObj =
-        payload.entries && typeof payload.entries === 'object' ? payload.entries : {};
-      for (const [key, val] of Object.entries(entriesObj)) {
-        const numericKey = Number(key);
-        arrayBuckets[section].push({
-          idx: Number.isFinite(numericKey) ? numericKey : arrayBuckets[section].length,
-          item: val,
+      if (Array.isArray(payload.entries)) {
+        payload.entries.forEach((val: unknown, idx: number) => {
+          arrayBuckets[section].push({ idx, item: val });
         });
+      } else {
+        const entriesObj =
+          payload.entries && typeof payload.entries === 'object' ? payload.entries : {};
+        for (const [key, val] of Object.entries(entriesObj)) {
+          const numericKey = Number(key);
+          arrayBuckets[section].push({
+            idx: Number.isFinite(numericKey) ? numericKey : arrayBuckets[section].length,
+            item: val,
+          });
+        }
       }
       continue;
     }
 
     if (payload.kind === 'record') {
-      if (!reconstructed[section] || typeof reconstructed[section] !== 'object') {
+      if (!reconstructed[section] || typeof reconstructed[section] !== 'object' || Array.isArray(reconstructed[section])) {
         reconstructed[section] = {};
       }
       const entriesObj =
         payload.entries && typeof payload.entries === 'object' ? payload.entries : {};
-      Object.assign(reconstructed[section], entriesObj);
+      for (const [k, v] of Object.entries(entriesObj)) {
+        if (ARRAY_VALUED_RECORD_SECTIONS.has(section)) {
+          reconstructed[section][k] = coerceFirestoreArray(v);
+        } else if (section === 'weeklySchedules') {
+          reconstructed[section][k] = normalizeWeeklyScheduleEntry(v);
+        } else {
+          reconstructed[section][k] = v;
+        }
+      }
       continue;
     }
 
     if (payload.kind === 'object') {
-      reconstructed[section] =
-        payload.value && typeof payload.value === 'object' ? payload.value : {};
+      if (ARRAY_SECTIONS.includes(section as any)) {
+        reconstructed[section] = coerceFirestoreArray(payload.value);
+      } else if (section === 'schedule') {
+        const rawSched = payload.value && typeof payload.value === 'object' ? payload.value : {};
+        const safeSched: Record<string, any[]> = {};
+        for (const [day, list] of Object.entries(rawSched as Record<string, unknown>)) {
+          safeSched[day] = coerceFirestoreArray(list);
+        }
+        reconstructed[section] = safeSched;
+      } else {
+        reconstructed[section] =
+          payload.value && typeof payload.value === 'object' ? payload.value : {};
+      }
       continue;
     }
 
     if (payload.kind === 'laws') {
-      if (!reconstructed.laws || typeof reconstructed.laws !== 'object') {
-        reconstructed.laws = {};
-      }
       const slices =
         payload.slices && typeof payload.slices === 'object'
           ? (payload.slices as Record<string, { name?: string; items?: any[]; pdfs?: any[] }>)
           : {};
       for (const [folderKey, slice] of Object.entries(slices)) {
-        if (!slice || typeof slice !== 'object') continue;
-        const existing = reconstructed.laws[folderKey] || {
-          name: slice.name || folderKey,
-          items: [],
-          pdfs: [],
-        };
-        const nextItems = Array.isArray(slice.items) ? slice.items : [];
-        const nextPdfs = Array.isArray(slice.pdfs) ? slice.pdfs : [];
-        const mergedPdfs = [...existing.pdfs];
-        for (const p of nextPdfs) {
-          if (p && !mergedPdfs.some((ep: any) => ep?.id && ep.id === p.id)) {
-            mergedPdfs.push(p);
-          }
-        }
-        reconstructed.laws[folderKey] = {
-          name: slice.name || existing.name || folderKey,
-          items: [...existing.items, ...nextItems],
-          pdfs: mergedPdfs,
-        };
+        mergeLawSlice(folderKey, slice);
+      }
+      continue;
+    }
+
+    if (section === 'laws') {
+      const candidateSlices =
+        payload.slices && typeof payload.slices === 'object'
+          ? (payload.slices as Record<string, unknown>)
+          : (payload as Record<string, unknown>);
+      for (const [folderKey, slice] of Object.entries(candidateSlices)) {
+        mergeLawSlice(folderKey, slice);
       }
       continue;
     }
@@ -589,13 +669,41 @@ function reassembleDatabaseFromDocs(
       reconstructed[section] = payload;
     } else if (ARRAY_SECTIONS.includes(section as any)) {
       if (!arrayBuckets[section]) arrayBuckets[section] = [];
-      Object.entries(payload).forEach(([k, v]) => {
-        const num = Number(k);
-        arrayBuckets[section].push({
-          idx: Number.isFinite(num) ? num : arrayBuckets[section].length,
-          item: v,
+      if ('entries' in payload && payload.entries && typeof payload.entries === 'object') {
+        Object.entries(payload.entries as Record<string, unknown>).forEach(([k, v]) => {
+          const num = Number(k);
+          arrayBuckets[section].push({
+            idx: Number.isFinite(num) ? num : arrayBuckets[section].length,
+            item: v,
+          });
         });
-      });
+      } else {
+        Object.entries(payload).forEach(([k, v]) => {
+          if (/^\d+$/.test(k)) {
+            arrayBuckets[section].push({
+              idx: Number(k),
+              item: v,
+            });
+          }
+        });
+      }
+    } else if (RECORD_SECTIONS.includes(section as any)) {
+      if (!reconstructed[section] || typeof reconstructed[section] !== 'object' || Array.isArray(reconstructed[section])) {
+        reconstructed[section] = {};
+      }
+      const sourceEntries =
+        'entries' in payload && payload.entries && typeof payload.entries === 'object'
+          ? (payload.entries as Record<string, unknown>)
+          : (payload as Record<string, unknown>);
+      for (const [k, v] of Object.entries(sourceEntries)) {
+        if (ARRAY_VALUED_RECORD_SECTIONS.has(section)) {
+          reconstructed[section][k] = coerceFirestoreArray(v);
+        } else if (section === 'weeklySchedules') {
+          reconstructed[section][k] = normalizeWeeklyScheduleEntry(v);
+        } else {
+          reconstructed[section][k] = v;
+        }
+      }
     } else {
       reconstructed[section] = payload;
     }
@@ -604,6 +712,39 @@ function reassembleDatabaseFromDocs(
   for (const [section, bucket] of Object.entries(arrayBuckets)) {
     bucket.sort((a, b) => a.idx - b.idx);
     reconstructed[section] = bucket.map((entry) => entry.item);
+  }
+
+  // Garante invariantes de array em todas as seções reconstruídas antes de entregar à aplicação
+  for (const section of ARRAY_SECTIONS) {
+    if (section in reconstructed) {
+      reconstructed[section] = coerceFirestoreArray(reconstructed[section]);
+    }
+  }
+
+  if (reconstructed.schedule && typeof reconstructed.schedule === 'object') {
+    const safeSched: Record<string, any[]> = {};
+    for (const [day, list] of Object.entries(reconstructed.schedule as Record<string, unknown>)) {
+      safeSched[day] = coerceFirestoreArray(list);
+    }
+    reconstructed.schedule = safeSched;
+  }
+
+  for (const recSec of ARRAY_VALUED_RECORD_SECTIONS) {
+    if (reconstructed[recSec] && typeof reconstructed[recSec] === 'object') {
+      const safeMap: Record<string, any[]> = {};
+      for (const [k, v] of Object.entries(reconstructed[recSec] as Record<string, unknown>)) {
+        safeMap[k] = coerceFirestoreArray(v);
+      }
+      reconstructed[recSec] = safeMap;
+    }
+  }
+
+  if (reconstructed.weeklySchedules && typeof reconstructed.weeklySchedules === 'object') {
+    const safeWeekly: Record<string, unknown> = {};
+    for (const [wk, rec] of Object.entries(reconstructed.weeklySchedules as Record<string, unknown>)) {
+      safeWeekly[wk] = normalizeWeeklyScheduleEntry(rec);
+    }
+    reconstructed.weeklySchedules = safeWeekly;
   }
 
   return {

@@ -182,6 +182,7 @@ import {
   HistoryRecord,
   IncidenceGrade,
   LawFolderData,
+  LawHighlight,
   LawItem,
   LawPdfEntry,
   LawReadingEntry,
@@ -1163,6 +1164,40 @@ function isUntouchedSeedDatabase(candidate: StudyDatabase): boolean {
   return computeDbFingerprint(candidate) === getSeedFingerprint();
 }
 
+function toArraySafe<T = any>(val: unknown, fallback: T[] = []): T[] {
+  if (Array.isArray(val)) return val as T[];
+  if (val && typeof val === 'object') {
+    const obj = val as Record<string, unknown>;
+    if ('entries' in obj && obj.entries && typeof obj.entries === 'object') {
+      return toArraySafe<T>(obj.entries, fallback);
+    }
+    const numeric: Array<{ idx: number; item: T }> = [];
+    for (const [k, v] of Object.entries(obj)) {
+      if (/^\d+$/.test(k)) {
+        numeric.push({ idx: Number(k), item: v as T });
+      }
+    }
+    if (numeric.length > 0) {
+      numeric.sort((a, b) => a.idx - b.idx);
+      return numeric.map((entry) => entry.item);
+    }
+  }
+  return fallback;
+}
+
+function normalizeArrayRecordMap<T = any>(
+  ...sources: Array<Record<string, unknown> | undefined>
+): Record<string, T[]> {
+  const result: Record<string, T[]> = {};
+  for (const src of sources) {
+    if (!src || typeof src !== 'object' || Array.isArray(src)) continue;
+    for (const [k, v] of Object.entries(src)) {
+      result[k] = toArraySafe<T>(v);
+    }
+  }
+  return result;
+}
+
 function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
   const seed = createInitialDatabase();
   if (!rawInput || typeof rawInput !== 'object') return seed;
@@ -1175,17 +1210,17 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       ? (obj.database as Partial<StudyDatabase>)
       : (obj as Partial<StudyDatabase>);
 
-  const loadedAnnotations = [...(dataObj.annotations || seed.annotations || [])];
+  const loadedAnnotations = [...toArraySafe(dataObj.annotations, seed.annotations || [])];
   const existingIds = new Set(loadedAnnotations.map((a) => a.id));
 
   // Reconcile completed simulations errors into annotations (Pendentes de Correção)
-  (dataObj.completedSimulations || []).forEach((sim) => {
-    (sim.questoes || []).forEach((q) => {
+  toArraySafe(dataObj.completedSimulations).forEach((sim) => {
+    toArraySafe(sim?.questoes).forEach((q) => {
       if (!q.correta && Boolean(q.resposta)) {
         const simErrId = `sim-err-${sim.id}-${q.numero}`;
         if (!existingIds.has(simErrId)) {
           const split = splitExamQuestion(q.enunciado);
-          const alternatives = q.alternativas?.length ? q.alternativas : split.alternatives;
+          const alternatives = Array.isArray(q.alternativas) && q.alternativas.length ? q.alternativas : split.alternatives;
           loadedAnnotations.push({
             id: simErrId,
             data: sim.data || localDateBrazilian(),
@@ -1197,7 +1232,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
             corrigido: false,
             origem: 'Simulado Fechado',
             questao: {
-              enunciado: q.alternativas?.length ? q.enunciado : split.statement,
+              enunciado: Array.isArray(q.alternativas) && q.alternativas.length ? q.enunciado : split.statement,
               alternativas: alternatives,
               resposta: q.resposta,
               gabarito: q.gabarito,
@@ -1210,38 +1245,39 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     });
   });
 
-  const normalizedContests = (dataObj.contests || seed.contests || []).map((c) => ({
+  const normalizedContests = toArraySafe(dataObj.contests, seed.contests || []).map((c) => ({
     ...c,
-    edital_pontos: Array.isArray(c.edital_pontos)
-      ? c.edital_pontos
-          .map((p) => {
-            const rawLinks = Array.isArray(p.artigos_vinculados) ? p.artigos_vinculados : [];
-            const cleanLinks: EditalLawLink[] = rawLinks
-              .filter((lk) => Boolean(lk && lk.pastaLei && lk.filtroArtigos))
-              .map((lk) => ({
-                id: lk.id || uid(8),
-                pastaLei: String(lk.pastaLei).trim(),
-                filtroArtigos: String(lk.filtroArtigos).trim(),
-                ...(lk.label ? { label: String(lk.label).trim() } : {}),
-              }));
-            return {
-              id: p.id || uid(10),
-              materia: String(p.materia || 'Geral').trim() || 'Geral',
-              titulo: String(p.titulo || '').trim(),
-              estudado: Boolean(p.estudado),
-              estudado_em: p.estudado_em,
-              observacao: p.observacao,
-              ...(cleanLinks.length > 0 ? { artigos_vinculados: cleanLinks } : {}),
-            };
-          })
-          .filter((p) => Boolean(p.titulo))
-      : [],
+    edital_pontos: toArraySafe(c?.edital_pontos)
+      .map((p) => {
+        const rawLinks = toArraySafe<EditalLawLink>(p?.artigos_vinculados);
+        const cleanLinks: EditalLawLink[] = rawLinks
+          .filter((lk) => Boolean(lk && lk.pastaLei && lk.filtroArtigos))
+          .map((lk) => ({
+            id: lk.id || uid(8),
+            pastaLei: String(lk.pastaLei).trim(),
+            filtroArtigos: String(lk.filtroArtigos).trim(),
+            ...(lk.label ? { label: String(lk.label).trim() } : {}),
+          }));
+        return {
+          id: p.id || uid(10),
+          materia: String(p.materia || 'Geral').trim() || 'Geral',
+          titulo: String(p.titulo || '').trim(),
+          estudado: Boolean(p.estudado),
+          estudado_em: p.estudado_em,
+          observacao: p.observacao,
+          ...(cleanLinks.length > 0 ? { artigos_vinculados: cleanLinks } : {}),
+        };
+      })
+      .filter((p) => Boolean(p.titulo)),
   }));
 
   const normalizedLawReadDates: Record<string, LawReadingEntry[]> = {};
-  Object.entries(dataObj.lawReadDates || {}).forEach(([folder, list]) => {
-    if (Array.isArray(list)) {
-      normalizedLawReadDates[folder] = list
+  Object.entries(
+    dataObj.lawReadDates && typeof dataObj.lawReadDates === 'object' ? dataObj.lawReadDates : {},
+  ).forEach(([folder, list]) => {
+    const safeList = toArraySafe<LawReadingEntry>(list);
+    if (Array.isArray(list) || safeList.length > 0) {
+      normalizedLawReadDates[folder] = safeList
         .filter((e) => Boolean(e && e.data))
         .map((e) => ({
           id: e.id || uid(8),
@@ -1260,11 +1296,19 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
   // and ensure valid items/pdfs arrays while purging misclassified Cronograma / Edital / Datas e Locais files
   const rawLaws = dataObj.laws && typeof dataObj.laws === 'object' ? dataObj.laws : seed.laws || {};
   const normalizedLaws: Record<string, LawFolderData> = {};
-  const normalizedLawHighlights = { ...(seed.lawHighlights || {}), ...(dataObj.lawHighlights || {}) };
-  const normalizedReadLawItems = { ...(seed.readLawItems || {}), ...(dataObj.readLawItems || {}) };
+  const normalizedLawHighlights = normalizeArrayRecordMap<LawHighlight>(
+    seed.lawHighlights,
+    dataObj.lawHighlights as Record<string, unknown> | undefined,
+  );
+  const normalizedReadLawItems = normalizeArrayRecordMap<string>(
+    seed.readLawItems,
+    dataObj.readLawItems as Record<string, unknown> | undefined,
+  );
   const normalizedLawLastReadPosition: Record<string, string> = {
     ...(seed.lawLastReadPosition || {}),
-    ...(dataObj.lawLastReadPosition || {}),
+    ...(dataObj.lawLastReadPosition && typeof dataObj.lawLastReadPosition === 'object'
+      ? dataObj.lawLastReadPosition
+      : {}),
   };
 
   const dropLawFolderMetadata = (folderKey: string) => {
@@ -1287,8 +1331,8 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       return;
     }
 
-    const rawItems = Array.isArray(val.items) ? val.items : [];
-    const rawPdfs = Array.isArray(val.pdfs) ? val.pdfs : [];
+    const rawItems = toArraySafe<LawItem>(val.items);
+    const rawPdfs = toArraySafe<LawPdfEntry>(val.pdfs);
     const filteredItems = rawItems.filter(
       (it) =>
         !isScheduleTxtDescriptor(it.arquivo, undefined, it.texto) &&
@@ -1330,7 +1374,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         ...only.folder,
         items: healedItems,
       };
-      const existingReadSet = new Set(normalizedReadLawItems[only.key] || []);
+      const existingReadSet = new Set(toArraySafe<string>(normalizedReadLawItems[only.key]));
       const inheritedReadIds = healedItems
         .filter((it) => {
           if ((it.leituras?.length || 0) > 0) return true;
@@ -1378,25 +1422,31 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         if (pk && !pdfMap.has(pk)) pdfMap.set(pk, p);
       }
 
-      if (normalizedLawHighlights[loser.key]?.length) {
+      const loserHighlights = toArraySafe<LawHighlight>(normalizedLawHighlights[loser.key]);
+      if (loserHighlights.length) {
         normalizedLawHighlights[winner.key] = [
-          ...(normalizedLawHighlights[winner.key] || []),
-          ...normalizedLawHighlights[loser.key],
+          ...toArraySafe<LawHighlight>(normalizedLawHighlights[winner.key]),
+          ...loserHighlights,
         ];
       }
       delete normalizedLawHighlights[loser.key];
 
-      if (normalizedReadLawItems[loser.key]?.length) {
+      const loserReadItems = toArraySafe<string>(normalizedReadLawItems[loser.key]);
+      if (loserReadItems.length) {
         normalizedReadLawItems[winner.key] = Array.from(
-          new Set([...(normalizedReadLawItems[winner.key] || []), ...normalizedReadLawItems[loser.key]]),
+          new Set([
+            ...toArraySafe<string>(normalizedReadLawItems[winner.key]),
+            ...loserReadItems,
+          ]),
         );
       }
       delete normalizedReadLawItems[loser.key];
 
-      if (normalizedLawReadDates[loser.key]?.length) {
+      const loserReadDates = toArraySafe<LawReadingEntry>(normalizedLawReadDates[loser.key]);
+      if (loserReadDates.length) {
         normalizedLawReadDates[winner.key] = [
-          ...(normalizedLawReadDates[winner.key] || []),
-          ...normalizedLawReadDates[loser.key],
+          ...toArraySafe<LawReadingEntry>(normalizedLawReadDates[winner.key]),
+          ...loserReadDates,
         ];
       }
       delete normalizedLawReadDates[loser.key];
@@ -1408,7 +1458,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     }
 
     const healedMergedItems = healAndNormalizeLawItems(mergedItems);
-    const winnerReadSet = new Set(normalizedReadLawItems[winner.key] || []);
+    const winnerReadSet = new Set(toArraySafe<string>(normalizedReadLawItems[winner.key]));
     const inheritedReadIds = healedMergedItems
       .filter((it) => {
         if ((it.leituras?.length || 0) > 0) return true;
@@ -1432,40 +1482,35 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     };
   }
 
-  const normalizedSavedFilters: SavedIncidenceFilter[] = Array.isArray(
+  const normalizedSavedFilters: SavedIncidenceFilter[] = toArraySafe<SavedIncidenceFilter>(
     dataObj.savedIncidenceFilters,
+    seed.savedIncidenceFilters || [],
   )
-    ? dataObj.savedIncidenceFilters
-        .filter((f) => Boolean(f && f.nome && f.pastaLei))
-        .map((f) => ({
-          id: f.id || uid(10),
-          nome: String(f.nome).trim(),
-          pastaLei: String(f.pastaLei).trim(),
-          gradeFilter: f.gradeFilter || 'Todas',
-          readStatusFilter: f.readStatusFilter || 'all',
-          editalContestId: f.editalContestId || 'all',
-          multiArticleQuery: String(f.multiArticleQuery || ''),
-          selectedArticleKeys: Array.isArray(f.selectedArticleKeys) ? f.selectedArticleKeys : [],
-          search: String(f.search || ''),
-          criado_em: f.criado_em || localDateTimeBrazilian(),
-        }))
-    : seed.savedIncidenceFilters || [];
+    .filter((f) => Boolean(f && f.nome && f.pastaLei))
+    .map((f) => ({
+      id: f.id || uid(10),
+      nome: String(f.nome).trim(),
+      pastaLei: String(f.pastaLei).trim(),
+      gradeFilter: f.gradeFilter || 'Todas',
+      readStatusFilter: f.readStatusFilter || 'all',
+      editalContestId: f.editalContestId || 'all',
+      multiArticleQuery: String(f.multiArticleQuery || ''),
+      selectedArticleKeys: toArraySafe<string>(f.selectedArticleKeys),
+      search: String(f.search || ''),
+      criado_em: f.criado_em || localDateTimeBrazilian(),
+    }));
 
   const normalizedFixedSubjects = Array.from(
     new Set(
-      (Array.isArray(dataObj.fixedSubjects)
-        ? dataObj.fixedSubjects
-        : DEFAULT_FIXED_SUBJECTS
-      )
+      toArraySafe<string>(dataObj.fixedSubjects, DEFAULT_FIXED_SUBJECTS)
         .map((s) => visibleName(String(s || '')))
         .filter(Boolean),
     ),
   );
 
-  const normalizedSubmittedSimulations = (
-    Array.isArray(dataObj.submittedSimulations)
-      ? dataObj.submittedSimulations
-      : seed.submittedSimulations || []
+  const normalizedSubmittedSimulations = toArraySafe<SubmittedSimulation>(
+    dataObj.submittedSimulations,
+    seed.submittedSimulations || [],
   ).filter((sim) => {
     if (!sim || typeof sim !== 'object') return false;
     const samplePrompt = sim.questoes?.[0]?.enunciado || '';
@@ -1477,23 +1522,90 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     );
   });
 
-  const normalizedProofFiles = (
-    Array.isArray(dataObj.proofFiles)
-      ? dataObj.proofFiles
-      : seed.proofFiles || []
-  ).filter((pf) => {
-    if (!pf || typeof pf !== 'object') return false;
-    const obsPath = extractSourcePathFromObs(pf.observacoes);
-    const pathHint = [pf.bank, obsPath].filter(Boolean).join(' / ');
-    return !(
-      isScheduleTxtDescriptor(pf.name, pathHint) ||
-      isContestOrEditalTxtDescriptor(pf.name, pathHint)
-    );
+  const normalizedProofFiles = toArraySafe<ProofFileRecord>(
+    dataObj.proofFiles,
+    seed.proofFiles || [],
+  )
+    .filter((pf) => {
+      if (!pf || typeof pf !== 'object') return false;
+      const obsPath = extractSourcePathFromObs(pf.observacoes);
+      const pathHint = [pf.bank, obsPath].filter(Boolean).join(' / ');
+      return !(
+        isScheduleTxtDescriptor(pf.name, pathHint) ||
+        isContestOrEditalTxtDescriptor(pf.name, pathHint)
+      );
+    })
+    .map((pf) => ({
+      ...pf,
+      correcoes: toArraySafe(pf.correcoes),
+    }));
+
+  const rawSchedule =
+    dataObj.schedule && typeof dataObj.schedule === 'object' ? dataObj.schedule : {};
+  const normalizedSchedule = { ...seed.schedule } as ScheduleMap;
+  WEEKDAYS.forEach((day) => {
+    const dayVal = (rawSchedule as Record<string, unknown>)[day];
+    if (dayVal !== undefined) {
+      normalizedSchedule[day] = toArraySafe<ScheduleTopic>(dayVal);
+    } else {
+      normalizedSchedule[day] = toArraySafe<ScheduleTopic>(normalizedSchedule[day]);
+    }
   });
+
+  const rawWeeklySchedules =
+    dataObj.weeklySchedules && typeof dataObj.weeklySchedules === 'object'
+      ? dataObj.weeklySchedules
+      : {};
+  const normalizedWeeklySchedules: Record<string, WeeklyScheduleFileRecord> = {};
+  Object.entries(rawWeeklySchedules).forEach(([wk, rec]) => {
+    if (!rec || typeof rec !== 'object') return;
+    const recSchedRaw =
+      rec.schedule && typeof rec.schedule === 'object' ? rec.schedule : {};
+    const safeRecSched = {} as ScheduleMap;
+    WEEKDAYS.forEach((day) => {
+      safeRecSched[day] = toArraySafe<ScheduleTopic>(
+        (recSchedRaw as Record<string, unknown>)[day],
+      );
+    });
+    normalizedWeeklySchedules[wk] = {
+      ...rec,
+      schedule: safeRecSched,
+      scheduleDayDates:
+        rec.scheduleDayDates && typeof rec.scheduleDayDates === 'object'
+          ? rec.scheduleDayDates
+          : {},
+    };
+  });
+
+  const normalizedPdfFolders = normalizeArrayRecordMap<PersonalPdfFile>(
+    seed.pdfFolders,
+    dataObj.pdfFolders as Record<string, unknown> | undefined,
+  );
+  const normalizedSummaryFolders = normalizeArrayRecordMap<SummaryFile>(
+    seed.summaryFolders,
+    dataObj.summaryFolders as Record<string, unknown> | undefined,
+  );
 
   return {
     ...seed,
     ...dataObj,
+    questions: toArraySafe(dataObj.questions, seed.questions || []),
+    completedSimulations: toArraySafe(dataObj.completedSimulations, seed.completedSimulations || []),
+    history: toArraySafe(dataObj.history, seed.history || []),
+    studyTimeRecords: toArraySafe(dataObj.studyTimeRecords, seed.studyTimeRecords || []),
+    caseLaw: toArraySafe(dataObj.caseLaw, seed.caseLaw || []),
+    completedGoals: toArraySafe(dataObj.completedGoals, seed.completedGoals || []),
+    incompleteGoals: toArraySafe(dataObj.incompleteGoals, seed.incompleteGoals || []),
+    proofBanks: toArraySafe(dataObj.proofBanks, seed.proofBanks || []),
+    essays: toArraySafe(dataObj.essays, seed.essays || []),
+    criticalPoints: toArraySafe(dataObj.criticalPoints, seed.criticalPoints || []),
+    phrases: toArraySafe(dataObj.phrases, seed.phrases || []),
+    weeklyGoalNotes:
+      dataObj.weeklyGoalNotes && typeof dataObj.weeklyGoalNotes === 'object' && !Array.isArray(dataObj.weeklyGoalNotes)
+        ? dataObj.weeklyGoalNotes
+        : seed.weeklyGoalNotes || {},
+    pdfFolders: normalizedPdfFolders,
+    summaryFolders: normalizedSummaryFolders,
     laws: normalizedLaws,
     submittedSimulations: normalizedSubmittedSimulations,
     proofFiles: normalizedProofFiles,
@@ -1507,20 +1619,24 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     annotations: loadedAnnotations,
     preferences: {
       ...DEFAULT_PREFERENCES,
-      ...(dataObj.preferences || {}),
-      modules: { ...(dataObj.preferences?.modules || {}) },
+      ...(dataObj.preferences && typeof dataObj.preferences === 'object' ? dataObj.preferences : {}),
+      modules: {
+        ...(dataObj.preferences?.modules && typeof dataObj.preferences.modules === 'object'
+          ? dataObj.preferences.modules
+          : {}),
+      },
+      ...(dataObj.preferences?.quick_access_modules !== undefined
+        ? { quick_access_modules: toArraySafe(dataObj.preferences.quick_access_modules) }
+        : {}),
     },
-    schedule: {
-      ...seed.schedule,
-      ...(dataObj.schedule || {}),
-    },
+    schedule: normalizedSchedule,
     scheduleDayDates: {
       ...(seed.scheduleDayDates || {}),
-      ...(dataObj.scheduleDayDates || {}),
+      ...(dataObj.scheduleDayDates && typeof dataObj.scheduleDayDates === 'object'
+        ? dataObj.scheduleDayDates
+        : {}),
     },
-    weeklySchedules: {
-      ...(dataObj.weeklySchedules || {}),
-    },
+    weeklySchedules: normalizedWeeklySchedules,
   };
 }
 
@@ -3540,6 +3656,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         path: parsed.path,
         userMessage: parsed.userMessage,
         technicalMessage: parsed.technicalMessage,
+        rawStack: err instanceof Error ? err.stack : undefined,
         auth: {
           uid: currentUser?.uid || null,
           email: currentUser?.email || null,
