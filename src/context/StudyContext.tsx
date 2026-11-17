@@ -23,6 +23,7 @@ import {
   loadLocalDirectoryHandle,
   loadScopedDatabaseJson,
   loadScopedSyncMeta,
+  mirrorReadableFileToLocalServer,
   saveFileBlob,
   saveScopedDatabaseJson,
   saveScopedSyncMeta,
@@ -7518,14 +7519,28 @@ function isEmailAuthorized(email?: string | null): boolean {
       subfolderName?: string | string[],
     ): Promise<boolean> => {
       let savedToLocalDisk = false;
+      const folderParts = Array.isArray(subfolderName)
+        ? subfolderName
+        : subfolderName
+          ? [subfolderName]
+          : ['PDFs Pessoais'];
+      const mirroredToServerDisk = await mirrorReadableFileToLocalServer(
+        fileOrBlob,
+        filename,
+        folderParts,
+      );
+      if (mirroredToServerDisk) {
+        savedToLocalDisk = true;
+      }
       if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        savedToLocalDisk = await writeFileToLocalDirectory(
+        const savedViaHandle = await writeFileToLocalDirectory(
           localFolderHandleRef.current,
           subfolderName,
           filename,
           fileOrBlob,
         );
-        if (savedToLocalDisk) {
+        if (savedViaHandle) {
+          savedToLocalDisk = true;
           setLastLocalFolderSyncAt(new Date().toISOString());
         }
       }

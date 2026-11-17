@@ -100,16 +100,332 @@ async function requireAuthorizedFirebaseUser(
   }
 }
 
+function sanitizeDiskSegment(input: string): string {
+  return String(input || '')
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, '_')
+    .replace(/\.+$/g, '')
+    .trim()
+    .slice(0, 140) || 'item';
+}
+
+function encodeBlobFilename(key: string): string {
+  return Buffer.from(String(key || ''), 'utf-8').toString('base64url');
+}
+
+function isLocalOfflineAllowed(req: Request): boolean {
+  if (process.env.LOCAL_OFFLINE_MODE === 'true') return true;
+  if (req.headers['x-forwarded-for']) return false;
+  const host = String(req.headers.host || '').toLowerCase();
+  return host.startsWith('localhost:') || host === 'localhost' || host.startsWith('127.0.0.1:') || host === '127.0.0.1';
+}
+
+const LOCAL_DATA_ROOT = path.resolve(
+  process.cwd(),
+  process.env.LOCAL_STUDY_DATA_DIR || 'Dados_Estudo_Local',
+);
+const LOCAL_BACKUP_DIR = path.join(LOCAL_DATA_ROOT, 'Backup_Automatico');
+const LOCAL_BLOBS_DIR = path.join(LOCAL_DATA_ROOT, '.blobs');
+
+function ensureLocalDiskDirs(): void {
+  const subfolders = [
+    LOCAL_DATA_ROOT,
+    LOCAL_BACKUP_DIR,
+    LOCAL_BLOBS_DIR,
+    path.join(LOCAL_DATA_ROOT, 'PDFs Pessoais'),
+    path.join(LOCAL_DATA_ROOT, 'Lei Seca'),
+    path.join(LOCAL_DATA_ROOT, 'Provas'),
+    path.join(LOCAL_DATA_ROOT, 'Resumos'),
+    path.join(LOCAL_DATA_ROOT, 'Discursivas'),
+    path.join(LOCAL_DATA_ROOT, 'Editais'),
+  ];
+  for (const dir of subfolders) {
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+  }
+}
+
 async function startServer() {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '15mb' }));
+  if (process.env.LOCAL_OFFLINE_MODE === 'true') {
+    try {
+      ensureLocalDiskDirs();
+      console.log(`[estuda.gov.br] Pasta de dados local ativa em: ${LOCAL_DATA_ROOT}`);
+    } catch (err) {
+      console.warn('[estuda.gov.br] Aviso ao criar pasta local:', err);
+    }
+  }
+
+  // Rotas de gravação binária direta no disco local (Opção 2 - Modo Portátil/Offline)
+  app.post(
+    '/api/local-disk/blob',
+    express.raw({ type: '*/*', limit: '150mb' }),
+    (req: Request, res: Response) => {
+      if (!isLocalOfflineAllowed(req)) {
+        res.status(403).json({ error: 'Disponível apenas em execução local.' });
+        return;
+      }
+      try {
+        ensureLocalDiskDirs();
+        const key = String(req.query.key || req.headers['x-blob-key'] || '').trim();
+        if (!key) {
+          res.status(400).json({ error: 'Chave do arquivo ausente.' });
+          return;
+        }
+        const mimeType = String(req.headers['content-type'] || 'application/octet-stream');
+        const safeName = encodeBlobFilename(key);
+        const binPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.bin`);
+        const metaPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.meta.json`);
+        const bodyBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+
+        const tmpBin = `${binPath}.tmp`;
+        fs.writeFileSync(tmpBin, bodyBuf);
+        fs.renameSync(tmpBin, binPath);
+        fs.writeFileSync(
+          metaPath,
+          JSON.stringify({ key, mimeType, size: bodyBuf.length, updatedAt: new Date().toISOString() }),
+          'utf-8',
+        );
+
+        res.json({ ok: true, size: bodyBuf.length });
+      } catch (err: any) {
+        console.error('[Local Disk Blob Save] Erro:', err);
+        res.status(500).json({ error: err?.message || 'Erro ao gravar arquivo no disco local.' });
+      }
+    },
+  );
+
+  app.post(
+    '/api/local-disk/readable-file',
+    express.raw({ type: '*/*', limit: '150mb' }),
+    (req: Request, res: Response) => {
+      if (!isLocalOfflineAllowed(req)) {
+        res.status(403).json({ error: 'Disponível apenas em execução local.' });
+        return;
+      }
+      try {
+        ensureLocalDiskDirs();
+        const rawFileName = decodeURIComponent(String(req.headers['x-file-name'] || 'arquivo.pdf'));
+        const rawSubfolders = decodeURIComponent(String(req.headers['x-subfolders'] || 'PDFs Pessoais'));
+        const parts = rawSubfolders
+          .split('/')
+          .map((p) => sanitizeDiskSegment(p))
+          .filter(Boolean);
+        const targetDir = path.join(LOCAL_DATA_ROOT, ...parts);
+        if (!fs.existsSync(targetDir)) {
+          fs.mkdirSync(targetDir, { recursive: true });
+        }
+        const filePath = path.join(targetDir, sanitizeDiskSegment(rawFileName));
+        const bodyBuf = Buffer.isBuffer(req.body) ? req.body : Buffer.from([]);
+        const tmpFile = `${filePath}.tmp`;
+        fs.writeFileSync(tmpFile, bodyBuf);
+        fs.renameSync(tmpFile, filePath);
+
+        res.json({ ok: true, filePath });
+      } catch (err: any) {
+        console.error('[Local Disk Readable File] Erro:', err);
+        res.status(500).json({ error: err?.message || 'Erro ao salvar arquivo na pasta local.' });
+      }
+    },
+  );
+
+  app.get('/api/local-disk/blob', (req: Request, res: Response) => {
+    if (!isLocalOfflineAllowed(req)) {
+      res.status(403).end();
+      return;
+    }
+    try {
+      const key = String(req.query.key || '').trim();
+      if (!key) {
+        res.status(400).end();
+        return;
+      }
+      const safeName = encodeBlobFilename(key);
+      const binPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.bin`);
+      const metaPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.meta.json`);
+      if (!fs.existsSync(binPath)) {
+        // Tenta também sem escopo caso tenha sido salvo com outro prefixo
+        const idx = key.indexOf('::');
+        const rawKey = idx >= 0 ? key.slice(idx + 2) : key;
+        const altName = encodeBlobFilename(`offline_guest::${rawKey}`);
+        const altBin = path.join(LOCAL_BLOBS_DIR, `${altName}.bin`);
+        const altMeta = path.join(LOCAL_BLOBS_DIR, `${altName}.meta.json`);
+        if (!fs.existsSync(altBin)) {
+          res.status(404).end();
+          return;
+        }
+        let mime = 'application/pdf';
+        if (fs.existsSync(altMeta)) {
+          try {
+            mime = JSON.parse(fs.readFileSync(altMeta, 'utf-8')).mimeType || mime;
+          } catch {
+            // ignore
+          }
+        }
+        res.setHeader('Content-Type', mime);
+        res.sendFile(altBin);
+        return;
+      }
+
+      let mimeType = 'application/pdf';
+      if (fs.existsSync(metaPath)) {
+        try {
+          mimeType = JSON.parse(fs.readFileSync(metaPath, 'utf-8')).mimeType || mimeType;
+        } catch {
+          // ignore
+        }
+      }
+      res.setHeader('Content-Type', mimeType);
+      res.sendFile(binPath);
+    } catch {
+      res.status(500).end();
+    }
+  });
+
+  app.delete('/api/local-disk/blob', (req: Request, res: Response) => {
+    if (!isLocalOfflineAllowed(req)) {
+      res.status(403).end();
+      return;
+    }
+    try {
+      const key = String(req.query.key || '').trim();
+      if (!key) {
+        res.status(400).end();
+        return;
+      }
+      const safeName = encodeBlobFilename(key);
+      const binPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.bin`);
+      const metaPath = path.join(LOCAL_BLOBS_DIR, `${safeName}.meta.json`);
+      if (fs.existsSync(binPath)) fs.unlinkSync(binPath);
+      if (fs.existsSync(metaPath)) fs.unlinkSync(metaPath);
+      res.json({ ok: true });
+    } catch {
+      res.status(500).json({ ok: false });
+    }
+  });
+
+  app.use(express.json({ limit: '50mb' }));
+
+  app.get('/api/local-disk/status', (req: Request, res: Response) => {
+    const allowed = isLocalOfflineAllowed(req);
+    if (!allowed) {
+      res.json({ enabled: false });
+      return;
+    }
+    try {
+      ensureLocalDiskDirs();
+      const canonicalFile = path.join(LOCAL_BACKUP_DIR, 'estuda-gov-db-atual.json');
+      let updatedAt: string | null = null;
+      if (fs.existsSync(canonicalFile)) {
+        const stat = fs.statSync(canonicalFile);
+        updatedAt = stat.mtime.toISOString();
+      }
+      res.json({
+        enabled: true,
+        dataDir: LOCAL_DATA_ROOT,
+        hasDb: fs.existsSync(canonicalFile),
+        updatedAt,
+      });
+    } catch {
+      res.json({ enabled: false });
+    }
+  });
+
+  app.get('/api/local-disk/db', (req: Request, res: Response) => {
+    if (!isLocalOfflineAllowed(req)) {
+      res.status(403).json({ error: 'Disponível apenas em execução local.' });
+      return;
+    }
+    try {
+      ensureLocalDiskDirs();
+      const scope = sanitizeDiskSegment(String(req.query.scope || 'offline_guest'));
+      const scopedFile = path.join(LOCAL_BACKUP_DIR, `db-${scope}.json`);
+      const canonicalFile = path.join(LOCAL_BACKUP_DIR, 'estuda-gov-db-atual.json');
+
+      const candidates = [scopedFile, canonicalFile].filter((f) => fs.existsSync(f));
+      if (candidates.length === 0) {
+        res.status(404).json({ found: false });
+        return;
+      }
+
+      // Escolhe o arquivo com updatedAt mais recente
+      let bestRecord: { raw: string; updatedAt: string; byteLength: number } | null = null;
+      for (const file of candidates) {
+        try {
+          const parsed = JSON.parse(fs.readFileSync(file, 'utf-8')) as {
+            raw?: string;
+            updatedAt?: string;
+            db?: unknown;
+          };
+          const rawStr = typeof parsed.raw === 'string' ? parsed.raw : parsed.db ? JSON.stringify(parsed.db) : '';
+          const ts = parsed.updatedAt || fs.statSync(file).mtime.toISOString();
+          if (rawStr && (!bestRecord || ts > bestRecord.updatedAt)) {
+            bestRecord = {
+              raw: rawStr,
+              updatedAt: ts,
+              byteLength: rawStr.length,
+            };
+          }
+        } catch {
+          // ignore corrupted candidate
+        }
+      }
+
+      if (!bestRecord) {
+        res.status(404).json({ found: false });
+        return;
+      }
+      res.json({ found: true, snapshot: bestRecord });
+    } catch (err: any) {
+      res.status(500).json({ error: err?.message || 'Erro ao ler banco local.' });
+    }
+  });
+
+  app.post('/api/local-disk/db', (req: Request, res: Response) => {
+    if (!isLocalOfflineAllowed(req)) {
+      res.status(403).json({ error: 'Disponível apenas em execução local.' });
+      return;
+    }
+    try {
+      ensureLocalDiskDirs();
+      const { scope, raw, updatedAt } = (req.body || {}) as {
+        scope?: string;
+        raw?: string;
+        updatedAt?: string;
+      };
+      if (!raw || typeof raw !== 'string') {
+        res.status(400).json({ error: 'Snapshot vazio.' });
+        return;
+      }
+      const cleanScope = sanitizeDiskSegment(scope || 'offline_guest');
+      const nowIso = updatedAt || new Date().toISOString();
+      const payload = JSON.stringify({ scope: cleanScope, updatedAt: nowIso, raw }, null, 2);
+
+      const scopedFile = path.join(LOCAL_BACKUP_DIR, `db-${cleanScope}.json`);
+      const canonicalFile = path.join(LOCAL_BACKUP_DIR, 'estuda-gov-db-atual.json');
+
+      const tmpScoped = `${scopedFile}.tmp`;
+      fs.writeFileSync(tmpScoped, payload, 'utf-8');
+      fs.renameSync(tmpScoped, scopedFile);
+
+      const tmpCanonical = `${canonicalFile}.tmp`;
+      fs.writeFileSync(tmpCanonical, payload, 'utf-8');
+      fs.renameSync(tmpCanonical, canonicalFile);
+
+      res.json({ ok: true, updatedAt: nowIso });
+    } catch (err: any) {
+      console.error('[Local Disk DB Save] Erro:', err);
+      res.status(500).json({ error: err?.message || 'Erro ao gravar banco no disco local.' });
+    }
+  });
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
       status: 'ok',
       aiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      localOfflineMode: process.env.LOCAL_OFFLINE_MODE === 'true',
       projectId: firebaseConfig.projectId || null,
       timestamp: new Date().toISOString(),
     });
