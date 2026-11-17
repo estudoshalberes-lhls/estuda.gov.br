@@ -130,7 +130,7 @@
       "schema": {
         "$ref": "#/entities/StudyDbRecord"
       },
-      "description": "Stores native map chunks for all 29 sections of the user's StudyDatabase."
+      "description": "Stores native map chunks for all sections (including pdfAnnotations) of the user's StudyDatabase."
     }
   }
 }

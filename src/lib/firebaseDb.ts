@@ -328,6 +328,7 @@ const RECORD_SECTIONS = [
   'lawReadDates',
   'lawLastReadPosition',
   'pdfFolders',
+  'pdfAnnotations',
   'summaryFolders',
 ] as const;
 
@@ -879,6 +880,14 @@ function reassembleDatabaseFromDocs(
           reconstructed[section][k] = coerceFirestoreArray(v);
         } else if (section === 'weeklySchedules') {
           reconstructed[section][k] = normalizeWeeklyScheduleEntry(v);
+        } else if (section === 'pdfAnnotations' && v && typeof v === 'object') {
+          const rawAnn = v as Record<string, unknown>;
+          reconstructed[section][k] = {
+            strokes: coerceFirestoreArray(rawAnn.strokes),
+            notes: coerceFirestoreArray(rawAnn.notes),
+            updatedAt: typeof rawAnn.updatedAt === 'string' ? rawAnn.updatedAt : '',
+            ...(typeof rawAnn.lastBakedAt === 'string' ? { lastBakedAt: rawAnn.lastBakedAt } : {}),
+          };
         } else {
           reconstructed[section][k] = v;
         }

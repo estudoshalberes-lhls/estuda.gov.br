@@ -276,12 +276,43 @@ export interface LawReadingEntry {
   observacao?: string;
 }
 
+export type PdfAnnotationColor = 'yellow' | 'green' | 'blue' | 'pink' | 'red';
+
+export interface PdfInkStroke {
+  id: string;
+  page: number;
+  tool: 'pen' | 'highlighter';
+  color: PdfAnnotationColor;
+  width: number;
+  points: number[]; // interleaved [x0, y0, x1, y1, ...] normalized 0..1
+  createdAt: string;
+}
+
+export interface PdfTextNote {
+  id: string;
+  page: number;
+  x: number;
+  y: number;
+  text: string;
+  color: PdfAnnotationColor;
+  createdAt: string;
+}
+
+export interface PdfFileAnnotations {
+  strokes: PdfInkStroke[];
+  notes: PdfTextNote[];
+  updatedAt: string;
+  lastBakedAt?: string;
+}
+
 export interface PersonalPdfFile {
   id: string;
   name: string;
   size: number;
   blobKey: string;
   createdAt: string;
+  updatedAt?: string;
+  hasAnnotations?: boolean;
 }
 
 export interface SummaryFile {
@@ -444,6 +475,7 @@ export interface StudyDatabase {
   lawLastReadPosition?: Record<string, string>;
   fixedSubjects?: string[];
   pdfFolders: Record<string, PersonalPdfFile[]>;
+  pdfAnnotations?: Record<string, PdfFileAnnotations>;
   summaryFolders: Record<string, SummaryFile[]>;
   proofBanks: string[];
   proofFiles: ProofFileRecord[];

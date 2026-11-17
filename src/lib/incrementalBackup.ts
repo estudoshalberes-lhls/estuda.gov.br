@@ -23,6 +23,7 @@ import {
   StudyDatabase,
   StudyTimeRecord,
   SubmittedSimulation,
+  PdfFileAnnotations,
   PersonalPdfFile,
   SummaryFile,
   WeekdayName,
@@ -70,6 +71,7 @@ export interface IncrementalDatabaseDelta {
   savedIncidenceFilters?: ArrayDelta<SavedIncidenceFilter>;
   lawLastReadPosition?: RecordDelta<string>;
   pdfFolders?: RecordDelta<PersonalPdfFile[]>;
+  pdfAnnotations?: RecordDelta<PdfFileAnnotations>;
   summaryFolders?: RecordDelta<SummaryFile[]>;
   proofBanks?: string[];
   fixedSubjects?: string[];
@@ -278,6 +280,7 @@ export function buildIncrementalDatabaseBackup(
   trackArray('savedIncidenceFilters', baseDb?.savedIncidenceFilters, currentDb.savedIncidenceFilters, (f) => f.id);
   trackRecord('lawLastReadPosition', baseDb?.lawLastReadPosition, currentDb.lawLastReadPosition);
   trackRecord('pdfFolders', baseDb?.pdfFolders, currentDb.pdfFolders);
+  trackRecord('pdfAnnotations', baseDb?.pdfAnnotations, currentDb.pdfAnnotations);
   trackRecord('summaryFolders', baseDb?.summaryFolders, currentDb.summaryFolders);
 
   if (!baseDb || stableJson(baseDb.proofBanks) !== stableJson(currentDb.proofBanks)) {
@@ -700,6 +703,7 @@ export function applyIncrementalDeltaToDatabase(
       d.pdfFolders,
       additive ? mergePersonalPdfArrays : undefined,
     ),
+    pdfAnnotations: mergeRecordDelta(baseDb.pdfAnnotations, d.pdfAnnotations),
     summaryFolders: mergeRecordDelta(
       baseDb.summaryFolders,
       d.summaryFolders,

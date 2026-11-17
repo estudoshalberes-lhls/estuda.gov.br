@@ -200,6 +200,7 @@ import {
   LawReadingEntry,
   ModuleName,
   ModuleVisibility,
+  PdfFileAnnotations,
   PersonalPdfFile,
   PomodoroMode,
   ProofFileRecord,
@@ -841,6 +842,14 @@ interface StudyContextValue {
   renamePdfFolder: (oldName: string, newName: string) => string;
   uploadPersonalPdfs: (folder: string, files: File[]) => Promise<number>;
   replacePersonalPdf: (folder: string, fileId: string, replacement: File) => Promise<void>;
+  savePdfAnnotations: (blobKey: string, annotations: PdfFileAnnotations) => void;
+  commitAnnotatedPersonalPdf: (
+    folder: string,
+    fileId: string,
+    updatedBlob: Blob,
+    hasAnnotations: boolean,
+    options?: { silent?: boolean },
+  ) => Promise<boolean>;
   deletePersonalPdf: (folder: string, fileId: string) => Promise<void>;
   deletePdfFolder: (folder: string) => Promise<number>;
 
@@ -1600,6 +1609,20 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     seed.pdfFolders,
     dataObj.pdfFolders as Record<string, unknown> | undefined,
   );
+  const rawPdfAnnotations =
+    dataObj.pdfAnnotations && typeof dataObj.pdfAnnotations === 'object' && !Array.isArray(dataObj.pdfAnnotations)
+      ? (dataObj.pdfAnnotations as Record<string, any>)
+      : {};
+  const normalizedPdfAnnotations: Record<string, PdfFileAnnotations> = {};
+  Object.entries(rawPdfAnnotations).forEach(([key, val]) => {
+    if (!key || !val || typeof val !== 'object') return;
+    normalizedPdfAnnotations[key] = {
+      strokes: toArraySafe(val.strokes),
+      notes: toArraySafe(val.notes),
+      updatedAt: typeof val.updatedAt === 'string' ? val.updatedAt : '',
+      ...(typeof val.lastBakedAt === 'string' ? { lastBakedAt: val.lastBakedAt } : {}),
+    };
+  });
   const normalizedSummaryFolders = normalizeArrayRecordMap<SummaryFile>(
     seed.summaryFolders,
     dataObj.summaryFolders as Record<string, unknown> | undefined,
@@ -1624,6 +1647,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         ? dataObj.weeklyGoalNotes
         : seed.weeklyGoalNotes || {},
     pdfFolders: normalizedPdfFolders,
+    pdfAnnotations: normalizedPdfAnnotations,
     summaryFolders: normalizedSummaryFolders,
     laws: normalizedLaws,
     submittedSimulations: normalizedSubmittedSimulations,
@@ -12383,24 +12407,100 @@ function isEmailAuthorized(email?: string | null): boolean {
       const target = (db.pdfFolders[folder] || []).find((f) => f.id === fileId);
       if (!target) throw new Error('PDF não encontrado.');
       await saveFileBlob(target.blobKey, replacement);
+      await deleteFileBlob(`${target.blobKey}::clean`);
       const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
       await autoSyncFileToDrive(
         replacement,
         target.name,
         folderLabel ? ['PDFs Pessoais', folderLabel] : 'PDFs Pessoais',
       );
+      setDb((prev) => {
+        const nextAnnotations = { ...(prev.pdfAnnotations || {}) };
+        delete nextAnnotations[target.blobKey];
+        return {
+          ...prev,
+          pdfFolders: {
+            ...prev.pdfFolders,
+            [folder]: (prev.pdfFolders[folder] || []).map((f) =>
+              f.id === fileId
+                ? { ...f, size: replacement.size, updatedAt: new Date().toISOString(), hasAnnotations: false }
+                : f,
+            ),
+          },
+          pdfAnnotations: nextAnnotations,
+        };
+      });
+      toast(`PDF "${visibleName(target.name)}" substituído.`);
+    },
+    [autoSyncFileToDrive, db.pdfFolders, isProtectedPdfFolder, toast],
+  );
+
+  const savePdfAnnotations = useCallback((blobKey: string, annotations: PdfFileAnnotations) => {
+    if (!blobKey) return;
+    setDb((prev) => {
+      const nextMap = { ...(prev.pdfAnnotations || {}) };
+      const isEmpty = annotations.strokes.length === 0 && annotations.notes.length === 0;
+      if (isEmpty) {
+        delete nextMap[blobKey];
+      } else {
+        nextMap[blobKey] = annotations;
+      }
+      return {
+        ...prev,
+        pdfAnnotations: nextMap,
+      };
+    });
+  }, []);
+
+  const commitAnnotatedPersonalPdf = useCallback(
+    async (
+      folder: string,
+      fileId: string,
+      updatedBlob: Blob,
+      hasAnnotations: boolean,
+      options?: { silent?: boolean },
+    ): Promise<boolean> => {
+      if (isProtectedPdfFolder(folder)) return false;
+      const target = (dbRef.current.pdfFolders[folder] || []).find((f) => f.id === fileId);
+      if (!target) return false;
+
+      await saveFileBlob(target.blobKey, updatedBlob);
+
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+      const syncedRemote = await autoSyncFileToDrive(
+        updatedBlob,
+        target.name,
+        folderLabel ? ['PDFs Pessoais', folderLabel] : 'PDFs Pessoais',
+      );
+
+      const nowIso = new Date().toISOString();
       setDb((prev) => ({
         ...prev,
         pdfFolders: {
           ...prev.pdfFolders,
           [folder]: (prev.pdfFolders[folder] || []).map((f) =>
-            f.id === fileId ? { ...f, size: replacement.size } : f,
+            f.id === fileId
+              ? {
+                  ...f,
+                  size: updatedBlob.size,
+                  updatedAt: nowIso,
+                  hasAnnotations,
+                }
+              : f,
           ),
         },
       }));
-      toast(`PDF "${visibleName(target.name)}" substituído.`);
+
+      if (!options?.silent) {
+        toast(
+          syncedRemote
+            ? `Alterações salvas automaticamente no PDF "${visibleName(target.name)}" e sincronizadas.`
+            : `Alterações salvas automaticamente no PDF "${visibleName(target.name)}".`,
+        );
+      }
+      return syncedRemote;
     },
-    [autoSyncFileToDrive, db.pdfFolders, isProtectedPdfFolder, toast],
+    [autoSyncFileToDrive, isProtectedPdfFolder, toast],
   );
 
   const deletePersonalPdf = useCallback(
@@ -12409,6 +12509,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       const target = (db.pdfFolders[folder] || []).find((f) => f.id === fileId);
       if (target) {
         await deleteFileBlob(target.blobKey);
+        await deleteFileBlob(`${target.blobKey}::clean`);
         if (localFolderHandleRef.current && localFolderWritableRef.current) {
           const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
           if (folderLabel) {
@@ -12427,13 +12528,18 @@ function isEmailAuthorized(email?: string | null): boolean {
           setLastLocalFolderSyncAt(new Date().toISOString());
         }
       }
-      setDb((prev) => ({
-        ...prev,
-        pdfFolders: {
-          ...prev.pdfFolders,
-          [folder]: (prev.pdfFolders[folder] || []).filter((f) => f.id !== fileId),
-        },
-      }));
+      setDb((prev) => {
+        const nextAnnotations = { ...(prev.pdfAnnotations || {}) };
+        if (target?.blobKey) delete nextAnnotations[target.blobKey];
+        return {
+          ...prev,
+          pdfFolders: {
+            ...prev.pdfFolders,
+            [folder]: (prev.pdfFolders[folder] || []).filter((f) => f.id !== fileId),
+          },
+          pdfAnnotations: nextAnnotations,
+        };
+      });
       toast('PDF removido.');
     },
     [db.pdfFolders, isProtectedPdfFolder, toast],
@@ -12448,6 +12554,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       const files = db.pdfFolders[folder] || [];
       for (const f of files) {
         await deleteFileBlob(f.blobKey);
+        await deleteFileBlob(`${f.blobKey}::clean`);
       }
       if (localFolderHandleRef.current && localFolderWritableRef.current) {
         const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
@@ -12469,7 +12576,11 @@ function isEmailAuthorized(email?: string | null): boolean {
       setDb((prev) => {
         const next = { ...prev.pdfFolders };
         delete next[folder];
-        return { ...prev, pdfFolders: next };
+        const nextAnnotations = { ...(prev.pdfAnnotations || {}) };
+        for (const f of files) {
+          delete nextAnnotations[f.blobKey];
+        }
+        return { ...prev, pdfFolders: next, pdfAnnotations: nextAnnotations };
       });
       return files.length;
     },
@@ -13644,6 +13755,8 @@ function isEmailAuthorized(email?: string | null): boolean {
         renamePdfFolder,
         uploadPersonalPdfs,
         replacePersonalPdf,
+        savePdfAnnotations,
+        commitAnnotatedPersonalPdf,
         deletePersonalPdf,
         deletePdfFolder,
         createSummaryFolder,

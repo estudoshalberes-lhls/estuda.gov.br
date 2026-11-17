@@ -1,11 +1,11 @@
 import React, { useMemo, useRef, useState } from 'react';
-import { Check, Download, Eye, FileUp, Folder, FolderPlus, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
+import { Check, Download, Eye, FileUp, Folder, FolderPlus, Highlighter, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import { getKnownStudyDriveFolderNames, getPreferredStudyFolder } from '../lib/googleDrive';
 import { formatUploadSize, isReservedBackupFolderName, visibleName } from '../lib/parsers';
 import { PersonalPdfFile } from '../types/study';
-import { FilePreview } from '../components/ui/FilePreview';
+import { PdfAnnotatorViewer } from '../components/ui/PdfAnnotatorViewer';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
 export const PersonalPdfsPage: React.FC = () => {
@@ -118,6 +118,9 @@ export const PersonalPdfsPage: React.FC = () => {
   };
 
   const activeFiles = activeFolder ? db.pdfFolders[activeFolder] || [] : [];
+  const activePreviewFile = previewPdf
+    ? activeFiles.find((f) => f.id === previewPdf.id) || previewPdf
+    : null;
 
   return (
     <div>
@@ -359,29 +362,45 @@ export const PersonalPdfsPage: React.FC = () => {
             </div>
           )}
 
-          {previewPdf && (
-            <FilePreview
-              blobKey={previewPdf.blobKey}
-              filename={previewPdf.name}
-              mimeType="application/pdf"
-              title={`${visibleName(activeFolder)} — ${visibleName(previewPdf.name)}`}
+          {activePreviewFile && (
+            <PdfAnnotatorViewer
+              folder={activeFolder}
+              file={activePreviewFile}
               onClose={() => setPreviewPdf(null)}
             />
           )}
 
           {activeFiles.length ? (
             <div className="mt-4 flex flex-col gap-2.5">
-              {activeFiles.map((file) => (
+              {activeFiles.map((file) => {
+                const fileAnn = db.pdfAnnotations?.[file.blobKey];
+                const annotationCount =
+                  (fileAnn?.strokes?.length || 0) + (fileAnn?.notes?.length || 0);
+                const isAnnotated = annotationCount > 0 || Boolean(file.hasAnnotations);
+
+                return (
                 <div
                   key={file.id}
                   className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3"
                 >
                   <div className="min-w-0">
-                    <strong className="block text-[13.5px] font-bold text-[var(--text)] truncate">
-                      {visibleName(file.name)}
-                    </strong>
+                    <div className="flex items-center gap-2 min-w-0">
+                      <strong className="text-[13.5px] font-bold text-[var(--text)] truncate">
+                        {visibleName(file.name)}
+                      </strong>
+                      {isAnnotated && (
+                        <span
+                          title="PDF com marcações salvas automaticamente"
+                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-[var(--accent)]/35 bg-[var(--accent-soft)] text-[10.5px] font-bold text-[var(--accent)] shrink-0"
+                        >
+                          <Highlighter className="w-3 h-3" />
+                          {annotationCount > 0 ? `${annotationCount} marcação(ões)` : 'Marcado'}
+                        </span>
+                      )}
+                    </div>
                     <span className="block text-[11.5px] text-[var(--muted)] font-mono-num">
                       {formatUploadSize(file.size)} · Enviado em {file.createdAt}
+                      {file.updatedAt ? ` · Atualizado em ${new Date(file.updatedAt).toLocaleDateString('pt-BR')}` : ''}
                     </span>
                   </div>
 
@@ -394,7 +413,7 @@ export const PersonalPdfsPage: React.FC = () => {
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
                     >
                       <Eye className="w-3.5 h-3.5" />
-                      {previewPdf?.id === file.id ? 'Fechar' : 'Visualizar'}
+                      {previewPdf?.id === file.id ? 'Fechar' : 'Abrir / Marcar'}
                     </button>
                     <button
                       type="button"
@@ -422,7 +441,8 @@ export const PersonalPdfsPage: React.FC = () => {
                     </button>
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <EmptyState message="Esta pasta ainda não possui PDFs salvos." />
