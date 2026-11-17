@@ -13,6 +13,7 @@ import {
 import { useStudy } from '../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import { formatUploadSize, visibleName } from '../lib/parsers';
+import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ProofFileRecord } from '../types/study';
 import { FilePreview } from '../components/ui/FilePreview';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
@@ -67,17 +68,29 @@ export const ProofsPage: React.FC = () => {
   const flushObsDrafts = useCallback(() => {
     const drafts = obsDraftsRef.current;
     const files = proofFilesRef.current;
+    const cleared: string[] = [];
     Object.entries(drafts).forEach(([proofId, value]) => {
       const target = files.find((p) => p.id === proofId);
       if (target && (target.observacoes || '').trim() !== value.trim()) {
         updateProofObservations(proofId, value, true);
       }
+      clearFieldDraft(`proof_obs_${proofId}`);
+      cleared.push(proofId);
     });
+    if (cleared.length > 0) {
+      setObsDrafts((prev) => {
+        const next = { ...prev };
+        cleared.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+    }
   }, [updateProofObservations]);
 
   useEffect(() => {
     if (Object.keys(obsDrafts).length === 0) return;
-    const timer = window.setTimeout(() => flushObsDrafts(), 450);
+    const timer = window.setTimeout(() => flushObsDrafts(), 1000);
     return () => window.clearTimeout(timer);
   }, [flushObsDrafts, obsDrafts]);
 
@@ -376,7 +389,8 @@ export const ProofsPage: React.FC = () => {
       <div className="mt-4 flex flex-col gap-3.5">
         {filteredProofs.length ? (
           filteredProofs.map((pf) => {
-            const obsVal = obsDrafts[pf.id] ?? pf.observacoes;
+            const obsVal =
+              obsDrafts[pf.id] ?? readFieldDraft<string>(`proof_obs_${pf.id}`) ?? pf.observacoes;
             const form = corrForms[pf.id] || { questao: '', observacoes: '' };
 
             return (
@@ -457,17 +471,30 @@ export const ProofsPage: React.FC = () => {
                     <input
                       type="text"
                       value={obsVal}
-                      onChange={(e) =>
-                        setObsDrafts((prev) => ({ ...prev, [pf.id]: e.target.value }))
-                      }
-                      onBlur={() => updateProofObservations(pf.id, obsVal, true)}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        writeFieldDraft(`proof_obs_${pf.id}`, val);
+                        setObsDrafts((prev) => ({ ...prev, [pf.id]: val }));
+                      }}
+                      onBlur={() => {
+                        updateProofObservations(pf.id, obsVal, true);
+                        clearFieldDraft(`proof_obs_${pf.id}`);
+                      }}
                       placeholder="Tempo de resolução, nível da prova, disciplinas críticas..."
                       className="ce-input"
                     />
                   </div>
                   <button
                     type="button"
-                    onClick={() => updateProofObservations(pf.id, obsVal)}
+                    onClick={() => {
+                      updateProofObservations(pf.id, obsVal);
+                      clearFieldDraft(`proof_obs_${pf.id}`);
+                      setObsDrafts((prev) => {
+                        const next = { ...prev };
+                        delete next[pf.id];
+                        return next;
+                      });
+                    }}
                     className="inline-flex items-center gap-1.5 h-[38px] px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
                   >
                     <Save className="w-3.5 h-3.5" />

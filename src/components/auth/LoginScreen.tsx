@@ -12,9 +12,9 @@ import {
   HardDrive,
   Lock,
 } from 'lucide-react';
-import firebaseConfig from '../../../firebase-applet-config.json';
 import { useStudy } from '../../context/StudyContext';
 import { CANONICAL_LOCAL_SUBFOLDERS, getLocalCategoryList } from '../../lib/localFolderSync';
+import firebaseConfig from '../../../firebase-applet-config.json';
 import { GovFederalBar } from '../layout/GovFederalBar';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 
@@ -145,44 +145,39 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
       }
     } catch (err: any) {
       const msg = err?.message || '';
-      if (msg.includes('auth/unauthorized-domain') || err?.code === 'auth/unauthorized-domain') {
-        const host = window.location.hostname || 'seu-site.vercel.app';
-        setErrorMessage(
-          `O domínio "${host}" não está na lista de Domínios Autorizados do Firebase. Adicione "${host}" no Firebase Console > Authentication > Settings > Authorized Domains ou use a leitura da Pasta Local abaixo.`,
-        );
-      } else {
-        setErrorMessage(msg || 'Falha ao autenticar com o Google.');
-      }
+      setErrorMessage(msg || 'Falha ao autenticar com o Google.');
     } finally {
       setLoading(false);
     }
   };
 
   const displayedError = errorMessage || authError;
+  const isUnauthorizedDomainError = Boolean(
+    displayedError && displayedError.toLowerCase().includes('unauthorized-domain'),
+  );
   const isOriginMismatchError = Boolean(
     displayedError &&
       (displayedError.toLowerCase().includes('origin_mismatch') ||
         displayedError.toLowerCase().includes('origens javascript autorizadas') ||
         displayedError.toLowerCase().includes('redirect_uri_mismatch')),
   );
-  const isUnauthorizedDomainError = Boolean(
-    displayedError &&
-      (displayedError.includes('auth/unauthorized-domain') ||
-        displayedError.includes('Domínios Autorizados') ||
-        displayedError.includes('não autorizado no Firebase Authentication')),
-  );
+  const needsDomainHelp = isUnauthorizedDomainError || isOriginMismatchError;
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-  const copyValue = isOriginMismatchError ? currentOrigin : currentHost;
-  const firebaseAuthSettingsUrl = `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`;
-  const googleCloudCredentialsUrl = `https://console.cloud.google.com/apis/credentials?project=${firebaseConfig.projectId}`;
+  const copyValue = isUnauthorizedDomainError ? currentHost : currentOrigin;
+  const domainConsoleUrl = isUnauthorizedDomainError
+    ? `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`
+    : 'https://console.cloud.google.com/apis/credentials?project=848919975785';
+  const domainConsoleLabel = isUnauthorizedDomainError
+    ? 'Abrir Firebase Console'
+    : 'Abrir Google Cloud Console';
 
   const handleCopyHost = async () => {
     if (!copyValue) return;
     try {
       await navigator.clipboard.writeText(copyValue);
       setCopiedHost(true);
-      toast(`${isOriginMismatchError ? 'Origem' : 'Domínio'} "${copyValue}" copiado!`);
+      toast(`${isUnauthorizedDomainError ? 'Domínio' : 'Origem'} "${copyValue}" copiado!`);
       window.setTimeout(() => setCopiedHost(false), 2000);
     } catch {
       toast('Não foi possível copiar automaticamente. Selecione e copie o endereço exibido.', true);
@@ -309,7 +304,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               Identifique-se no estuda.gov.br com:
             </h2>
 
-            {/* Botão Principal: Entrar com Conta Google (Firebase Firestore + Google Drive) */}
+            {/* Botão Principal: Entrar com Conta Google (Firebase + Google Drive) */}
             <div className="mt-4 pb-4 border-b border-[var(--line)]">
               {(firebaseConnected || driveConnected) && googleUser?.email ? (
                 <div className="flex flex-col gap-2">
@@ -486,7 +481,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   <span className="leading-relaxed">{displayedError}</span>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                  {(isUnauthorizedDomainError || isOriginMismatchError) && copyValue && (
+                  {needsDomainHelp && copyValue && (
                     <>
                       <button
                         type="button"
@@ -500,23 +495,21 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                         )}
                         <span>
                           {copiedHost
-                            ? isOriginMismatchError
-                              ? 'Origem copiada'
-                              : 'Domínio copiado'
-                            : isOriginMismatchError
-                              ? 'Copiar origem'
-                              : 'Copiar domínio'}
+                            ? isUnauthorizedDomainError
+                              ? 'Domínio copiado'
+                              : 'Origem copiada'
+                            : isUnauthorizedDomainError
+                              ? 'Copiar domínio'
+                              : 'Copiar origem'}
                         </span>
                       </button>
                       <a
-                        href={isOriginMismatchError ? googleCloudCredentialsUrl : firebaseAuthSettingsUrl}
+                        href={domainConsoleUrl}
                         target="_blank"
                         rel="noreferrer"
                         className="inline-flex items-center gap-1.5 px-3 py-1 rounded border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-semibold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
                       >
-                        <span>
-                          {isOriginMismatchError ? 'Abrir Google Cloud Console' : 'Abrir Firebase Console'}
-                        </span>
+                        <span>{domainConsoleLabel}</span>
                         <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
                       </a>
                     </>

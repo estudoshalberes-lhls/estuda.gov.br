@@ -25,12 +25,14 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
     return null;
   }
 
+  const isOAuthDriveExpired = code === 'oauth/drive-token-expired';
   const isCritical = status === 'expired' || status === 'inconsistent';
-  const title =
-    status === 'expired'
-      ? 'Sessão OAuth / Firebase Expirada'
+  const title = isOAuthDriveExpired
+    ? 'Sessão do Google Drive Expirada'
+    : status === 'expired'
+      ? 'Sessão do Firebase Expirada'
       : status === 'inconsistent'
-        ? 'Inconsistência de Autenticação com o Firestore'
+        ? 'Inconsistência de Autenticação no Firebase'
         : 'Instabilidade na Conexão com o Firestore';
 
   const handleReconnect = async () => {
@@ -93,7 +95,7 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
             </div>
             <p className="m-0 mt-1 text-[12px] text-[var(--text)] leading-relaxed">
               {message ||
-                'Não foi possível confirmar a validade da sessão autenticada com o Firestore.'}
+                'Não foi possível confirmar a autenticação com o Firebase Firestore.'}
             </p>
           </div>
         </div>

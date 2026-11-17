@@ -1,23 +1,32 @@
-import { initializeApp, getApps, getApp } from 'firebase/app';
+import { getApp, getApps, initializeApp } from 'firebase/app';
 import {
+  browserLocalPersistence,
   getAuth,
-  signInWithPopup,
-  signInWithRedirect,
-  getRedirectResult,
   GoogleAuthProvider,
   onAuthStateChanged,
   setPersistence,
-  indexedDBLocalPersistence,
-  browserLocalPersistence,
-  User,
+  signInWithPopup,
   signOut,
+  type User,
 } from 'firebase/auth';
 import firebaseConfig from '../../firebase-applet-config.json';
 import { loadDriveJsonCacheEntry, saveDriveJsonCacheEntry } from './fileStorage';
 import { IncrementalBackupEnvelope, isIncrementalBackupPayload } from './incrementalBackup';
 
+export { firebaseConfig };
+export type { User };
+export type GoogleAccountUser = User;
+
+export const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
+export const auth = getAuth(firebaseApp);
+
+export const GOOGLE_CLIENT_ID =
+  String(import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim() ||
+  String((firebaseConfig as { oAuthClientId?: string }).oAuthClientId || '').trim() ||
+  '848919975785-6uthlnjqh75uodmirv21drrddqs969sv.apps.googleusercontent.com';
+
 export const DRIVE_FOLDER_NAME = 'Central de Estudos - Materiais';
-export const DEFAULT_STUDY_FOLDER_ID = '1mSxRKoC7cOt8ivkcR7zhGZflMwUe_eWB';
+export const DEFAULT_STUDY_FOLDER_ID = '';
 export const DRIVE_SCOPES = [
   'https://www.googleapis.com/auth/drive.file',
   'https://www.googleapis.com/auth/drive.metadata.readonly',
@@ -28,32 +37,65 @@ const DRIVE_FOLDER_PREF_KEY = 'central_estudos_drive_folder_pref_v1';
 const KNOWN_DRIVE_ROOTS_KEY = 'central_estudos_known_drive_roots_v1';
 const DRIVE_TOKEN_CACHE_KEY = 'central_estudos_drive_token_v1';
 const LAST_GOOGLE_EMAIL_KEY = 'central_estudos_last_google_email_v1';
+const DRIVE_BLOCKED_FILES_KEY = 'central_estudos_drive_blocked_files_v1';
 const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
 const DRIVE_TOKEN_DEFAULT_TTL_MS = 55 * 60 * 1000;
 
-const app = getApps().length ? getApp() : initializeApp(firebaseConfig);
-export const auth = getAuth(app);
-const authPersistencePromise = setPersistence(auth, indexedDBLocalPersistence)
-  .catch(() => setPersistence(auth, browserLocalPersistence))
-  .catch(() => {});
+void setPersistence(auth, browserLocalPersistence).catch(() => {
+  // ignore persistence error in restricted contexts
+});
 
-function createGoogleAuthProvider(options?: {
-  loginHint?: string | null;
-  forceAccountPicker?: boolean;
-}): GoogleAuthProvider {
-  const authProvider = new GoogleAuthProvider();
-  DRIVE_SCOPES.forEach((scope) => authProvider.addScope(scope));
-  const customParams: Record<string, string> = {};
-  if (options?.forceAccountPicker || !options?.loginHint) {
-    customParams.prompt = 'select_account';
+function readBlockedDriveFileIds(): Set<string> {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return new Set();
+    const raw = window.localStorage.getItem(DRIVE_BLOCKED_FILES_KEY);
+    if (!raw) return new Set();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string' && id.trim().length > 0));
+  } catch {
+    return new Set();
   }
-  if (options?.loginHint) {
-    customParams.login_hint = options.loginHint;
+}
+
+function writeBlockedDriveFileIds(ids: Set<string>): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const arr = Array.from(ids);
+    if (arr.length === 0) {
+      window.localStorage.removeItem(DRIVE_BLOCKED_FILES_KEY);
+    } else {
+      window.localStorage.setItem(DRIVE_BLOCKED_FILES_KEY, JSON.stringify(arr.slice(-300)));
+    }
+  } catch {
+    // ignore storage errors
   }
-  if (Object.keys(customParams).length > 0) {
-    authProvider.setCustomParameters(customParams);
+}
+
+export function isDriveFilePermissionBlocked(fileId?: string | null): boolean {
+  if (!fileId) return false;
+  return readBlockedDriveFileIds().has(fileId);
+}
+
+export function markDriveFilePermissionBlocked(fileId?: string | null): void {
+  if (!fileId) return;
+  const ids = readBlockedDriveFileIds();
+  if (ids.has(fileId)) return;
+  ids.add(fileId);
+  writeBlockedDriveFileIds(ids);
+}
+
+export function clearDrivePermissionBlockedFiles(fileIds?: string[]): void {
+  if (!fileIds || fileIds.length === 0) {
+    writeBlockedDriveFileIds(new Set());
+    return;
   }
-  return authProvider;
+  const ids = readBlockedDriveFileIds();
+  let changed = false;
+  for (const id of fileIds) {
+    if (ids.delete(id)) changed = true;
+  }
+  if (changed) writeBlockedDriveFileIds(ids);
 }
 
 type DriveTokenListener = (hasToken: boolean, token: string | null) => void;
@@ -362,15 +404,17 @@ function loadGoogleIdentityServices(): Promise<void> {
 }
 
 export async function ensureFirebaseSessionAlive(forceRefresh = false): Promise<User | null> {
-  try {
-    await authPersistencePromise;
-    const currentUser = auth.currentUser;
-    if (!currentUser) return null;
-    await currentUser.getIdToken(forceRefresh);
-    return currentUser;
-  } catch {
-    return auth.currentUser || null;
+  if (!auth.currentUser && typeof auth.authStateReady === 'function') {
+    await auth.authStateReady().catch(() => {});
   }
+  const user = auth.currentUser;
+  if (!user) return null;
+  try {
+    await user.getIdToken(forceRefresh);
+  } catch {
+    // ignore token refresh failure when offline
+  }
+  return auth.currentUser;
 }
 
 export async function refreshDriveAccessTokenSilently(options?: {
@@ -405,7 +449,7 @@ export async function refreshDriveAccessTokenSilently(options?: {
     return inflightSilentRefreshPromise;
   }
 
-  const clientId = (firebaseConfig as any)?.oAuthClientId as string | undefined;
+  const clientId = GOOGLE_CLIENT_ID;
   const loginHint = (options?.email || auth.currentUser?.email || readLastGoogleEmail() || '').trim();
   if (!clientId || !loginHint) {
     return null;
@@ -708,31 +752,43 @@ async function throwDriveResponseError(res: Response, context: string): Promise<
 }
 
 export function formatGoogleAuthError(error: any): string {
-  const code = String(error?.code || '');
+  const code = String(error?.code || error?.type || '');
   const msg = String(error?.message || '');
-  const host = typeof window !== 'undefined' ? window.location.hostname : '';
 
   if (code === 'auth/unauthorized-domain' || msg.includes('auth/unauthorized-domain')) {
-    return `Domínio "${host}" não autorizado no Firebase Authentication (${code}). Adicione este domínio em Firebase Console > Authentication > Settings > Authorized Domains ou use o Modo Local.`;
+    const host = typeof window !== 'undefined' ? window.location.hostname : '';
+    return `Domínio "${host}" não autorizado no Firebase Authentication (auth/unauthorized-domain). Adicione este domínio em Authentication → Settings → Authorized domains no Console do Firebase.`;
   }
   if (msg.toLowerCase().includes('origin_mismatch') || msg.toLowerCase().includes('redirect_uri_mismatch')) {
     const origin = typeof window !== 'undefined' ? window.location.origin : '';
     return `Origem JavaScript "${origin}" não registrada no cliente OAuth 2.0 do Google Cloud (origin_mismatch). Adicione esta URL em Origens JavaScript autorizadas no Google Cloud Console.`;
   }
-  if (code === 'auth/popup-blocked' || msg.includes('auth/popup-blocked')) {
-    return 'O navegador bloqueou a janela popup de login do Google. Libere pop-ups para este site (ou abra o aplicativo em uma nova aba) e tente novamente.';
+  if (
+    code === 'auth/popup-blocked' ||
+    code === 'popup_failed_to_open' ||
+    msg.includes('popup_failed_to_open') ||
+    msg.includes('popup-blocked')
+  ) {
+    return 'O navegador bloqueou a janela popup de login do Google. Libere pop-ups para este site (ou abra em uma aba comum) e tente novamente.';
   }
-  if (code === 'auth/popup-closed-by-user' || msg.includes('auth/popup-closed-by-user')) {
-    return 'A janela de login do Google foi fechada antes de concluir a autenticação. Tente novamente e conclua a seleção da conta.';
+  if (
+    code === 'auth/popup-closed-by-user' ||
+    code === 'auth/cancelled-popup-request' ||
+    code === 'popup_closed' ||
+    msg.includes('popup_closed') ||
+    msg.includes('popup-closed-by-user')
+  ) {
+    return 'A janela de login do Google foi fechada antes de concluir a autenticação. Tente novamente e selecione sua conta.';
   }
-  if (code === 'auth/cancelled-popup-request') {
-    return 'Solicitação de login substituída ou cancelada. Clique novamente em "Continuar com o Google".';
+  if (code === 'access_denied' || msg.includes('access_denied')) {
+    return 'Autorização recusada na conta Google. Conceda acesso ao Google Drive para sincronizar seus backups.';
   }
-  if (code === 'auth/operation-not-allowed') {
-    return 'Login com Google não está habilitado no projeto Firebase atual (auth/operation-not-allowed).';
-  }
-  if (code === 'auth/network-request-failed') {
-    return 'Falha de rede ao conectar com o Google. Verifique sua conexão e tente novamente.';
+  if (
+    code === 'auth/network-request-failed' ||
+    msg.includes('network-request-failed') ||
+    msg.includes('Failed to fetch')
+  ) {
+    return 'Falha de rede ao conectar com o Firebase/Google. Verifique sua conexão e tente novamente.';
   }
   const codeSuffix = code ? ` (${code})` : '';
   return msg ? `${msg}${codeSuffix}` : `Não foi possível concluir o login com o Google${codeSuffix}.`;
@@ -742,96 +798,61 @@ export const initDriveAuth = (
   onAuthSuccess?: (user: User, token: string | null) => void,
   onAuthFailure?: () => void,
 ) => {
-  try {
-    void authPersistencePromise.then(() =>
-      getRedirectResult(auth)
-        .then((result) => {
-          if (result?.user) {
-            rememberLastGoogleEmail(result.user.email);
-            const cred = GoogleAuthProvider.credentialFromResult(result);
-            if (cred?.accessToken) {
-              persistDriveAccessToken(
-                cred.accessToken,
-                Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS,
-                result.user,
-              );
-              if (onAuthSuccess) {
-                onAuthSuccess(result.user, cred.accessToken);
-              }
-            }
-          }
-        })
-        .catch((err) => {
-          console.warn('Redirect auth result:', err);
-        }),
-    );
-
-    return onAuthStateChanged(auth, (user: User | null) => {
-      if (user) {
-        rememberLastGoogleEmail(user.email);
-        const token = cachedAccessToken || restorePersistedDriveAccessToken(user);
-        notifyDriveTokenListeners();
-        // Never disconnect an authenticated user if the Drive OAuth token
-        // cleared or expired by time limit — keep the account active and renew silently.
-        if (onAuthSuccess) {
-          onAuthSuccess(user, token);
-        }
-      } else {
-        resetDriveCache();
-        if (onAuthFailure) onAuthFailure();
+  return onAuthStateChanged(auth, (user) => {
+    if (user) {
+      rememberLastGoogleEmail(user.email);
+      const token = cachedAccessToken || restorePersistedDriveAccessToken(user);
+      notifyDriveTokenListeners();
+      if (onAuthSuccess) {
+        onAuthSuccess(user, token);
       }
-    });
-  } catch (err) {
-    console.warn('Auth initialization unavailable in offline/restricted mode:', err);
-    resetDriveCache();
-    if (onAuthFailure) onAuthFailure();
-    return () => {};
-  }
+    } else if (!isSigningIn) {
+      resetDriveCache();
+      if (onAuthFailure) {
+        onAuthFailure();
+      }
+    }
+  });
 };
 
 export const googleSignIn = async (options?: {
   loginHint?: string | null;
   forceAccountPicker?: boolean;
 }): Promise<{ user: User; accessToken: string } | null> => {
-  const hint = (options?.loginHint || (!options?.forceAccountPicker ? auth.currentUser?.email : null) || null)?.trim() || null;
-  const authProvider = createGoogleAuthProvider({
-    loginHint: hint,
-    forceAccountPicker: options?.forceAccountPicker,
+  const hint =
+    (options?.loginHint || (!options?.forceAccountPicker ? auth.currentUser?.email || readLastGoogleEmail() : null) || null)?.trim() ||
+    undefined;
+
+  const provider = new GoogleAuthProvider();
+  DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
+  provider.setCustomParameters({
+    prompt: options?.forceAccountPicker ? 'select_account' : hint ? 'consent' : 'select_account',
+    ...(hint ? { login_hint: hint } : {}),
   });
 
   try {
     isSigningIn = true;
-    await authPersistencePromise;
-    const result = await signInWithPopup(auth, authProvider);
-    rememberLastGoogleEmail(result.user.email);
+    await setPersistence(auth, browserLocalPersistence).catch(() => {});
+    const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    if (credential?.accessToken) {
-      persistDriveAccessToken(
-        credential.accessToken,
-        Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS,
-        result.user,
-      );
+    const accessToken = credential?.accessToken || '';
+
+    rememberLastGoogleEmail(result.user.email);
+    if (accessToken) {
+      persistDriveAccessToken(accessToken, Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS, result.user);
     }
+
     cachedFolderId = null;
     cachedFolderLink = null;
     for (const key of Object.keys(cachedSubFolderIds)) {
       delete cachedSubFolderIds[key];
     }
 
-    return { user: result.user, accessToken: cachedAccessToken || '' };
+    return { user: result.user, accessToken };
   } catch (error: any) {
-    const code = String(error?.code || '');
-    if (
-      (code === 'auth/popup-blocked' || code === 'auth/operation-not-supported-in-this-environment') &&
-      typeof window !== 'undefined' &&
-      window.self === window.top
-    ) {
-      await signInWithRedirect(auth, authProvider);
-      return null;
-    }
-    console.error('Erro de login no Google Drive:', error);
+    console.error('Erro de login com Firebase Google Auth:', error);
     const formatted = new Error(formatGoogleAuthError(error)) as Error & { code?: string };
-    formatted.code = error?.code;
+    formatted.code = error?.code || error?.type;
     throw formatted;
   } finally {
     isSigningIn = false;
@@ -874,9 +895,18 @@ export const getAccessToken = async (options?: {
 };
 
 export const googleSignOut = async (): Promise<void> => {
+  const tokenToRevoke = cachedAccessToken;
   clearRememberedGoogleEmail();
-  await signOut(auth);
   resetDriveCache();
+  await signOut(auth);
+  try {
+    const win = typeof window !== 'undefined' ? (window as any) : null;
+    if (tokenToRevoke && win?.google?.accounts?.oauth2?.revoke) {
+      win.google.accounts.oauth2.revoke(tokenToRevoke, () => {});
+    }
+  } catch {
+    // ignore revoke errors
+  }
 };
 
 /**
@@ -981,7 +1011,7 @@ async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphRes
     const lower = folder.name.trim().toLowerCase();
     if (
       (pref.id && folder.id === pref.id) ||
-      folder.id === DEFAULT_STUDY_FOLDER_ID ||
+      (DEFAULT_STUDY_FOLDER_ID && folder.id === DEFAULT_STUDY_FOLDER_ID) ||
       lower === normalizedPrefName ||
       lower === normalizedDefaultName
     ) {
@@ -1773,6 +1803,7 @@ export async function listStudyFilesFromDrive(token?: string): Promise<DriveFile
 export async function saveCloudSyncSnapshot(
   payload: unknown,
   token?: string,
+  options?: { force?: boolean },
 ): Promise<DriveFileInfo> {
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -1796,9 +1827,19 @@ export async function saveCloudSyncSnapshot(
 
   if (searchRes.ok) {
     const searchData = await searchRes.json();
-    const existingList = (searchData.files || []) as Array<{ id: string }>;
+    const existingList = (searchData.files || []) as Array<{ id: string; modifiedTime?: string }>;
     const existing = existingList[0];
     if (existing?.id) {
+      const remoteMs = Date.parse(existing.modifiedTime || '') || 0;
+      const payloadObj =
+        payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
+      const localMs =
+        Date.parse(String(payloadObj?.updatedAt || payloadObj?.exportedAt || '')) || 0;
+      if (!options?.force && remoteMs > 0 && localMs > 0 && remoteMs > localMs + 5000) {
+        throw new Error(
+          'DRIVE_CONFLICT_NEWER_REMOTE: O arquivo de sincronização no Google Drive é mais recente que o snapshot local.',
+        );
+      }
       const { res: patchRes, usedToken: patchToken } = await authorizedDriveFetch(
         `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`,
         (t) => ({
@@ -1934,9 +1975,16 @@ export async function pruneOldDatabaseBackupsFromDrive(
     activeFolderId: activeFolder?.id,
     onlyActiveFolder: Boolean(activeFolder?.id),
   });
+  const newestBaseSnapshot = allBackups.find(
+    (b) => b.name !== CLOUD_SYNC_FILENAME && b.name.startsWith('backup_central_estudos_'),
+  );
+  const protectedIds = new Set<string>(
+    newestBaseSnapshot?.id ? [newestBaseSnapshot.id] : [],
+  );
   const datedBackups = allBackups.filter(
     (b) =>
       b.name !== CLOUD_SYNC_FILENAME &&
+      !protectedIds.has(b.id) &&
       (b.name.startsWith('backup_central_estudos_') ||
         b.name.startsWith('backup_incremental_central_estudos_')),
   );
@@ -2035,6 +2083,9 @@ export async function downloadBackupFileFromDrive(
   );
 
   if (!res.ok) {
+    if (res.status === 403) {
+      markDriveFilePermissionBlocked(fileId);
+    }
     await throwDriveResponseError(res, 'Falha ao baixar backup do Google Drive');
   }
 
@@ -2296,6 +2347,7 @@ export async function downloadDriveFileBlob(
         errText.includes('appNotAuthorizedToFile') ||
         errText.includes('cannotDownloadFile')
       ) {
+        markDriveFilePermissionBlocked(fileId);
         throw new Error(
           'PICKER_FILE_PERMISSION: Selecione os arquivos pelo seletor oficial do Google Drive para liberar o download.',
         );
@@ -2493,6 +2545,12 @@ export async function openDrivePicker(options?: {
           } else {
             files.push(item);
           }
+        }
+        if (folders.length > 0 || files.length > 0) {
+          clearDrivePermissionBlockedFiles([
+            ...folders.map((f) => f.id),
+            ...files.map((f) => f.id),
+          ]);
         }
         resolve({ folders, files });
       } else if (data.action === pickerNs.Action.CANCEL) {

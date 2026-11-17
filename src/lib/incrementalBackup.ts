@@ -594,3 +594,298 @@ export function applyIncrementalDeltaToDatabase(
       : baseDb.preferences,
   };
 }
+
+function normalizeGoalMatchPart(val?: string): string {
+  return String(val || '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function getPendingMatchKeys(
+  item: {
+    data?: string;
+    dia_semana?: string;
+    materia?: string;
+    tempo?: string;
+    observacoes?: string;
+  },
+  fallbackDay?: string,
+  fallbackDate?: string,
+) {
+  const day = normalizeGoalMatchPart(item.dia_semana || fallbackDay);
+  const date = normalizeGoalMatchPart(item.data || fallbackDate);
+  const materia = normalizeGoalMatchPart(item.materia);
+  const tempo = normalizeGoalMatchPart(item.tempo);
+  const obs = normalizeGoalMatchPart(item.observacoes);
+  return {
+    day,
+    date,
+    materia,
+    strictKey: `${day}::${date}::${materia}::${tempo}::${obs}`,
+    baseKey: `${day}::${date}::${materia}::${obs}`,
+    dateMateriaKey: `${day}::${date}::${materia}`,
+    noDateKey: `${day}::${materia}::${obs}`,
+    noDateMateriaKey: `${day}::${materia}`,
+  };
+}
+
+function countByKey<T>(
+  items: T[],
+  keyFn: (item: T) => string,
+): Map<string, number> {
+  const map = new Map<string, number>();
+  for (const item of items) {
+    const k = keyFn(item);
+    map.set(k, (map.get(k) || 0) + 1);
+  }
+  return map;
+}
+
+/**
+ * Prevents additive merges (offline_guest -> account, offline -> Firestore/Drive, Drive TXT -> DB)
+ * from resurrecting items in `incompleteGoals`, `schedule`, or `weeklySchedules` that were already
+ * finalized into `completedGoals` or archived from `schedule` into `incompleteGoals`.
+ */
+export function reconcileCompletedAndArchivedItems(
+  mergedDb: StudyDatabase,
+  authoritativeDb: StudyDatabase,
+  olderBaseDb?: StudyDatabase | null,
+): StudyDatabase {
+  const olderCompletedIds = new Set((olderBaseDb?.completedGoals || []).map((g) => g.id));
+  const olderIncompleteIds = new Set((olderBaseDb?.incompleteGoals || []).map((g) => g.id));
+
+  const authCompleted = authoritativeDb.completedGoals || [];
+  const authIncomplete = authoritativeDb.incompleteGoals || [];
+  const authIncompleteIds = new Set(authIncomplete.map((g) => g.id));
+
+  // Pre-count how many copies of each signature remain intentionally pending in authoritativeDb
+  const authIncBaseCounts = countByKey(
+    authIncomplete,
+    (g) => getPendingMatchKeys(g).baseKey,
+  );
+  const authIncNoDateCounts = countByKey(
+    authIncomplete,
+    (g) => getPendingMatchKeys(g).noDateKey,
+  );
+
+  const authScheduleBaseCountsByDay = new Map<WeekdayName, Map<string, number>>();
+  const authScheduleNoDateCountsByDay = new Map<WeekdayName, Map<string, number>>();
+  for (const day of WEEKDAYS) {
+    const list = authoritativeDb.schedule?.[day] || [];
+    const fallbackDate = authoritativeDb.scheduleDayDates?.[day] || '';
+    authScheduleBaseCountsByDay.set(
+      day,
+      countByKey(list, (t) => getPendingMatchKeys(t, day, fallbackDate).baseKey),
+    );
+    authScheduleNoDateCountsByDay.set(
+      day,
+      countByKey(list, (t) => getPendingMatchKeys(t, day, fallbackDate).noDateKey),
+    );
+  }
+
+  // 1. Reconcile incompleteGoals against finalized completedGoals
+  let nextIncompleteGoals = [...(mergedDb.incompleteGoals || [])];
+  if (authCompleted.length > 0 && nextIncompleteGoals.length > 0) {
+    // Track how many times each signature is finalized in authoritativeDb
+    const finalizedExactCounts = new Map<string, number>();
+    const finalizedNewNoDateCounts = new Map<string, number>();
+    for (const g of authCompleted) {
+      const keys = getPendingMatchKeys(g);
+      if (!keys.materia) continue;
+      if (keys.date) {
+        finalizedExactCounts.set(keys.baseKey, (finalizedExactCounts.get(keys.baseKey) || 0) + 1);
+      }
+      if (!olderBaseDb || !olderCompletedIds.has(g.id)) {
+        finalizedNewNoDateCounts.set(
+          keys.noDateKey,
+          (finalizedNewNoDateCounts.get(keys.noDateKey) || 0) + 1,
+        );
+      }
+    }
+
+    const seenExactInc = new Map<string, number>();
+    const seenNoDateInc = new Map<string, number>();
+    // Keep authoritativeDb's own incompleteGoals first, so older duplicates from olderBaseDb are trimmed
+    const orderedForKeepCheck = [
+      ...nextIncompleteGoals.filter((g) => authIncompleteIds.has(g.id)),
+      ...nextIncompleteGoals.filter((g) => !authIncompleteIds.has(g.id)),
+    ];
+    const keptIncIds = new Set<string>();
+
+    for (const inc of orderedForKeepCheck) {
+      const keys = getPendingMatchKeys(inc);
+      const isFinalizedExact = keys.date && finalizedExactCounts.has(keys.baseKey);
+      const isFinalizedNewNoDate = finalizedNewNoDateCounts.has(keys.noDateKey);
+
+      if (isFinalizedExact) {
+        const allowed = authIncBaseCounts.get(keys.baseKey) || 0;
+        const used = seenExactInc.get(keys.baseKey) || 0;
+        if (used >= allowed) {
+          continue;
+        }
+        seenExactInc.set(keys.baseKey, used + 1);
+      } else if (isFinalizedNewNoDate && !authIncompleteIds.has(inc.id)) {
+        const allowed = authIncNoDateCounts.get(keys.noDateKey) || 0;
+        const used = seenNoDateInc.get(keys.noDateKey) || 0;
+        if (used >= allowed) {
+          continue;
+        }
+        seenNoDateInc.set(keys.noDateKey, used + 1);
+      }
+      keptIncIds.add(inc.id);
+    }
+
+    nextIncompleteGoals = nextIncompleteGoals.filter((g) => keptIncIds.has(g.id));
+  }
+
+  // 2. Collect rules for removing finalized/archived topics from schedule[day] and weeklySchedules
+  const exactDoneOrArchivedKeys = new Set<string>();
+  const newNoDateDoneOrArchivedKeys = new Set<string>();
+  const exactDoneDatesByNoDateKey = new Map<string, Set<string>>();
+
+  for (const g of authCompleted) {
+    const keys = getPendingMatchKeys(g);
+    if (!keys.materia) continue;
+    if (keys.date) {
+      exactDoneOrArchivedKeys.add(keys.baseKey);
+      exactDoneOrArchivedKeys.add(keys.dateMateriaKey);
+      if (!exactDoneDatesByNoDateKey.has(keys.noDateKey)) {
+        exactDoneDatesByNoDateKey.set(keys.noDateKey, new Set());
+      }
+      exactDoneDatesByNoDateKey.get(keys.noDateKey)!.add(keys.date);
+    }
+    if (!olderBaseDb || !olderCompletedIds.has(g.id)) {
+      newNoDateDoneOrArchivedKeys.add(keys.noDateKey);
+    }
+  }
+
+  for (const inc of authIncomplete) {
+    if (!olderBaseDb || !olderIncompleteIds.has(inc.id)) {
+      const keys = getPendingMatchKeys(inc);
+      if (!keys.materia) continue;
+      if (keys.date) {
+        exactDoneOrArchivedKeys.add(keys.baseKey);
+        exactDoneOrArchivedKeys.add(keys.dateMateriaKey);
+      }
+      newNoDateDoneOrArchivedKeys.add(keys.noDateKey);
+    }
+  }
+
+  const filterDayScheduleTopics = (
+    day: WeekdayName,
+    topics: ScheduleTopic[],
+    dayDates?: Partial<Record<WeekdayName, string>>,
+  ): { nextTopics: ScheduleTopic[]; changed: boolean } => {
+    if (!topics.length) return { nextTopics: topics, changed: false };
+
+    const authDayTopics = authoritativeDb.schedule?.[day] || [];
+    const authTopicIds = new Set(authDayTopics.map((t) => t.id));
+    const authBaseCounts = authScheduleBaseCountsByDay.get(day) || new Map<string, number>();
+    const authNoDateCounts = authScheduleNoDateCountsByDay.get(day) || new Map<string, number>();
+    const fallbackDate = dayDates?.[day] || '';
+
+    const usedExact = new Map<string, number>();
+    const usedNoDate = new Map<string, number>();
+    const orderedTopics = [
+      ...topics.filter((t) => authTopicIds.has(t.id)),
+      ...topics.filter((t) => !authTopicIds.has(t.id)),
+    ];
+    const keptTopicIds = new Set<string>();
+
+    for (const topic of orderedTopics) {
+      const keys = getPendingMatchKeys(topic, day, fallbackDate);
+      const hasExplicitTopicDate = Boolean(normalizeGoalMatchPart(topic.data));
+      const matchedExact =
+        keys.date &&
+        (exactDoneOrArchivedKeys.has(keys.baseKey) ||
+          exactDoneOrArchivedKeys.has(keys.dateMateriaKey));
+
+      const doneDatesForNoDate = exactDoneDatesByNoDateKey.get(keys.noDateKey);
+      const dateIncompatible =
+        hasExplicitTopicDate &&
+        Boolean(doneDatesForNoDate && doneDatesForNoDate.size > 0 && !doneDatesForNoDate.has(keys.date));
+
+      const matchedNewNoDate =
+        !dateIncompatible &&
+        newNoDateDoneOrArchivedKeys.has(keys.noDateKey) &&
+        !authTopicIds.has(topic.id);
+
+      if (matchedExact) {
+        const allowed = authBaseCounts.get(keys.baseKey) || 0;
+        const used = usedExact.get(keys.baseKey) || 0;
+        if (used >= allowed) {
+          continue;
+        }
+        usedExact.set(keys.baseKey, used + 1);
+      } else if (matchedNewNoDate) {
+        const allowed = authNoDateCounts.get(keys.noDateKey) || 0;
+        const used = usedNoDate.get(keys.noDateKey) || 0;
+        if (used >= allowed) {
+          continue;
+        }
+        usedNoDate.set(keys.noDateKey, used + 1);
+      }
+
+      keptTopicIds.add(topic.id);
+    }
+
+    if (keptTopicIds.size === topics.length) {
+      return { nextTopics: topics, changed: false };
+    }
+    return {
+      nextTopics: topics.filter((t) => keptTopicIds.has(t.id)),
+      changed: true,
+    };
+  };
+
+  let scheduleChanged = false;
+  const nextSchedule: ScheduleMap = { ...(mergedDb.schedule || {}) } as ScheduleMap;
+  for (const day of WEEKDAYS) {
+    const res = filterDayScheduleTopics(day, nextSchedule[day] || [], mergedDb.scheduleDayDates);
+    if (res.changed) {
+      nextSchedule[day] = res.nextTopics;
+      scheduleChanged = true;
+    }
+  }
+
+  let weeklyChanged = false;
+  const nextWeeklySchedules: Record<string, WeeklyScheduleFileRecord> = {
+    ...(mergedDb.weeklySchedules || {}),
+  };
+  for (const [wk, rec] of Object.entries(nextWeeklySchedules)) {
+    if (!rec || !rec.schedule) continue;
+    let recChanged = false;
+    const updatedRecSchedule: ScheduleMap = { ...rec.schedule };
+    for (const day of WEEKDAYS) {
+      const res = filterDayScheduleTopics(
+        day,
+        updatedRecSchedule[day] || [],
+        rec.scheduleDayDates || mergedDb.scheduleDayDates,
+      );
+      if (res.changed) {
+        updatedRecSchedule[day] = res.nextTopics;
+        recChanged = true;
+      }
+    }
+    if (recChanged) {
+      nextWeeklySchedules[wk] = {
+        ...rec,
+        schedule: updatedRecSchedule,
+      };
+      weeklyChanged = true;
+    }
+  }
+
+  const incompleteChanged = nextIncompleteGoals.length !== (mergedDb.incompleteGoals || []).length;
+  if (!incompleteChanged && !scheduleChanged && !weeklyChanged) {
+    return mergedDb;
+  }
+
+  return {
+    ...mergedDb,
+    ...(incompleteChanged ? { incompleteGoals: nextIncompleteGoals } : {}),
+    ...(scheduleChanged ? { schedule: nextSchedule } : {}),
+    ...(weeklyChanged ? { weeklySchedules: nextWeeklySchedules } : {}),
+  };
+}

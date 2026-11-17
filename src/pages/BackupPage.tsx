@@ -443,10 +443,10 @@ export const BackupPage: React.FC = () => {
 
       <Panel
         title="Banco de Dados Principal em Nuvem — Firebase Firestore (Tempo Real)"
-        subtitle="Todo o banco de dados do portal (29 tabelas: questões, simulados, cronograma, caderno de erros, lei seca, matriz de incidência, editais, discursivas e preferências) é salvo e sincronizado automaticamente no Firebase Firestore em tempo real no PC e no smartphone."
+        subtitle="Todo o banco de dados do portal (29 tabelas: questões, simulados, cronograma, caderno de erros, lei seca, matriz de incidência, editais, discursivas e preferências) é salvo e sincronizado automaticamente no Firebase Firestore no PC e no smartphone."
         className="mb-4"
       >
-        <div className="flex flex-col gap-3 p-3.5 rounded-xl border border-emerald-500/40 bg-emerald-500/8">
+        <div className="flex flex-col gap-3 p-3.5 rounded-xl border border-amber-500/40 bg-amber-500/8">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="flex items-start sm:items-center gap-3 min-w-0">
               <span
@@ -463,7 +463,7 @@ export const BackupPage: React.FC = () => {
                   <strong className="text-[13px] font-bold text-[var(--text)]">
                     {firebaseConnected
                       ? `Firebase Firestore Ativo (${googleUser?.email || 'Conta autenticada'})`
-                      : 'Firebase Firestore — Conecte sua conta Google para sincronização em tempo real'}
+                      : 'Firebase Firestore — Conecte sua conta Google para sincronização automática'}
                   </strong>
                   <span
                     className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-bold ${
@@ -482,12 +482,12 @@ export const BackupPage: React.FC = () => {
                 </div>
                 <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed mt-0.5">
                   {firebaseConnected
-                    ? `Estrutura particionada nativa (${firebaseChunkCount} partições Firestore sem limite de tamanho e sem necessidade do Google Picker no celular)${
+                    ? `Estrutura particionada na nuvem (${firebaseChunkCount} partições sem depender do Google Drive Picker)${
                         lastFirebaseSyncAt
                           ? ` · Última sincronização: ${new Date(lastFirebaseSyncAt).toLocaleString('pt-BR')}`
                           : ''
                       }`
-                    : 'No Firebase Firestore, seus dados sincronizam direto entre computador e celular sem depender do seletor de pastas do Google Drive.'}
+                    : 'Com o Firebase ativo, todas as alterações sincronizam em tempo real entre computador e smartphone.'}
                 </span>
               </div>
             </div>
@@ -501,7 +501,7 @@ export const BackupPage: React.FC = () => {
                   className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
                 >
                   <Cloud className="w-3.5 h-3.5 shrink-0" />
-                  <span>Conectar Conta ao Firebase</span>
+                  <span>Conectar Conta Google ao Firebase</span>
                 </button>
               ) : (
                 <>
@@ -522,7 +522,7 @@ export const BackupPage: React.FC = () => {
                     className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
                   >
                     <RefreshCcw className={`w-3.5 h-3.5 text-[var(--accent)] shrink-0 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
-                    <span>Gravar Banco Completo no Firebase</span>
+                    <span>Gravar Banco Completo no Firestore</span>
                   </button>
 
                   <button
@@ -572,9 +572,9 @@ export const BackupPage: React.FC = () => {
                     {firebaseLastError.category === 'auth'
                       ? 'Falha de autenticação Firebase'
                       : firebaseLastError.category === 'permission'
-                        ? 'Falha de permissão no Firestore'
+                        ? 'Permissão negada no Firestore'
                         : firebaseLastError.category === 'config'
-                          ? 'Erro de configuração do Firebase'
+                          ? 'Configuração do Firebase pendente ou incompatível'
                           : firebaseLastError.category === 'quota'
                             ? 'Limite de cota do Firestore'
                             : 'Erro na última sincronização Firebase'}
@@ -972,7 +972,7 @@ export const BackupPage: React.FC = () => {
                       ? lastCloudSyncAt
                         ? `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
                         : `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Renovação automática ativada`
-                      : `Conta e Firestore conectados (${googleUser?.email || 'Google'}), mas o navegador bloqueou a renovação silenciosa do Drive — toque em Reconectar Drive`
+                      : `Conta e Supabase conectados (${googleUser?.email || 'Google'}), mas o navegador bloqueou a renovação silenciosa do Drive — toque em Reconectar Drive`
                     : 'Nenhuma conta Google vinculada no momento. Conecte para ativar backups automáticos na nuvem'}
                 </span>
               </div>
@@ -1284,7 +1284,7 @@ export const BackupPage: React.FC = () => {
                 {drivePermissionNeedsPicker
                   ? 'seus dados já estão salvos neste navegador. Ative a pasta sincronizada do Google Drive para enviar suas alterações.'
                   : driveConnected && !driveTokenReady
-                  ? 'seus dados já estão seguros no Firestore e no navegador, mas o navegador impediu a renovação automática do Drive. Toque em Reconectar para enviar os arquivos.'
+                  ? 'seus dados já estão seguros no Supabase e no navegador, mas o navegador impediu a renovação automática do Drive. Toque em Reconectar para enviar os arquivos.'
                   : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta Google.'}
               </span>
               {drivePermissionNeedsPicker ? (

@@ -35,6 +35,7 @@ import {
   localDateIso,
   visibleName,
 } from '../lib/parsers';
+import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ScheduleMap, ScheduleTopic, WeekdayName, WeeklyScheduleFileRecord } from '../types/study';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 
@@ -131,7 +132,18 @@ export const SchedulePage: React.FC = () => {
   }, [db.contests, db.schedule]);
 
   const importTxtInputRef = useRef<HTMLInputElement | null>(null);
-  const [draft, setDraft] = useState<ScheduleMap>(db.schedule);
+  const hydrateScheduleWithDrafts = (source: ScheduleMap): ScheduleMap => {
+    const next: ScheduleMap = { ...source };
+    WEEKDAYS.forEach((day) => {
+      next[day] = (source[day] || []).map((topic) => {
+        if (!topic?.id) return topic;
+        const savedDraft = readFieldDraft<Partial<ScheduleTopic>>(`schedule_topic_${topic.id}`);
+        return savedDraft ? { ...topic, ...savedDraft } : topic;
+      });
+    });
+    return next;
+  };
+  const [draft, setDraft] = useState<ScheduleMap>(() => hydrateScheduleWithDrafts(db.schedule));
   const [openDays, setOpenDays] = useState<Record<string, boolean>>({
     [currentWeekday]: true,
   });
@@ -139,6 +151,12 @@ export const SchedulePage: React.FC = () => {
   const dirtyDaysRef = useRef<Set<WeekdayName>>(new Set());
   const draftRef = useRef<ScheduleMap>(draft);
   draftRef.current = draft;
+
+  const clearDayTopicDrafts = (topics: ScheduleTopic[]) => {
+    topics.forEach((t) => {
+      if (t?.id) clearFieldDraft(`schedule_topic_${t.id}`);
+    });
+  };
 
   const flushAllDirtyDays = () => {
     WEEKDAYS.forEach((d) => {
@@ -150,7 +168,9 @@ export const SchedulePage: React.FC = () => {
         }
         if (dirtyDaysRef.current.has(d)) {
           dirtyDaysRef.current.delete(d);
-          saveScheduleDay(d, draftRef.current[d] || [], true);
+          const dayList = draftRef.current[d] || [];
+          saveScheduleDay(d, dayList, true);
+          clearDayTopicDrafts(dayList);
         }
       }
     });
@@ -158,10 +178,10 @@ export const SchedulePage: React.FC = () => {
 
   useEffect(() => {
     setDraft((prev) => {
-      if (dirtyDaysRef.current.size === 0) return db.schedule;
-      const merged = { ...db.schedule };
+      if (dirtyDaysRef.current.size === 0) return hydrateScheduleWithDrafts(db.schedule);
+      const merged = hydrateScheduleWithDrafts(db.schedule);
       dirtyDaysRef.current.forEach((d) => {
-        merged[d] = prev[d] || db.schedule[d];
+        merged[d] = prev[d] || merged[d];
       });
       return merged;
     });
@@ -175,7 +195,9 @@ export const SchedulePage: React.FC = () => {
     }
     if (dirtyDaysRef.current.has(day) || explicitTopics) {
       dirtyDaysRef.current.delete(day);
-      saveScheduleDay(day, explicitTopics || draftRef.current[day] || [], true);
+      const topicsToSave = explicitTopics || draftRef.current[day] || [];
+      saveScheduleDay(day, topicsToSave, true);
+      clearDayTopicDrafts(topicsToSave);
     }
   };
 
@@ -189,7 +211,9 @@ export const SchedulePage: React.FC = () => {
         }
         if (dirtyDaysRef.current.has(d)) {
           dirtyDaysRef.current.delete(d);
-          saveScheduleDay(d, draftRef.current[d] || [], true);
+          const topicsToSave = draftRef.current[d] || [];
+          saveScheduleDay(d, topicsToSave, true);
+          clearDayTopicDrafts(topicsToSave);
         }
       });
     };
@@ -217,7 +241,11 @@ export const SchedulePage: React.FC = () => {
     const currentDay = draftRef.current[day] || [];
     if (!currentDay[idx]) return;
     const nextDay = [...currentDay];
-    nextDay[idx] = { ...nextDay[idx], ...patch };
+    const updatedTopic = { ...nextDay[idx], ...patch };
+    nextDay[idx] = updatedTopic;
+    if (updatedTopic.id && !options?.immediate) {
+      writeFieldDraft(`schedule_topic_${updatedTopic.id}`, updatedTopic);
+    }
     draftRef.current = { ...draftRef.current, [day]: nextDay };
     setDraft((prev) => ({ ...prev, [day]: nextDay }));
 
@@ -230,13 +258,16 @@ export const SchedulePage: React.FC = () => {
     if (options?.immediate) {
       dirtyDaysRef.current.delete(day);
       saveScheduleDay(day, nextDay, true);
+      if (updatedTopic.id) clearFieldDraft(`schedule_topic_${updatedTopic.id}`);
     } else {
       dirtyDaysRef.current.add(day);
       saveTimersRef.current[day] = window.setTimeout(() => {
         dirtyDaysRef.current.delete(day);
         delete saveTimersRef.current[day];
-        saveScheduleDay(day, draftRef.current[day] || nextDay, true);
-      }, 450);
+        const latestDay = draftRef.current[day] || nextDay;
+        saveScheduleDay(day, latestDay, true);
+        clearDayTopicDrafts(latestDay);
+      }, 1000);
     }
   };
 

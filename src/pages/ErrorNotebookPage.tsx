@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -28,6 +28,7 @@ import {
   visibleName,
 } from '../lib/parsers';
 import { exportErrorNotebookPdf } from '../lib/pdfExport';
+import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ErrorNotebookEntry } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
@@ -60,9 +61,26 @@ export const ErrorNotebookPage: React.FC = () => {
 
   const hideSearch = moduleVisibility('Caderno de Erros').hide_search;
 
-  const [newSubject, setNewSubject] = useState(fixedSubjects[0] || 'Direito Constitucional');
-  const [newType, setNewType] = useState(NOTE_TYPES[0]);
-  const [newText, setNewText] = useState('');
+  const savedNewDraft = readFieldDraft<{ materia?: string; tipo?: string; texto?: string }>(
+    'error_notebook_new_annotation',
+  );
+  const [newSubject, setNewSubject] = useState(
+    savedNewDraft?.materia || fixedSubjects[0] || 'Direito Constitucional',
+  );
+  const [newType, setNewType] = useState(savedNewDraft?.tipo || NOTE_TYPES[0]);
+  const [newText, setNewText] = useState(savedNewDraft?.texto || '');
+
+  useEffect(() => {
+    if (!newText.trim()) {
+      clearFieldDraft('error_notebook_new_annotation');
+    } else {
+      writeFieldDraft('error_notebook_new_annotation', {
+        materia: newSubject,
+        tipo: newType,
+        texto: newText,
+      });
+    }
+  }, [newSubject, newText, newType]);
 
   const [filterSubject, setFilterSubject] = useState('Todas as Matérias');
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
@@ -84,11 +102,16 @@ export const ErrorNotebookPage: React.FC = () => {
     materia: string;
     tipo: string;
     texto: string;
+    hasQuestion?: boolean;
     enunciado?: string;
     gabarito?: string;
     resposta?: string;
     comentario?: string;
   } | null>(null);
+  const editingEntryRef = useRef(editingEntry);
+  editingEntryRef.current = editingEntry;
+  const allErrorEntriesRef = useRef(allErrorEntries);
+  allErrorEntriesRef.current = allErrorEntries;
 
   const todayIso = localDateIso();
 
@@ -293,6 +316,7 @@ export const ErrorNotebookPage: React.FC = () => {
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     addAnnotation(newSubject, newType, newText);
+    clearFieldDraft('error_notebook_new_annotation');
     setNewText('');
   };
 
@@ -304,6 +328,65 @@ export const ErrorNotebookPage: React.FC = () => {
       toast((err as Error).message, true);
     }
   };
+
+  const flushEditingDraft = useCallback(
+    (silent = true) => {
+      const current = editingEntryRef.current;
+      if (!current) return;
+      const source = allErrorEntriesRef.current.find((e) => e.id === current.id);
+      if (!source) return;
+      const changed =
+        source.materia !== current.materia ||
+        source.tipo !== current.tipo ||
+        source.texto !== current.texto ||
+        (source.questao &&
+          ((source.questao.enunciado ?? '') !== (current.enunciado ?? '') ||
+            (source.questao.gabarito ?? '') !== (current.gabarito ?? '') ||
+            (source.questao.resposta ?? '') !== (current.resposta ?? '') ||
+            (source.questao.comentario ?? '') !== (current.comentario ?? '')));
+      if (!changed) {
+        clearFieldDraft(`error_notebook_edit_${current.id}`);
+        return;
+      }
+      updateAnnotation(
+        current.id,
+        current.materia,
+        current.tipo,
+        current.texto,
+        source.questao || current.hasQuestion
+          ? {
+              enunciado: current.enunciado,
+              gabarito: current.gabarito,
+              resposta: current.resposta,
+              comentario: current.comentario,
+            }
+          : undefined,
+        silent,
+      );
+      clearFieldDraft(`error_notebook_edit_${current.id}`);
+    },
+    [updateAnnotation],
+  );
+
+  useEffect(() => {
+    if (!editingEntry) return;
+    writeFieldDraft(`error_notebook_edit_${editingEntry.id}`, editingEntry);
+    const timer = window.setTimeout(() => flushEditingDraft(true), 1000);
+    return () => window.clearTimeout(timer);
+  }, [editingEntry, flushEditingDraft]);
+
+  useEffect(() => {
+    const handleFlush = () => flushEditingDraft(true);
+    window.addEventListener('central-estudos:flush-drafts', handleFlush);
+    window.addEventListener('beforeunload', handleFlush);
+    window.addEventListener('pagehide', handleFlush);
+    return () => {
+      window.removeEventListener('central-estudos:flush-drafts', handleFlush);
+      window.removeEventListener('beforeunload', handleFlush);
+      window.removeEventListener('pagehide', handleFlush);
+      handleFlush();
+    };
+  }, [flushEditingDraft]);
 
   const handleSaveEdit = (entry: ErrorNotebookEntry) => {
     if (!editingEntry || editingEntry.id !== entry.id) return;
@@ -321,6 +404,7 @@ export const ErrorNotebookPage: React.FC = () => {
           }
         : undefined,
     );
+    clearFieldDraft(`error_notebook_edit_${entry.id}`);
     setEditingEntry(null);
   };
 
@@ -1080,22 +1164,37 @@ export const ErrorNotebookPage: React.FC = () => {
 
                     <button
                       type="button"
-                      onClick={() =>
+                      onClick={() => {
+                        if (isEditing) {
+                          flushEditingDraft(true);
+                          setEditingEntry(null);
+                          return;
+                        }
+                        const savedDraft = readFieldDraft<{
+                          id: string;
+                          materia: string;
+                          tipo: string;
+                          texto: string;
+                          hasQuestion?: boolean;
+                          enunciado?: string;
+                          gabarito?: string;
+                          resposta?: string;
+                          comentario?: string;
+                        }>(`error_notebook_edit_${entry.id}`);
                         setEditingEntry(
-                          isEditing
-                            ? null
-                            : {
-                                id: entry.id,
-                                materia: selectedSubjectVal,
-                                tipo: entry.tipo,
-                                texto: entry.texto,
-                                enunciado: entry.questao?.enunciado ?? '',
-                                gabarito: entry.questao?.gabarito ?? '',
-                                resposta: entry.questao?.resposta ?? '',
-                                comentario: entry.questao?.comentario ?? '',
-                              },
-                        )
-                      }
+                          savedDraft || {
+                            id: entry.id,
+                            materia: selectedSubjectVal,
+                            tipo: entry.tipo,
+                            texto: entry.texto,
+                            hasQuestion: Boolean(entry.questao),
+                            enunciado: entry.questao?.enunciado ?? '',
+                            gabarito: entry.questao?.gabarito ?? '',
+                            resposta: entry.questao?.resposta ?? '',
+                            comentario: entry.questao?.comentario ?? '',
+                          },
+                        );
+                      }}
                       className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
                     >
                       <Pencil className="w-3 h-3" />
@@ -1149,6 +1248,7 @@ export const ErrorNotebookPage: React.FC = () => {
                       <textarea
                         value={editingEntry.texto}
                         onChange={(e) => setEditingEntry({ ...editingEntry, texto: e.target.value })}
+                        onBlur={() => flushEditingDraft(true)}
                         rows={3}
                         className="ce-textarea"
                       />
@@ -1164,6 +1264,7 @@ export const ErrorNotebookPage: React.FC = () => {
                             onChange={(e) =>
                               setEditingEntry({ ...editingEntry, enunciado: e.target.value })
                             }
+                            onBlur={() => flushEditingDraft(true)}
                             rows={2}
                             className="ce-textarea"
                           />
@@ -1178,6 +1279,7 @@ export const ErrorNotebookPage: React.FC = () => {
                             onChange={(e) =>
                               setEditingEntry({ ...editingEntry, resposta: e.target.value })
                             }
+                            onBlur={() => flushEditingDraft(true)}
                             placeholder="Ex.: C, E, A..."
                             className="ce-input"
                           />
@@ -1192,6 +1294,7 @@ export const ErrorNotebookPage: React.FC = () => {
                             onChange={(e) =>
                               setEditingEntry({ ...editingEntry, gabarito: e.target.value })
                             }
+                            onBlur={() => flushEditingDraft(true)}
                             placeholder="Ex.: C, E, A..."
                             className="ce-input"
                           />
@@ -1201,7 +1304,10 @@ export const ErrorNotebookPage: React.FC = () => {
                     <div className="sm:col-span-2 flex justify-end gap-2">
                       <button
                         type="button"
-                        onClick={() => setEditingEntry(null)}
+                        onClick={() => {
+                          clearFieldDraft(`error_notebook_edit_${entry.id}`);
+                          setEditingEntry(null);
+                        }}
                         className="px-3.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-bold hover:text-[var(--text)] whitespace-nowrap"
                       >
                         Cancelar

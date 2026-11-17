@@ -9,6 +9,7 @@ import {
   isoWeekStartDate,
   localDateIso,
 } from '../lib/parsers';
+import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { CompletedGoal } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
@@ -46,11 +47,14 @@ export const CompletedGoalsPage: React.FC = () => {
   const weekSundayIso = useMemo(() => addDaysIso(weekMondayIso, 6), [weekMondayIso]);
 
   const [weeklyNoteDraft, setWeeklyNoteDraft] = useState(
-    () => db.weeklyGoalNotes[weekMondayIso] || '',
+    () =>
+      readFieldDraft<string>(`weekly_note_${weekMondayIso}`) ??
+      db.weeklyGoalNotes[weekMondayIso] ??
+      '',
   );
   const draftStateRef = useRef({
     weekMondayIso,
-    draft: db.weeklyGoalNotes[weekMondayIso] || '',
+    draft: weeklyNoteDraft,
     saved: db.weeklyGoalNotes[weekMondayIso] || '',
   });
   draftStateRef.current = {
@@ -60,7 +64,8 @@ export const CompletedGoalsPage: React.FC = () => {
   };
 
   useEffect(() => {
-    setWeeklyNoteDraft(db.weeklyGoalNotes[weekMondayIso] || '');
+    const savedDraft = readFieldDraft<string>(`weekly_note_${weekMondayIso}`);
+    setWeeklyNoteDraft(savedDraft ?? db.weeklyGoalNotes[weekMondayIso] ?? '');
   }, [db.weeklyGoalNotes, weekMondayIso]);
 
   const flushWeeklyDraft = useCallback(() => {
@@ -68,14 +73,20 @@ export const CompletedGoalsPage: React.FC = () => {
     if (draft.trim() !== saved.trim()) {
       saveWeeklyGoalNote(wIso, draft, true);
     }
+    clearFieldDraft(`weekly_note_${wIso}`);
   }, [saveWeeklyGoalNote]);
 
   useEffect(() => {
     const saved = db.weeklyGoalNotes[weekMondayIso] || '';
-    if (weeklyNoteDraft.trim() === saved.trim()) return;
+    if (weeklyNoteDraft.trim() === saved.trim()) {
+      clearFieldDraft(`weekly_note_${weekMondayIso}`);
+      return;
+    }
+    writeFieldDraft(`weekly_note_${weekMondayIso}`, weeklyNoteDraft);
     const timer = window.setTimeout(() => {
       saveWeeklyGoalNote(weekMondayIso, weeklyNoteDraft, true);
-    }, 450);
+      clearFieldDraft(`weekly_note_${weekMondayIso}`);
+    }, 1000);
     return () => window.clearTimeout(timer);
   }, [db.weeklyGoalNotes, saveWeeklyGoalNote, weekMondayIso, weeklyNoteDraft]);
 

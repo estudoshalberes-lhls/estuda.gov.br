@@ -33,6 +33,7 @@ import {
   visibleName,
 } from '../lib/parsers';
 import { exportIncidenceMatrixPdf } from '../lib/pdfExport';
+import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { IncidenceGrade, LawItem, SavedIncidenceFilter } from '../types/study';
 import {
   ArticleJumpBar,
@@ -121,18 +122,30 @@ export const IncidenceMatrixPage: React.FC = () => {
     const folder = activeFolderRef.current;
     if (!folder) return;
     const currentItems = folderItemsRef.current;
+    const keysToClear: string[] = [];
     Object.entries(draftsRef.current).forEach(([itemId, d]) => {
       const target = currentItems.find((it) => it.id === itemId);
       if (!target) return;
       if (target.grau !== d.grau || (target.observacao || '').trim() !== d.observacao.trim()) {
         updateLawItem(folder, itemId, d.grau, d.observacao, undefined, undefined, undefined, true);
       }
+      clearFieldDraft(`law_obs_${folder}_${itemId}`);
+      keysToClear.push(itemId);
     });
+    if (keysToClear.length > 0) {
+      setDrafts((prev) => {
+        const next = { ...prev };
+        keysToClear.forEach((id) => {
+          delete next[id];
+        });
+        return next;
+      });
+    }
   }, [updateLawItem]);
 
   useEffect(() => {
     if (Object.keys(drafts).length === 0) return;
-    const timer = window.setTimeout(() => flushRowDrafts(), 450);
+    const timer = window.setTimeout(() => flushRowDrafts(), 1000);
     return () => window.clearTimeout(timer);
   }, [drafts, flushRowDrafts]);
 
@@ -190,16 +203,35 @@ export const IncidenceMatrixPage: React.FC = () => {
 
   const handleStartEdit = (item: LawItem) => {
     setEditingItemId(item.id);
-    setEditDraft({
-      dispositivo: item.dispositivo,
-      texto: item.texto,
-      dica: item.dica || '',
-      observacao: item.observacao || '',
-      grau: item.grau,
-    });
+    const savedModalDraft = activeFolder
+      ? readFieldDraft<{
+          dispositivo: string;
+          texto: string;
+          dica: string;
+          observacao: string;
+          grau: IncidenceGrade;
+        }>(`law_modal_${activeFolder}_${item.id}`)
+      : null;
+    setEditDraft(
+      savedModalDraft || {
+        dispositivo: item.dispositivo,
+        texto: item.texto,
+        dica: item.dica || '',
+        observacao: item.observacao || '',
+        grau: item.grau,
+      },
+    );
   };
 
+  useEffect(() => {
+    if (!editingItemId || !activeFolder) return;
+    writeFieldDraft(`law_modal_${activeFolder}_${editingItemId}`, editDraft);
+  }, [activeFolder, editDraft, editingItemId]);
+
   const handleCancelEdit = () => {
+    if (editingItemId && activeFolder) {
+      clearFieldDraft(`law_modal_${activeFolder}_${editingItemId}`);
+    }
     setEditingItemId(null);
   };
 
@@ -218,6 +250,7 @@ export const IncidenceMatrixPage: React.FC = () => {
       editDraft.texto,
       editDraft.dica,
     );
+    clearFieldDraft(`law_modal_${activeFolder}_${itemId}`);
     setEditingItemId(null);
   };
 
@@ -279,8 +312,15 @@ export const IncidenceMatrixPage: React.FC = () => {
     setManualTip('');
   };
 
-  const getRowDraft = (item: LawItem) =>
-    drafts[item.id] || { grau: item.grau, observacao: item.observacao };
+  const getRowDraft = (item: LawItem) => {
+    if (drafts[item.id]) return drafts[item.id];
+    const persisted = activeFolder
+      ? readFieldDraft<{ grau: IncidenceGrade; observacao: string }>(
+          `law_obs_${activeFolder}_${item.id}`,
+        )
+      : null;
+    return persisted || { grau: item.grau, observacao: item.observacao };
+  };
 
   const availableArticleKeys = useMemo(() => {
     if (!folderData) return [];
@@ -1557,13 +1597,12 @@ export const IncidenceMatrixPage: React.FC = () => {
                                     value={draft.grau}
                                     onChange={(e) => {
                                       const nextGrau = e.target.value as IncidenceGrade;
+                                      const nextRow = { ...draft, grau: nextGrau };
                                       setDrafts((prev) => ({
                                         ...prev,
-                                        [item.id]: {
-                                          ...draft,
-                                          grau: nextGrau,
-                                        },
+                                        [item.id]: nextRow,
                                       }));
+                                      writeFieldDraft(`law_obs_${activeFolder}_${item.id}`, nextRow);
                                       updateLawItem(
                                         activeFolder,
                                         item.id,
@@ -1574,6 +1613,7 @@ export const IncidenceMatrixPage: React.FC = () => {
                                         undefined,
                                         true,
                                       );
+                                      clearFieldDraft(`law_obs_${activeFolder}_${item.id}`);
                                     }}
                                     className={`ce-select font-bold ${gradeCls}`}
                                   >
@@ -1591,13 +1631,15 @@ export const IncidenceMatrixPage: React.FC = () => {
                                   <input
                                     type="text"
                                     value={draft.observacao}
-                                    onChange={(e) =>
+                                    onChange={(e) => {
+                                      const nextRow = { ...draft, observacao: e.target.value };
+                                      writeFieldDraft(`law_obs_${activeFolder}_${item.id}`, nextRow);
                                       setDrafts((prev) => ({
                                         ...prev,
-                                        [item.id]: { ...draft, observacao: e.target.value },
-                                      }))
-                                    }
-                                    onBlur={() =>
+                                        [item.id]: nextRow,
+                                      }));
+                                    }}
+                                    onBlur={() => {
                                       updateLawItem(
                                         activeFolder,
                                         item.id,
@@ -1607,22 +1649,29 @@ export const IncidenceMatrixPage: React.FC = () => {
                                         undefined,
                                         undefined,
                                         true,
-                                      )
-                                    }
+                                      );
+                                      clearFieldDraft(`law_obs_${activeFolder}_${item.id}`);
+                                    }}
                                     placeholder="Observação de incidência, banca ou questão..."
                                     className="ce-input"
                                   />
 
                                   <button
                                     type="button"
-                                    onClick={() =>
+                                    onClick={() => {
                                       updateLawItem(
                                         activeFolder,
                                         item.id,
                                         draft.grau,
                                         draft.observacao,
-                                      )
-                                    }
+                                      );
+                                      clearFieldDraft(`law_obs_${activeFolder}_${item.id}`);
+                                      setDrafts((prev) => {
+                                        const next = { ...prev };
+                                        delete next[item.id];
+                                        return next;
+                                      });
+                                    }}
                                     className="inline-flex items-center justify-center gap-1.5 h-[38px] px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
                                   >
                                     <Save className="w-3.5 h-3.5 text-[var(--accent)]" />
