@@ -133,7 +133,19 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
     }
   };
 
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
+  const isLocalhostPortable =
+    currentHost.toLowerCase() === 'localhost' || currentHost.toLowerCase() === '127.0.0.1';
+
   const handleGoogleLogin = async (forceAccountPicker = false) => {
+    if (isLocalhostPortable) {
+      toast(
+        'Modo Portátil Local ativo! Seus dados são salvos automaticamente na pasta Dados_Estudo_Local do seu PC (sem precisar de login Google).',
+      );
+      onContinueOffline();
+      return;
+    }
     setLoading(true);
     setErrorMessage(null);
     try {
@@ -162,8 +174,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
         displayedError.toLowerCase().includes('redirect_uri_mismatch')),
   );
   const needsDomainHelp = isUnauthorizedDomainError || isOriginMismatchError;
-  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
-  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
   const copyValue = isUnauthorizedDomainError ? currentHost : currentOrigin;
   const domainConsoleUrl = isUnauthorizedDomainError
     ? `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`

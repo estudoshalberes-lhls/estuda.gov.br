@@ -6002,32 +6002,39 @@ function isEmailAuthorized(email?: string | null): boolean {
           lastCloudHashRef.current = null;
           lastBackupHashRef.current = null;
           lastBackupIsoRef.current = null;
-
-          void loadScopedDatabaseJson(newScope).then((idbSnap) => {
-            if (!idbSnap || activeScopeRef.current !== newScope) return;
-            let lsHas = false;
-            try {
-              lsHas = Boolean(localStorage.getItem(getDbStorageKey(newScope)));
-            } catch {
-              lsHas = false;
-            }
-            if (!shouldPreferIdbSnapshot(newScope, idbSnap, lsHas)) return;
-            try {
-              const idbParsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
-              isRestoringRef.current = true;
-              skipPersistDbRef.current = idbParsed;
-              lastPersistedDbRef.current = idbParsed;
-              lastPersistedDbHashRef.current = computeDatabaseContentHash(idbParsed);
-              setDb(idbParsed);
-              dbRef.current = idbParsed;
-              window.setTimeout(() => {
-                isRestoringRef.current = false;
-              }, 60);
-            } catch {
-              // ignore
-            }
-          });
         }
+
+        void loadScopedDatabaseJson(newScope).then((idbSnap) => {
+          if (!idbSnap || activeScopeRef.current !== newScope) return;
+          let lsHas = false;
+          try {
+            lsHas = Boolean(localStorage.getItem(getDbStorageKey(newScope)));
+          } catch {
+            lsHas = false;
+          }
+          const isLocalhost =
+            typeof window !== 'undefined' &&
+            (window.location.hostname.toLowerCase() === 'localhost' ||
+              window.location.hostname.toLowerCase() === '127.0.0.1');
+          if (!isLocalhost && !shouldPreferIdbSnapshot(newScope, idbSnap, lsHas)) return;
+          if (isLocalhost && lsHas && !shouldPreferIdbSnapshot(newScope, idbSnap, lsHas) && !isUntouchedSeedDatabase(dbRef.current)) {
+            return;
+          }
+          try {
+            const idbParsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+            isRestoringRef.current = true;
+            skipPersistDbRef.current = idbParsed;
+            lastPersistedDbRef.current = idbParsed;
+            lastPersistedDbHashRef.current = computeDatabaseContentHash(idbParsed);
+            setDb(idbParsed);
+            dbRef.current = idbParsed;
+            window.setTimeout(() => {
+              isRestoringRef.current = false;
+            }, 60);
+          } catch {
+            // ignore
+          }
+        });
 
         lastSyncedFirestoreRef.current = null;
 
@@ -6515,7 +6522,16 @@ function isEmailAuthorized(email?: string | null): boolean {
       }
       return false;
     } catch (e: any) {
+      const code = String(e?.code || '');
       const msg = e?.message || 'Falha na autenticação com o Google.';
+      if (
+        code === 'auth/popup-closed-by-user' ||
+        code === 'auth/cancelled-popup-request' ||
+        msg.includes('fechada antes de concluir')
+      ) {
+        toast('Login com o Google cancelado. Você pode continuar usando o modo local normalmente.');
+        return false;
+      }
       setAuthError(msg);
       toast(`Erro ao conectar ao Google: ${msg}`, true);
       return false;

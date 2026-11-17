@@ -506,6 +506,9 @@ async function startServer() {
         Buffer.from(payloadStr, 'utf-8').toString('base64');
     }
 
+    const buildStamp = String(Date.now());
+    filesMap['dist/.build-stamp'] = Buffer.from(buildStamp, 'utf-8').toString('base64');
+
     const streamLines: string[] = [];
     for (const [relPath, b64] of Object.entries(filesMap)) {
       streamLines.push(`FILE\t${relPath}\t${b64}`);
@@ -526,6 +529,7 @@ async function startServer() {
       'title estuda.gov.br - Aplicativo Portatil 100%% Offline',
       'set "ESTUDAGOV_BAT_PATH=%~f0"',
       'set "ESTUDAGOV_BASE_DIR=%~dp0"',
+      `set "ESTUDAGOV_BUILD_STAMP=${buildStamp}"`,
       '',
       'echo ====================================================================',
       'echo   estuda.gov.br - Inicializador Portatil 100%% Offline',
@@ -536,13 +540,16 @@ async function startServer() {
       '  "$ErrorActionPreference = \'Stop\'; ^',
       '   $batPath = $env:ESTUDAGOV_BAT_PATH; ^',
       '   $baseDir = $env:ESTUDAGOV_BASE_DIR; ^',
+      '   $stamp = $env:ESTUDAGOV_BUILD_STAMP; ^',
       '   $appDir = if (Test-Path -LiteralPath (Join-Path $baseDir \'package.json\')) { $baseDir } else { Join-Path $baseDir \'EstudaGov_Portatil\' }; ^',
       '   if (!(Test-Path -LiteralPath $appDir)) { New-Item -ItemType Directory -Path $appDir -Force | Out-Null }; ^',
       '   Write-Host (\'Pasta do aplicativo: \' + $appDir) -ForegroundColor Cyan; ^',
       '   $distIndex = Join-Path $appDir \'dist\\index.html\'; ^',
       '   $srvMjs = Join-Path $appDir \'servidor-offline.mjs\'; ^',
-      '   if (!(Test-Path -LiteralPath $distIndex) -or !(Test-Path -LiteralPath $srvMjs)) { ^',
-      '     Write-Host \'[1/2] Extraindo pacote offline (primeira execucao)...\' -ForegroundColor Yellow; ^',
+      '   $stampFile = Join-Path $appDir \'dist\\.build-stamp\'; ^',
+      '   $curStamp = if (Test-Path -LiteralPath $stampFile) { (Get-Content -LiteralPath $stampFile -Raw).Trim() } else { \'\' }; ^',
+      '   if (!(Test-Path -LiteralPath $distIndex) -or !(Test-Path -LiteralPath $srvMjs) -or ($curStamp -ne $stamp)) { ^',
+      '     Write-Host \'[1/2] Preparando/atualizando arquivos do aplicativo offline...\' -ForegroundColor Yellow; ^',
       '     $payloadB64 = $null; ^',
       '     $fsReader = [System.IO.File]::OpenText($batPath); ^',
       '     try { while ($null -ne ($ln = $fsReader.ReadLine())) { if ($ln.StartsWith(\'::ESTUDAGOV_PAYLOAD_B64::\')) { $payloadB64 = $ln.Substring(25); break } } } finally { $fsReader.Close() }; ^',
@@ -565,7 +572,7 @@ async function startServer() {
       '         [System.IO.File]::WriteAllBytes($outPath, [Convert]::FromBase64String($parts[2])); ^',
       '       } ^',
       '     } finally { $sr.Close(); $gz.Close(); $ms.Close() }; ^',
-      '     Write-Host \'Arquivos extraidos com sucesso!\' -ForegroundColor Green; ^',
+      '     Write-Host \'Arquivos prontos!\' -ForegroundColor Green; ^',
       '   }; ^',
       '   $dataDir = Join-Path $appDir \'Dados_Estudo_Local\'; ^',
       '   if (!(Test-Path -LiteralPath $dataDir)) { New-Item -ItemType Directory -Path $dataDir -Force | Out-Null }; ^',
