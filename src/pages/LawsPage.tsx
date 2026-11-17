@@ -12,10 +12,12 @@ import {
   Link2,
   ListChecks,
   Newspaper,
+  Play,
   RefreshCw,
   Search,
   Sparkles,
   Undo2,
+  Volume2,
   X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
@@ -43,6 +45,7 @@ import {
   useLawReadingPrefs,
 } from '../components/ui/LawReadingTools';
 import { FilePreview } from '../components/ui/FilePreview';
+import { LawVoicePlayerBar, useLawVoiceReader } from '../components/ui/LawVoicePlayer';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
 export const LawsPage: React.FC = () => {
@@ -347,6 +350,34 @@ export const LawsPage: React.FC = () => {
     editalFilterContestId,
     itemToLinksMap,
   ]);
+
+  const voiceReader = useLawVoiceReader({
+    activeFolder,
+    items: filteredItems,
+    onPositionChange: (articleKey) => {
+      if (activeFolder) {
+        setLawLastPosition(activeFolder, articleKey);
+      }
+    },
+    onAutoMarkItemRead: (item) => {
+      if (activeFolder && !readSet.has(item.id)) {
+        markLawItemsRead(activeFolder, [item.id], true);
+      }
+    },
+  });
+
+  useEffect(() => {
+    if (!voiceReader.speakingItemId) return;
+    const t = window.setTimeout(() => {
+      const targetEl = document.querySelector(
+        `[data-voice-item-id="${CSS.escape(voiceReader.speakingItemId!)}"]`,
+      );
+      if (targetEl instanceof HTMLElement) {
+        targetEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+    }, 60);
+    return () => window.clearTimeout(t);
+  }, [voiceReader.speakingItemId, readerTab]);
 
   const continuousText = useMemo(() => {
     if (!filteredItems.length) return '';
@@ -877,7 +908,31 @@ export const LawsPage: React.FC = () => {
             items={folderData?.items || []}
             readSet={readSet}
             lastReadPosition={db.lawLastReadPosition?.[activeFolder]}
+            activeArticleKey={
+              voiceReader.isPlaying && voiceReader.currentItem
+                ? (voiceReader.currentItem.artigo_base || voiceReader.currentItem.dispositivo || '').trim()
+                : undefined
+            }
             onSelectArticle={handleJumpToArticle}
+          />
+
+          <LawVoicePlayerBar
+            isSupported={voiceReader.isSupported}
+            isPlaying={voiceReader.isPlaying}
+            isPaused={voiceReader.isPaused}
+            activeIndex={voiceReader.activeIndex}
+            totalItems={filteredItems.length}
+            currentItem={voiceReader.currentItem}
+            voices={voiceReader.voices}
+            rate={voiceReader.rate}
+            voiceURI={voiceReader.voiceURI}
+            autoMarkRead={voiceReader.autoMarkRead}
+            onTogglePlayPause={voiceReader.togglePlayPause}
+            onStop={voiceReader.stop}
+            onStepArticle={voiceReader.stepArticle}
+            onChangeRate={voiceReader.setRate}
+            onChangeVoice={voiceReader.setVoiceURI}
+            onToggleAutoMarkRead={voiceReader.toggleAutoMarkRead}
           />
 
           {readerTab === 'continuous' ? (
@@ -1168,35 +1223,55 @@ export const LawsPage: React.FC = () => {
                                 ))}
                               </div>
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (allGroupRead) {
-                                    markLawItemsRead(
-                                      activeFolder,
-                                      group.items.map((it) => it.id),
-                                      false,
-                                    );
-                                  } else {
-                                    addLawItemReadDate(
-                                      activeFolder,
-                                      group.items.map((it) => it.id),
-                                      localDateIso(),
-                                    );
-                                  }
-                                }}
-                                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-bold transition-colors ${
-                                  allGroupRead
-                                    ? 'border-[var(--good)] bg-[var(--good)] text-white'
-                                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--good)]'
-                                }`}
-                              >
-                                <Check className="w-3 h-3" />
-                                {allGroupRead
-                                  ? 'Artigo lido'
-                                  : `Marcar lido (${groupReadCount}/${group.items.length})`}
-                              </button>
+                              <div className="flex items-center gap-1.5">
+                                {voiceReader.isSupported && group.items[0] && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      voiceReader.playFromItemId(group.items[0].id);
+                                    }}
+                                    title={`Ouvir a partir de ${group.key}`}
+                                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-bold transition-colors ${
+                                      group.items.some((it) => it.id === voiceReader.speakingItemId)
+                                        ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--accent)] hover:border-[var(--accent)]'
+                                    }`}
+                                  >
+                                    <Volume2 className="w-3 h-3" />
+                                    Ouvir
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (allGroupRead) {
+                                      markLawItemsRead(
+                                        activeFolder,
+                                        group.items.map((it) => it.id),
+                                        false,
+                                      );
+                                    } else {
+                                      addLawItemReadDate(
+                                        activeFolder,
+                                        group.items.map((it) => it.id),
+                                        localDateIso(),
+                                      );
+                                    }
+                                  }}
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-bold transition-colors ${
+                                    allGroupRead
+                                      ? 'border-[var(--good)] bg-[var(--good)] text-white'
+                                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--good)]'
+                                  }`}
+                                >
+                                  <Check className="w-3 h-3" />
+                                  {allGroupRead
+                                    ? 'Artigo lido'
+                                    : `Marcar lido (${groupReadCount}/${group.items.length})`}
+                                </button>
+                              </div>
                             </div>
 
                             <div className="space-y-2 whitespace-pre-wrap">
@@ -1224,9 +1299,27 @@ export const LawsPage: React.FC = () => {
                                   : '';
                                 const lineStr = `${displayDevice} — ${item.texto}`;
                                 const lineSegments = buildHighlightedSegments(lineStr, highlights);
+                                const isSpeakingThis = voiceReader.speakingItemId === item.id;
 
                                 return (
-                                  <div key={item.id} className={indentCls}>
+                                  <div
+                                    key={item.id}
+                                    data-voice-item-id={item.id}
+                                    className={`${indentCls} transition-colors ${
+                                      isSpeakingThis
+                                        ? 'rounded-lg bg-[var(--accent)]/12 ring-2 ring-[var(--accent)] px-2.5 py-1.5 -mx-1'
+                                        : ''
+                                    }`}
+                                  >
+                                    {isSpeakingThis && (
+                                      <div
+                                        className="inline-flex items-center gap-1 mb-1 px-2 py-0.5 rounded bg-[var(--accent)] text-white text-[10px] font-bold select-none"
+                                        contentEditable={false}
+                                      >
+                                        <Volume2 className="w-3 h-3 animate-pulse" />
+                                        Lendo em voz alta
+                                      </div>
+                                    )}
                                     <div>
                                       {lineSegments.map((seg, sIdx) =>
                                         seg.color ? (
@@ -1428,13 +1521,18 @@ export const LawsPage: React.FC = () => {
                     const assignAnchor = !seenChecklistArticleAnchors.has(anchorCandidate);
                     if (assignAnchor) seenChecklistArticleAnchors.add(anchorCandidate);
 
+                    const isSpeakingThis = voiceReader.speakingItemId === item.id;
+
                     return (
                       <div
                         key={item.id}
                         id={assignAnchor ? anchorCandidate : undefined}
+                        data-voice-item-id={item.id}
                         onClick={() => setLawLastPosition(activeFolder, articleTarget)}
                         className={`rounded-xl border p-3 transition-colors ${
-                          isMatched
+                          isSpeakingThis
+                            ? 'border-[var(--accent)] bg-[var(--accent)]/12 ring-2 ring-[var(--accent)]'
+                            : isMatched
                             ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
                             : isRead
                             ? 'border-[var(--good)]/40 bg-[var(--good)]/5'
@@ -1447,6 +1545,12 @@ export const LawsPage: React.FC = () => {
                               <strong className="text-[13px] font-bold text-[var(--text)]">
                                 {deviceTarget}
                               </strong>
+                              {isSpeakingThis && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-[var(--accent)] text-white text-[10px] font-bold">
+                                  <Volume2 className="w-3 h-3 animate-pulse" />
+                                  Ouvindo
+                                </span>
+                              )}
                               {item.grau && item.grau !== 'Não Classificado' && (
                                 <span
                                   className={`px-1.5 py-0.5 rounded border text-[10px] font-bold grade-badge-${incidenceColorClass(
@@ -1527,6 +1631,24 @@ export const LawsPage: React.FC = () => {
                             )}
                           </div>
                           <div className="flex flex-col sm:flex-row items-end sm:items-center gap-1.5 shrink-0">
+                            {voiceReader.isSupported && (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  voiceReader.playFromItemId(item.id);
+                                }}
+                                title="Ouvir em voz a partir deste dispositivo"
+                                className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition-colors ${
+                                  isSpeakingThis
+                                    ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--accent)] hover:border-[var(--accent)]'
+                                }`}
+                              >
+                                <Play className="w-3 h-3" />
+                                Ouvir
+                              </button>
+                            )}
                             <button
                               type="button"
                               onClick={() => {

@@ -1,0 +1,73 @@
+import { auth } from './googleDrive';
+
+export interface AiExtractedEditalTopic {
+  materia: string;
+  titulo: string;
+  observacao?: string;
+}
+
+export interface AiEssayReviewResult {
+  feedback: string;
+  scoreEstimate?: string;
+  strengths?: string[];
+  improvements?: string[];
+}
+
+export interface AiGeneratedQuestion {
+  materia: string;
+  enunciado: string;
+  alternativas: Record<string, string>;
+  gabarito: string;
+  comentario: string;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const user = auth.currentUser;
+  if (!user) {
+    throw new Error('Faça login com sua conta Google autorizada para utilizar a análise por IA.');
+  }
+  const idToken = await user.getIdToken();
+  return {
+    'Content-Type': 'application/json',
+    Authorization: `Bearer ${idToken}`,
+  };
+}
+
+async function postAiRoute<T>(endpoint: string, body: Record<string, unknown>): Promise<T> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json().catch(() => ({}))) as T & { error?: string };
+  if (!res.ok) {
+    throw new Error(data?.error || `Falha na requisição de IA (HTTP ${res.status}).`);
+  }
+  return data;
+}
+
+export async function analyzeEditalWithAi(params: {
+  text: string;
+  defaultSubject?: string;
+  contestName?: string;
+}): Promise<{ topics: AiExtractedEditalTopic[] }> {
+  return postAiRoute<{ topics: AiExtractedEditalTopic[] }>('/api/ai/analyze-edital', params);
+}
+
+export async function reviewEssayWithAi(params: {
+  title: string;
+  essayText: string;
+  banca?: string;
+}): Promise<AiEssayReviewResult> {
+  return postAiRoute<AiEssayReviewResult>('/api/ai/review-essay', params);
+}
+
+export async function generateQuestionsWithAi(params: {
+  subject: string;
+  topic: string;
+  count?: number;
+  banca?: string;
+}): Promise<{ questions: AiGeneratedQuestion[] }> {
+  return postAiRoute<{ questions: AiGeneratedQuestion[] }>('/api/ai/generate-questions', params);
+}

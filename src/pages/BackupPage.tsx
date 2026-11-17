@@ -14,6 +14,7 @@ import {
   FolderSearch,
   FolderSync,
   HardDrive,
+  Lock,
   RefreshCcw,
   Share2,
   ShieldCheck,
@@ -22,6 +23,7 @@ import {
   Upload,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
+import { encryptBackupJson } from '../lib/cryptoBackup';
 import { CLOUD_SYNC_FILENAME, DriveFileInfo, DriveFolderSummary } from '../lib/googleDrive';
 import {
   CANONICAL_LOCAL_SUBFOLDERS,
@@ -101,6 +103,8 @@ export const BackupPage: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
   const [sharingMobileBackup, setSharingMobileBackup] = useState(false);
+  const [exportPassphrase, setExportPassphrase] = useState('');
+  const [importPassphrase, setImportPassphrase] = useState('');
   const [cloudBackups, setCloudBackups] = useState<DriveFileInfo[]>([]);
   const [localBackups, setLocalBackups] = useState<LocalBackupFileInfo[]>([]);
   const [loadingLocalBackups, setLoadingLocalBackups] = useState(false);
@@ -208,11 +212,12 @@ export const BackupPage: React.FC = () => {
 
   const handleShareBackupOnMobile = async () => {
     setSharingMobileBackup(true);
+    const pass = exportPassphrase.trim();
     try {
       const now = new Date();
       const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
       const timeStr = `${String(now.getHours()).padStart(2, '0')}h${String(now.getMinutes()).padStart(2, '0')}`;
-      const filename = `backup_central_estudos_${dateStr}_${timeStr}.json`;
+      const filename = `backup_central_estudos_${dateStr}_${timeStr}${pass ? '_protegido' : ''}.json`;
       const payload = {
         version: 2,
         app: 'Central de Estudos',
@@ -221,7 +226,10 @@ export const BackupPage: React.FC = () => {
         userEmail: googleUser?.email || undefined,
         data: db,
       };
-      const jsonString = JSON.stringify(payload, null, 2);
+      const rawJson = JSON.stringify(payload, null, 2);
+      const jsonString = pass
+        ? JSON.stringify(await encryptBackupJson(rawJson, pass), null, 2)
+        : rawJson;
       const file = new File([jsonString], filename, { type: 'application/json' });
       const nav = navigator as Navigator & {
         canShare?: (data?: ShareData) => boolean;
@@ -235,10 +243,14 @@ export const BackupPage: React.FC = () => {
         toast('Backup enviado! Escolha "Salvar no Drive", "Arquivos" ou "WhatsApp" no menu do celular.');
         return;
       }
-      exportBackupJson();
+      await exportBackupJson(pass ? { passphrase: pass } : undefined);
     } catch (err: any) {
       if (err?.name === 'AbortError') return;
-      exportBackupJson();
+      try {
+        await exportBackupJson(pass ? { passphrase: pass } : undefined);
+      } catch (exportErr) {
+        toast((exportErr as Error).message, true);
+      }
     } finally {
       setSharingMobileBackup(false);
     }
@@ -371,8 +383,10 @@ export const BackupPage: React.FC = () => {
 
     setImporting(true);
     try {
-      await importBackupJson(selectedFile);
+      const pass = importPassphrase.trim();
+      await importBackupJson(selectedFile, pass ? { passphrase: pass } : undefined);
       setSelectedFile(null);
+      setImportPassphrase('');
       if (fileRef.current) fileRef.current.value = '';
     } catch (err) {
       toast((err as Error).message, true);
@@ -1546,14 +1560,37 @@ export const BackupPage: React.FC = () => {
           title="Exportar cópia de segurança (.json)"
           subtitle="Baixa para este dispositivo um arquivo JSON com todas as questões, histórico, leis, datas de leitura, editais, metas, súmulas e preferências."
         >
+          <div className="mb-3">
+            <label
+              htmlFor="export-backup-pass"
+              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] mb-1"
+            >
+              <Lock className="w-3 h-3 text-[var(--accent)]" />
+              Senha opcional para criptografia AES-256-GCM (deixe vazio para JSON comum)
+            </label>
+            <input
+              id="export-backup-pass"
+              type="password"
+              autoComplete="new-password"
+              value={exportPassphrase}
+              onChange={(e) => setExportPassphrase(e.target.value)}
+              placeholder="Mínimo 4 caracteres (opcional)"
+              className="ce-input"
+            />
+          </div>
           <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
             <button
               type="button"
-              onClick={() => exportBackupJson()}
+              onClick={() => {
+                const pass = exportPassphrase.trim();
+                void exportBackupJson(pass ? { passphrase: pass } : undefined).catch((err) =>
+                  toast((err as Error).message, true),
+                );
+              }}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shadow-xs"
             >
               <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>Exportar backup JSON</span>
+              <span>{exportPassphrase.trim() ? 'Exportar JSON criptografado' : 'Exportar backup JSON'}</span>
             </button>
             <button
               type="button"
@@ -1569,24 +1606,37 @@ export const BackupPage: React.FC = () => {
 
         <Panel
           title="Restaurar a partir de JSON local"
-          subtitle="Carrega um snapshot .json exportado anteriormente do computador ou celular para restaurar todos os registros de estudo."
+          subtitle="Carrega um snapshot .json exportado anteriormente do computador ou celular (incluindo arquivos criptografados com AES-256-GCM)."
         >
-          <form onSubmit={handleRestoreJson} className="flex flex-col sm:flex-row flex-wrap gap-2 items-stretch sm:items-center">
-            <input
-              ref={fileRef}
-              type="file"
-              accept=".json,application/json"
-              onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-              className="ce-input flex-1 min-w-0 w-full sm:w-auto sm:min-w-[180px]"
-            />
-            <button
-              type="submit"
-              disabled={importing}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 h-[38px] px-4 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap shadow-xs"
-            >
-              <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <span>{importing ? 'Restaurando…' : 'Restaurar arquivo'}</span>
-            </button>
+          <form onSubmit={handleRestoreJson} className="space-y-2.5">
+            <div className="flex flex-col sm:flex-row flex-wrap gap-2 items-stretch sm:items-center">
+              <input
+                ref={fileRef}
+                type="file"
+                accept=".json,application/json"
+                onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                className="ce-input flex-1 min-w-0 w-full sm:w-auto sm:min-w-[180px]"
+              />
+              <button
+                type="submit"
+                disabled={importing}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 h-[38px] px-4 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap shadow-xs"
+              >
+                <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                <span>{importing ? 'Restaurando…' : 'Restaurar arquivo'}</span>
+              </button>
+            </div>
+            <div>
+              <input
+                type="password"
+                autoComplete="off"
+                aria-label="Senha do backup criptografado"
+                value={importPassphrase}
+                onChange={(e) => setImportPassphrase(e.target.value)}
+                placeholder="Senha do backup (somente se o arquivo estiver criptografado)"
+                className="ce-input"
+              />
+            </div>
           </form>
         </Panel>
 

@@ -4,16 +4,17 @@
 1. **Strict Ownership & Identity Binding**:
    - Every `/users/{userId}` document must have `ownerId == request.auth.uid` and `ownerId == userId`.
    - Every `/users/{userId}/dbRecords/{recordId}` document must have `ownerId == request.auth.uid` and `ownerId == userId`.
-   - Only verified Google users (`request.auth.token.email_verified == true`) may read or write workspace documents.
+   - Only verified, allowlisted Google users (`request.auth.token.email_verified == true` and email in allowlist) may read or write workspace documents.
 2. **Master Gate Relational Integrity**:
    - A `/users/{userId}/dbRecords/{recordId}` document cannot be read, created, updated, or deleted unless the parent `/users/{userId}` document exists and its `ownerId` equals `request.auth.uid`.
-3. **Immortal Fields & Temporal Integrity**:
+3. **Immortal Fields, Monotonic Revision & Temporal Integrity**:
    - `ownerId` and `createdAt` in `/users/{userId}` are strictly immutable on update.
+   - `revision` (when present) must be monotonically non-decreasing (`incoming().revision >= existing().revision`).
    - `ownerId`, `section`, and `createdAt` in `/users/{userId}/dbRecords/{recordId}` are strictly immutable on update.
    - `createdAt` and `updatedAt` must equal `request.time` on creation; `updatedAt` must equal `request.time` on update.
 4. **Volumetric & Schema Guardrails**:
    - Path variables `{userId}` and `{recordId}` must match `^[a-zA-Z0-9_\-]+$` with length `1..128`.
-   - `hasAll` and `hasOnly` enforce exact key sets on creation, and `affectedKeys().hasOnly(...)` restricts updates to mutable fields only.
+   - `hasAll` and `hasOnly` enforce exact key sets on creation, and `affectedKeys().hasOnly(...)` restricts updates to mutable fields only (`chunkHashes` bounded to 500 entries).
    - No PII (`email`, `phone`, `address`) is stored in workspace or database record documents, and all reads (`get` and `list`) require `request.auth.uid == userId && resource.data.ownerId == request.auth.uid`.
 
 ---

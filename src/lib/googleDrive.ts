@@ -170,56 +170,24 @@ function persistDriveAccessToken(
   lastSilentRefreshFailureAt = 0;
   const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
   if (email) rememberLastGoogleEmail(email);
+  // Segurança: mantém o Access Token estritamente em memória (nunca persiste tokens OAuth brutos em localStorage)
   try {
-    localStorage.setItem(
-      DRIVE_TOKEN_CACHE_KEY,
-      JSON.stringify({
-        token,
-        expiresAt,
-        uid: user?.uid || auth.currentUser?.uid || undefined,
-        email,
-      }),
-    );
+    localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
   } catch {
     // ignore storage errors
   }
   notifyDriveTokenListeners();
 }
 
-function restorePersistedDriveAccessToken(user?: User | null): string | null {
+function restorePersistedDriveAccessToken(_user?: User | null): string | null {
   try {
-    const raw = localStorage.getItem(DRIVE_TOKEN_CACHE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as {
-      token?: string;
-      expiresAt?: number;
-      uid?: string;
-      email?: string;
-    };
-    if (!parsed?.token || !parsed?.expiresAt) return null;
-    if (Date.now() >= parsed.expiresAt - 60_000) {
-      localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-      return null;
-    }
-    const targetUser = user || auth.currentUser;
-    if (targetUser) {
-      if (parsed.uid && targetUser.uid && parsed.uid !== targetUser.uid) {
-        return null;
-      }
-      if (
-        parsed.email &&
-        targetUser.email &&
-        parsed.email.trim().toLowerCase() !== targetUser.email.trim().toLowerCase()
-      ) {
-        return null;
-      }
-    }
-    cachedAccessToken = parsed.token;
-    cachedAccessTokenExpiresAt = parsed.expiresAt;
-    return parsed.token;
+    localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
   } catch {
-    return null;
+    // ignore storage errors
   }
+  return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)
+    ? cachedAccessToken
+    : null;
 }
 
 export interface DriveFolderPreference {
@@ -1797,6 +1765,77 @@ export async function listStudyFilesFromDrive(token?: string): Promise<DriveFile
   return listAllStudyFilesInDrive(token);
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x8000;
+  const chunks: string[] = [];
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    chunks.push(String.fromCharCode(...bytes.subarray(i, i + chunkSize)));
+  }
+  return btoa(chunks.join(''));
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) {
+    bytes[i] = bin.charCodeAt(i);
+  }
+  return bytes;
+}
+
+async function encodeDriveSnapshotJson(payload: unknown): Promise<string> {
+  const plainJson = JSON.stringify(payload);
+  if (
+    plainJson.length < 8192 ||
+    typeof CompressionStream === 'undefined' ||
+    !payload ||
+    typeof payload !== 'object'
+  ) {
+    return plainJson;
+  }
+  try {
+    const rawBytes = new TextEncoder().encode(plainJson);
+    const stream = new Blob([rawBytes]).stream().pipeThrough(new CompressionStream('gzip'));
+    const compressedBuf = await new Response(stream).arrayBuffer();
+    const compressedBytes = new Uint8Array(compressedBuf);
+    if (compressedBytes.length >= rawBytes.length * 0.92) {
+      return plainJson;
+    }
+    const obj = payload as Record<string, unknown>;
+    return JSON.stringify({
+      version: 4,
+      encoding: 'gzip-base64',
+      app: obj.app || 'Central de Estudos',
+      updatedAt: obj.updatedAt,
+      exportedAt: obj.exportedAt,
+      contentHash: obj.contentHash,
+      userEmail: obj.userEmail,
+      uncompressedBytes: rawBytes.length,
+      payloadBase64: bytesToBase64(compressedBytes),
+    });
+  } catch {
+    return plainJson;
+  }
+}
+
+async function decodeDriveSnapshotJson(parsed: any): Promise<any> {
+  if (
+    parsed &&
+    typeof parsed === 'object' &&
+    parsed.encoding === 'gzip-base64' &&
+    typeof parsed.payloadBase64 === 'string' &&
+    typeof DecompressionStream !== 'undefined'
+  ) {
+    const compressedBytes = base64ToBytes(parsed.payloadBase64);
+    const stream = new Blob([compressedBytes as unknown as BlobPart])
+      .stream()
+      .pipeThrough(new DecompressionStream('gzip'));
+    const decompressedText = await new Response(stream).text();
+    return JSON.parse(decompressedText);
+  }
+  return parsed;
+}
+
 /**
  * Saves or updates the canonical cloud sync JSON snapshot in Google Drive ("Backups/central_estudos_sync_latest.json").
  */
@@ -1810,7 +1849,7 @@ export async function saveCloudSyncSnapshot(
     throw new Error('Usuário não autenticado no Google Drive.');
   }
 
-  const jsonString = JSON.stringify(payload);
+  const jsonString = await encodeDriveSnapshotJson(payload);
   const blob = new Blob([jsonString], { type: 'application/json' });
 
   const parentFolder = await getOrCreateStudyFolder(activeToken);
@@ -1880,7 +1919,7 @@ export async function saveDatabaseBackupToDrive(
   dbSnapshot: unknown,
   token?: string,
 ): Promise<DriveFileInfo> {
-  const jsonString = JSON.stringify(dbSnapshot, null, 2);
+  const jsonString = await encodeDriveSnapshotJson(dbSnapshot);
   const blob = new Blob([jsonString], { type: 'application/json' });
   const now = new Date();
   const dateStr = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
@@ -2089,7 +2128,8 @@ export async function downloadBackupFileFromDrive(
     await throwDriveResponseError(res, 'Falha ao baixar backup do Google Drive');
   }
 
-  const json = await res.json();
+  const rawJson = await res.json();
+  const json = await decodeDriveSnapshotJson(rawJson);
   if (cacheOptions?.versionStamp && json && typeof json === 'object') {
     void saveDriveJsonCacheEntry(fileId, cacheOptions.versionStamp, json);
   }

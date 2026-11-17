@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { Download, Eye, FileUp, MessageSquarePlus } from 'lucide-react';
+import { Download, Eye, FileUp, MessageSquarePlus, Sparkles } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
+import { reviewEssayWithAi } from '../lib/aiApi';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
+import { readStudyBlobText } from '../lib/pdfExtract';
 import { visibleName } from '../lib/parsers';
 import { EssayRecord } from '../types/study';
 import { FilePreview } from '../components/ui/FilePreview';
@@ -26,6 +28,7 @@ export const DiscursivePage: React.FC = () => {
   const [feedbackDraft, setFeedbackDraft] = useState('');
   const [correctedFile, setCorrectedFile] = useState<File | null>(null);
   const [savingCorrection, setSavingCorrection] = useState(false);
+  const [aiReviewingId, setAiReviewingId] = useState<string | null>(null);
   const [preview, setPreview] = useState<PreviewTarget | null>(null);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -76,6 +79,42 @@ export const DiscursivePage: React.FC = () => {
       return;
     }
     triggerBlobDownload(blob, filename);
+  };
+
+  const handleAiReviewEssay = async (essay: EssayRecord) => {
+    setAiReviewingId(essay.id);
+    try {
+      const blob = await getFileBlob(essay.original_blobKey);
+      if (!blob) {
+        toast('Arquivo original da redação não encontrado localmente.', true);
+        return;
+      }
+      const lower = essay.original_arquivo.toLowerCase();
+      if (lower.endsWith('.docx')) {
+        toast('Para correção automática com IA, envie a redação em .txt ou .pdf selecionável.', true);
+        return;
+      }
+      const essayText = await readStudyBlobText(blob, essay.original_arquivo, essay.original_mime);
+      const res = await reviewEssayWithAi({
+        title: visibleName(essay.titulo),
+        essayText,
+      });
+      const sections: string[] = [];
+      if (res.scoreEstimate) sections.push(`Nota estimada: ${res.scoreEstimate}`);
+      if (res.feedback) sections.push(res.feedback);
+      if (res.strengths?.length) {
+        sections.push(`Pontos fortes:\n• ${res.strengths.join('\n• ')}`);
+      }
+      if (res.improvements?.length) {
+        sections.push(`Pontos a melhorar:\n• ${res.improvements.join('\n• ')}`);
+      }
+      setFeedbackDraft(sections.join('\n\n'));
+      toast('Parecer preliminar gerado por IA. Revise antes de salvar.');
+    } catch (err) {
+      toast((err as Error).message || 'Falha ao corrigir redação com IA.', true);
+    } finally {
+      setAiReviewingId(null);
+    }
   };
 
   return (
@@ -250,13 +289,24 @@ export const DiscursivePage: React.FC = () => {
                 {isEditing && (
                   <div className="mt-3 pt-3 border-t border-[var(--line)] grid grid-cols-1 gap-3">
                     <div>
-                      <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                        Comentários e avaliação
-                      </label>
+                      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                        <label className="block text-[11px] font-bold text-[var(--muted)]">
+                          Comentários e avaliação
+                        </label>
+                        <button
+                          type="button"
+                          disabled={aiReviewingId === essay.id}
+                          onClick={() => void handleAiReviewEssay(essay)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--accent)] hover:border-[var(--accent)] disabled:opacity-55 whitespace-nowrap"
+                        >
+                          <Sparkles className={`w-3 h-3 ${aiReviewingId === essay.id ? 'animate-pulse' : ''}`} />
+                          {aiReviewingId === essay.id ? 'Analisando redação…' : 'Corrigir com IA'}
+                        </button>
+                      </div>
                       <textarea
                         value={feedbackDraft}
                         onChange={(e) => setFeedbackDraft(e.target.value)}
-                        rows={3}
+                        rows={4}
                         placeholder="Estrutura, fundamentação jurídica, desvios gramaticais e nota..."
                         className="ce-textarea"
                       />

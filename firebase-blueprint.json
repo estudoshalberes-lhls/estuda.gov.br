@@ -30,6 +30,14 @@
           "type": "object",
           "description": "Current electronic study timer and Pomodoro state."
         },
+        "revision": {
+          "type": "number",
+          "description": "Monotonic revision counter for optimistic concurrency control across devices."
+        },
+        "chunkHashes": {
+          "type": "object",
+          "description": "Map of dbRecords document IDs to contentHash strings for differential real-time loading."
+        },
         "createdAt": {
           "type": "string",
           "format": "date-time",

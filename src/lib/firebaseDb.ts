@@ -348,11 +348,15 @@ export interface LoadedFirestoreDatabase {
   sectionCount: number;
   contentHash: string;
   timerSig: string;
+  revision?: number;
+  chunkHashes?: Record<string, string>;
 }
 
 export interface UserFirestoreCacheState {
   workspaceExists: boolean;
   chunkHashes: Map<string, string>;
+  rawDocsById: Map<string, RawRecordDoc>;
+  revision: number;
   hydratedFromServer: boolean;
   lastWorkspaceContentHash: string;
   lastWorkspaceTimerSig: string;
@@ -363,6 +367,8 @@ export interface UserFirestoreCacheState {
 }
 
 const LOAD_COALESCE_TTL_MS = 15_000;
+const MAX_FIRESTORE_CHUNKS_SAFE = 480;
+const DIFFERENTIAL_GET_DOC_THRESHOLD = 12;
 const userCacheByUid = new Map<string, UserFirestoreCacheState>();
 const inFlightLoadByUid = new Map<string, Promise<LoadedFirestoreDatabase | null>>();
 
@@ -372,6 +378,8 @@ function getOrCreateUserCache(userId: string): UserFirestoreCacheState {
     entry = {
       workspaceExists: false,
       chunkHashes: new Map<string, string>(),
+      rawDocsById: new Map<string, RawRecordDoc>(),
+      revision: 0,
       hydratedFromServer: false,
       lastWorkspaceContentHash: '',
       lastWorkspaceTimerSig: '',
@@ -383,6 +391,44 @@ function getOrCreateUserCache(userId: string): UserFirestoreCacheState {
     userCacheByUid.set(userId, entry);
   }
   return entry;
+}
+
+function buildChunkHashesMapObject(
+  chunks: Array<{ recordId: string; contentHash: string }>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const c of chunks.slice(0, 500)) {
+    if (c.recordId) {
+      result[c.recordId] = String(c.contentHash || '').slice(0, 128);
+    }
+  }
+  return result;
+}
+
+function normalizeRemoteChunkHashes(raw: unknown): Record<string, string> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (typeof v === 'string' && k) {
+      out[k] = v;
+    }
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function compactStudyDatabaseForChunkBudget(studyDb: StudyDatabase): StudyDatabase {
+  const next: StudyDatabase = { ...studyDb };
+  // Trim oversized ephemeral history/time logs cleanly if user data exceeds ~480 Firestore chunks
+  if (Array.isArray(next.history) && next.history.length > 2500) {
+    next.history = next.history.slice(-2500);
+  }
+  if (Array.isArray(next.studyTimeRecords) && next.studyTimeRecords.length > 2500) {
+    next.studyTimeRecords = next.studyTimeRecords.slice(-2500);
+  }
+  if (Array.isArray(next.completedSimulations) && next.completedSimulations.length > 400) {
+    next.completedSimulations = next.completedSimulations.slice(-400);
+  }
+  return next;
 }
 
 export function markLocalFirestoreActivity(userId: string): void {
@@ -1026,6 +1072,8 @@ export async function loadDatabaseFromFirestore(
     if (!workspaceSnap.exists()) {
       cache.hydratedFromServer = true;
       cache.chunkHashes.clear();
+      cache.rawDocsById.clear();
+      cache.revision = 0;
       cache.lastWorkspaceContentHash = '';
       cache.lastWorkspaceTimerSig = '';
       cache.lastUpdatedAt = '';
@@ -1038,9 +1086,11 @@ export async function loadDatabaseFromFirestore(
     const workspaceUpdatedAt = timestampToIso(workspaceData?.updatedAt);
     const workspaceContentHash = String(workspaceData?.contentHash || '');
     const workspaceTimerSig = computeTimerSyncSignature(workspaceData?.timerState);
+    const workspaceRevision = Number(workspaceData?.revision || 0);
     cache.lastWorkspaceContentHash = workspaceContentHash;
     cache.lastWorkspaceTimerSig = workspaceTimerSig;
     cache.lastUpdatedAt = workspaceUpdatedAt;
+    cache.revision = Number.isFinite(workspaceRevision) ? workspaceRevision : 0;
 
     const recordsQuery = query(
       collection(db, 'users', userId, 'dbRecords'),
@@ -1056,12 +1106,12 @@ export async function loadDatabaseFromFirestore(
     }
 
     cache.chunkHashes.clear();
+    cache.rawDocsById.clear();
     const rawDocs: RawRecordDoc[] = [];
     recordsSnap.forEach((docSnap) => {
       const data = docSnap.data();
       const contentHash = String(data?.contentHash || '');
-      cache.chunkHashes.set(docSnap.id, contentHash);
-      rawDocs.push({
+      const rawDoc: RawRecordDoc = {
         id: docSnap.id,
         section: String(data?.section || ''),
         chunkIndex: Number(data?.chunkIndex || 0),
@@ -1069,7 +1119,10 @@ export async function loadDatabaseFromFirestore(
         contentHash,
         payload: data?.payload,
         updatedAt: timestampToIso(data?.updatedAt),
-      });
+      };
+      cache.chunkHashes.set(docSnap.id, contentHash);
+      cache.rawDocsById.set(docSnap.id, rawDoc);
+      rawDocs.push(rawDoc);
     });
     cache.hydratedFromServer = true;
     cache.lastLoadCompletedMs = Date.now();
@@ -1080,6 +1133,7 @@ export async function loadDatabaseFromFirestore(
     console.log('[Firebase Sync][Load] Leitura concluída.', {
       workspacePath,
       recordCount: rawDocs.length,
+      revision: cache.revision,
       workspaceUpdatedAt,
     });
 
@@ -1093,6 +1147,8 @@ export async function loadDatabaseFromFirestore(
       ...reassembled,
       contentHash: workspaceContentHash,
       timerSig: workspaceTimerSig,
+      revision: cache.revision,
+      chunkHashes: Object.fromEntries(cache.chunkHashes),
     };
     cache.lastLoadedSnapshot = result;
     return result;
@@ -1108,6 +1164,119 @@ export async function loadDatabaseFromFirestore(
   }
 }
 
+export async function loadDifferentialChangesFromFirestore(
+  userId: string,
+  remoteMeta: {
+    contentHash: string;
+    updatedAt: string;
+    revision?: number;
+    chunkHashes?: Record<string, string>;
+  },
+): Promise<LoadedFirestoreDatabase | null> {
+  const diag = getFirestoreConfigDiagnostics();
+  if (!diag.isValid) {
+    throw Object.assign(new Error(`FIREBASE_CONFIG_MISSING: ${diag.issues.join(' ')}`), {
+      code: 'firebase/config-missing',
+    });
+  }
+
+  const cache = getOrCreateUserCache(userId);
+  const remoteHashes = normalizeRemoteChunkHashes(remoteMeta.chunkHashes);
+  if (!cache.hydratedFromServer || cache.rawDocsById.size === 0 || !remoteHashes) {
+    return loadDatabaseFromFirestore(userId, null, { forceRefresh: true });
+  }
+
+  const changedIds: string[] = [];
+  const removedIds: string[] = [];
+  for (const [docId, remoteHash] of Object.entries(remoteHashes)) {
+    if (cache.chunkHashes.get(docId) !== remoteHash) {
+      changedIds.push(docId);
+    }
+  }
+  for (const localDocId of cache.chunkHashes.keys()) {
+    if (!(localDocId in remoteHashes)) {
+      removedIds.push(localDocId);
+    }
+  }
+
+  if (changedIds.length > DIFFERENTIAL_GET_DOC_THRESHOLD) {
+    return loadDatabaseFromFirestore(userId, null, { forceRefresh: true });
+  }
+
+  throwIfFirestoreQuotaBlocked(OperationType.GET, `users/${userId}/dbRecords`);
+  await ensureFirebaseSessionAlive(false);
+
+  if (changedIds.length > 0) {
+    try {
+      const snaps = await Promise.all(
+        changedIds.map((docId) => getDoc(doc(db, 'users', userId, 'dbRecords', docId))),
+      );
+      recordFirestoreQuotaOps({ reads: snaps.length });
+      snaps.forEach((docSnap) => {
+        if (!docSnap.exists()) {
+          cache.chunkHashes.delete(docSnap.id);
+          cache.rawDocsById.delete(docSnap.id);
+          return;
+        }
+        const data = docSnap.data();
+        const contentHash = String(data?.contentHash || '');
+        const rawDoc: RawRecordDoc = {
+          id: docSnap.id,
+          section: String(data?.section || ''),
+          chunkIndex: Number(data?.chunkIndex || 0),
+          chunkTotal: Number(data?.chunkTotal || 1),
+          contentHash,
+          payload: data?.payload,
+          updatedAt: timestampToIso(data?.updatedAt),
+        };
+        cache.chunkHashes.set(docSnap.id, contentHash);
+        cache.rawDocsById.set(docSnap.id, rawDoc);
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `users/${userId}/dbRecords`);
+    }
+  }
+
+  for (const removedId of removedIds) {
+    cache.chunkHashes.delete(removedId);
+    cache.rawDocsById.delete(removedId);
+  }
+
+  if (remoteMeta.contentHash) {
+    cache.lastWorkspaceContentHash = remoteMeta.contentHash;
+  }
+  if (typeof remoteMeta.revision === 'number' && Number.isFinite(remoteMeta.revision)) {
+    cache.revision = Math.max(cache.revision, remoteMeta.revision);
+  }
+  cache.lastUpdatedAt = remoteMeta.updatedAt || cache.lastUpdatedAt;
+  cache.lastLoadCompletedMs = Date.now();
+
+  const docsList = Array.from(cache.rawDocsById.values());
+  if (docsList.length === 0) {
+    cache.lastLoadedSnapshot = null;
+    return null;
+  }
+
+  const reassembled = reassembleDatabaseFromDocs(docsList, remoteMeta.updatedAt);
+  const result: LoadedFirestoreDatabase = {
+    ...reassembled,
+    contentHash: remoteMeta.contentHash || cache.lastWorkspaceContentHash,
+    timerSig: cache.lastWorkspaceTimerSig,
+    revision: cache.revision,
+    chunkHashes: Object.fromEntries(cache.chunkHashes),
+  };
+  cache.lastLoadedSnapshot = result;
+
+  console.log('[Firebase Sync][DiffLoad] Sincronização diferencial aplicada:', {
+    userId,
+    fetchedDocs: changedIds.length,
+    removedDocs: removedIds.length,
+    totalDocs: docsList.length,
+  });
+
+  return result;
+}
+
 export async function saveDatabaseToFirestore(
   userId: string,
   studyDb: StudyDatabase,
@@ -1118,6 +1287,7 @@ export async function saveDatabaseToFirestore(
   updatedAt: string;
   writtenChunks: number;
   totalChunks: number;
+  revision?: number;
 }> {
   const diag = getFirestoreConfigDiagnostics();
   if (!diag.isValid) {
@@ -1141,7 +1311,18 @@ export async function saveDatabaseToFirestore(
   cache.lastLocalWriteMs = Date.now();
   cache.lastLoadCompletedMs = 0;
   cache.lastLoadedSnapshot = null;
-  const rawChunks = decomposeDatabaseToFirestoreChunks(studyDb);
+
+  let effectiveStudyDb = studyDb;
+  let rawChunks = decomposeDatabaseToFirestoreChunks(effectiveStudyDb);
+  if (rawChunks.length > MAX_FIRESTORE_CHUNKS_SAFE) {
+    effectiveStudyDb = compactStudyDatabaseForChunkBudget(studyDb);
+    rawChunks = decomposeDatabaseToFirestoreChunks(effectiveStudyDb);
+  }
+  if (rawChunks.length > 500) {
+    rawChunks = rawChunks.slice(0, 500);
+  }
+
+  const chunkHashesMapObj = buildChunkHashesMapObject(rawChunks);
   const safeContentHash = (contentHash || computeFastHash(JSON.stringify(rawChunks))).slice(0, 128);
   const timerSig = computeTimerSyncSignature(timerState);
   const safeTimerState = buildSafeTimerState(timerState);
@@ -1161,6 +1342,8 @@ export async function saveDatabaseToFirestore(
       cache.lastWorkspaceContentHash = String(wsData?.contentHash || '');
       cache.lastWorkspaceTimerSig = computeTimerSyncSignature(wsData?.timerState);
       cache.lastUpdatedAt = timestampToIso(wsData?.updatedAt);
+      const wsRevision = Number(wsData?.revision || 0);
+      cache.revision = Math.max(cache.revision, Number.isFinite(wsRevision) ? wsRevision : 0);
       const existingQuery = query(
         collection(db, 'users', userId, 'dbRecords'),
         where('ownerId', '==', userId),
@@ -1173,17 +1356,33 @@ export async function saveDatabaseToFirestore(
         handleFirestoreError(error, OperationType.LIST, recordsPath);
       }
       cache.chunkHashes.clear();
+      cache.rawDocsById.clear();
       existingSnap.forEach((d) => {
-        cache.chunkHashes.set(d.id, String(d.data()?.contentHash || ''));
+        const dData = d.data();
+        const ch = String(dData?.contentHash || '');
+        cache.chunkHashes.set(d.id, ch);
+        cache.rawDocsById.set(d.id, {
+          id: d.id,
+          section: String(dData?.section || ''),
+          chunkIndex: Number(dData?.chunkIndex || 0),
+          chunkTotal: Number(dData?.chunkTotal || 1),
+          contentHash: ch,
+          payload: dData?.payload,
+          updatedAt: timestampToIso(dData?.updatedAt),
+        });
       });
     } else {
       cache.chunkHashes.clear();
+      cache.rawDocsById.clear();
+      cache.revision = 0;
       cache.lastWorkspaceContentHash = '';
       cache.lastWorkspaceTimerSig = '';
       cache.lastUpdatedAt = '';
     }
     cache.hydratedFromServer = true;
   }
+
+  const nextRevision = Math.max(1, (cache.revision || 0) + 1);
 
   // Ensure parent workspace document exists BEFORE subcollection writes (required by isWorkspaceOwner rule)
   let createdWorkspaceJustNow = false;
@@ -1194,12 +1393,15 @@ export async function saveDatabaseToFirestore(
         contentHash: safeContentHash,
         schemaVersion: SCHEMA_VERSION,
         sectionCount: rawChunks.length,
+        revision: nextRevision,
+        chunkHashes: chunkHashesMapObj,
         timerState: safeTimerState,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
       recordFirestoreQuotaOps({ writes: 1 });
       cache.workspaceExists = true;
+      cache.revision = nextRevision;
       cache.lastWorkspaceContentHash = safeContentHash;
       cache.lastWorkspaceTimerSig = timerSig;
       createdWorkspaceJustNow = true;
@@ -1307,6 +1509,8 @@ export async function saveDatabaseToFirestore(
         contentHash: safeContentHash,
         schemaVersion: SCHEMA_VERSION,
         sectionCount: rawChunks.length,
+        revision: nextRevision,
+        chunkHashes: chunkHashesMapObj,
         timerState: safeTimerState,
         updatedAt: serverTimestamp(),
       });
@@ -1324,11 +1528,22 @@ export async function saveDatabaseToFirestore(
       handleFirestoreError(error, OperationType.WRITE, recordsPath);
     }
 
+    const committedNowIso = new Date().toISOString();
     for (const op of slice) {
       if (op.type === 'delete') {
         cache.chunkHashes.delete(op.recordId);
+        cache.rawDocsById.delete(op.recordId);
       } else {
         cache.chunkHashes.set(op.chunk.recordId, op.chunk.contentHash);
+        cache.rawDocsById.set(op.chunk.recordId, {
+          id: op.chunk.recordId,
+          section: op.chunk.section,
+          chunkIndex: op.chunk.chunkIndex,
+          chunkTotal: op.chunk.chunkTotal,
+          contentHash: op.chunk.contentHash,
+          payload: op.chunk.payload,
+          updatedAt: committedNowIso,
+        });
         console.log('[Firebase Sync][Save] Partição atualizada:', {
           recordId: op.chunk.recordId,
           section: op.chunk.section,
@@ -1345,6 +1560,8 @@ export async function saveDatabaseToFirestore(
         contentHash: safeContentHash,
         schemaVersion: SCHEMA_VERSION,
         sectionCount: rawChunks.length,
+        revision: nextRevision,
+        chunkHashes: chunkHashesMapObj,
         timerState: safeTimerState,
         updatedAt: serverTimestamp(),
       });
@@ -1355,6 +1572,7 @@ export async function saveDatabaseToFirestore(
   }
 
   const updatedAt = new Date().toISOString();
+  cache.revision = Math.max(cache.revision, nextRevision);
   cache.lastWorkspaceContentHash = safeContentHash;
   cache.lastWorkspaceTimerSig = timerSig;
   cache.lastUpdatedAt = updatedAt;
@@ -1365,6 +1583,7 @@ export async function saveDatabaseToFirestore(
     workspacePath,
     writtenChunks: ops.length,
     totalChunks: rawChunks.length,
+    revision: cache.revision,
     updatedAt,
   });
 
@@ -1372,6 +1591,7 @@ export async function saveDatabaseToFirestore(
     updatedAt,
     writtenChunks: ops.length,
     totalChunks: rawChunks.length,
+    revision: cache.revision,
   };
 }
 
@@ -1411,6 +1631,8 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
         cache.lastWorkspaceContentHash = String(wsData?.contentHash || '');
         cache.lastWorkspaceTimerSig = computeTimerSyncSignature(wsData?.timerState);
         cache.lastUpdatedAt = timestampToIso(wsData?.updatedAt);
+        const wsRev = Number(wsData?.revision || 0);
+        cache.revision = Math.max(cache.revision, Number.isFinite(wsRev) ? wsRev : 0);
       }
     } catch {
       return;
@@ -1418,12 +1640,15 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
     if (!cache.workspaceExists || cache.lastWorkspaceTimerSig === timerSig) return;
   }
 
+  const nextRevision = Math.max(1, (cache.revision || 0) + 1);
   try {
     await updateDoc(userDocRef, {
       timerState: buildSafeTimerState(timerState),
+      revision: nextRevision,
       updatedAt: serverTimestamp(),
     });
     recordFirestoreQuotaOps({ writes: 1 });
+    cache.revision = nextRevision;
     cache.lastWorkspaceTimerSig = timerSig;
     cache.lastUpdatedAt = new Date().toISOString();
     cache.lastLocalWriteMs = Date.now();
@@ -1434,7 +1659,12 @@ export const syncTimerStateToFirestore = async (userId: string, timerState: any)
 
 export const subscribeToFirestoreWorkspace = (
   userId: string,
-  onRemoteUpdate: (meta: { contentHash: string; updatedAt: string }) => void,
+  onRemoteUpdate: (meta: {
+    contentHash: string;
+    updatedAt: string;
+    revision?: number;
+    chunkHashes?: Record<string, string>;
+  }) => void,
   onListenerError?: (err: unknown) => void,
 ): (() => void) => {
   const diag = getFirestoreConfigDiagnostics();
@@ -1467,6 +1697,11 @@ export const subscribeToFirestoreWorkspace = (
       }
       const data = snapshot.data();
       const remoteContentHash = String(data?.contentHash || '');
+      const remoteRevision = Number(data?.revision || 0);
+      const remoteChunkHashes = normalizeRemoteChunkHashes(data?.chunkHashes);
+      if (remoteRevision > 0 && cache.revision > 0 && remoteRevision < cache.revision) {
+        return;
+      }
       if (remoteContentHash && remoteContentHash !== cache.lastWorkspaceContentHash) {
         cache.lastLoadCompletedMs = 0;
         cache.lastLoadedSnapshot = null;
@@ -1474,6 +1709,8 @@ export const subscribeToFirestoreWorkspace = (
       onRemoteUpdate({
         contentHash: remoteContentHash,
         updatedAt: timestampToIso(data?.updatedAt) || new Date().toISOString(),
+        revision: Number.isFinite(remoteRevision) ? remoteRevision : undefined,
+        chunkHashes: remoteChunkHashes,
       });
     },
     (error) => {

@@ -170,4 +170,31 @@ export const DIRTY_DOZEN_TEST_CASES: SecurityTestCase[] = [
     },
     expectedResult: 'PERMISSION_DENIED',
   },
+  {
+    id: 13,
+    name: 'Non-Allowlisted Verified Google Account Rejected Server-Side',
+    op: 'create',
+    path: '/users/user_outsider',
+    auth: { uid: 'user_outsider', email_verified: true },
+    payload: {
+      ownerId: 'user_outsider',
+      contentHash: 'hash_outsider',
+      schemaVersion: 2,
+      sectionCount: 1,
+      timerState: { elapsed: 0, startedAt: 0 },
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
+  {
+    id: 14,
+    name: 'Stale Revision Rollback Rejected on Workspace Update',
+    op: 'update',
+    path: '/users/user_1',
+    auth: { uid: 'user_1', email_verified: true },
+    payload: {
+      contentHash: 'hash_stale',
+      revision: -1,
+    },
+    expectedResult: 'PERMISSION_DENIED',
+  },
 ];

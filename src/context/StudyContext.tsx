@@ -140,11 +140,20 @@ import {
 } from '../lib/parsers';
 import {
   applyIncrementalDeltaToDatabase,
+  applyTombstonesToMergedDatabase,
   buildIncrementalDatabaseBackup,
+  clearDeletedTombstones,
   computeDatabaseContentHash,
+  detectDeletedEntitiesBetweenDatabases,
   isIncrementalBackupPayload,
   reconcileCompletedAndArchivedItems,
+  recordDeletedTombstones,
 } from '../lib/incrementalBackup';
+import {
+  decryptBackupEnvelope,
+  encryptBackupJson,
+  isEncryptedBackupEnvelope,
+} from '../lib/cryptoBackup';
 import {
   extractTextFromPdfFile,
   readAnswerKeyInput,
@@ -153,6 +162,7 @@ import {
 } from '../lib/pdfExtract';
 import {
   loadDatabaseFromFirestore,
+  loadDifferentialChangesFromFirestore,
   saveDatabaseToFirestore,
   syncTimerStateToFirestore,
   subscribeToFirestoreWorkspace,
@@ -897,8 +907,8 @@ interface StudyContextValue {
   ) => Promise<string>;
 
   // Backup & Settings
-  exportBackupJson: () => { fileCount: number };
-  importBackupJson: (file: File) => Promise<void>;
+  exportBackupJson: (options?: { passphrase?: string }) => Promise<{ fileCount: number }>;
+  importBackupJson: (file: File, options?: { passphrase?: string }) => Promise<void>;
   resetDemoData: () => Promise<void>;
   testLocalIntegrity: () => { status: string; totalRecords: number };
   updatePreferences: (patch: Partial<AppPreferences>) => void;
@@ -3071,7 +3081,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const dbRef = useRef<StudyDatabase>(db);
   const setDb = useCallback((updater: React.SetStateAction<StudyDatabase>) => {
-    const next = typeof updater === 'function' ? updater(dbRef.current) : updater;
+    const prev = dbRef.current;
+    const next = typeof updater === 'function' ? updater(prev) : updater;
+    if (activeScopeRef.current === 'offline_guest' && !isRestoringRef.current && next !== prev) {
+      const deleted = detectDeletedEntitiesBetweenDatabases(prev, next);
+      if (deleted.length > 0) {
+        recordDeletedTombstones('offline_guest', deleted);
+      }
+    }
     dbRef.current = next;
     setDbState(next);
   }, []);
@@ -4309,6 +4326,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   ),
                 };
                 localDb = applyIncrementalDeltaToDatabase(localDb, additiveGuestEnvelope, { additiveMerge: true });
+                localDb = applyTombstonesToMergedDatabase(localDb, 'offline_guest');
                 localDb = reconcileCompletedAndArchivedItems(
                   localDb,
                   candidateGuestDb,
@@ -4317,6 +4335,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               }
             }
             rescuedGuestEdits = true;
+            clearDeletedTombstones('offline_guest');
             const mergedIso = new Date(Math.max(candidateGuestMs, Date.now())).toISOString();
             localMeta = saveSyncMeta(scope, {
               lastMergedGuestEditAt: mergedIso,
@@ -4612,7 +4631,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 await ensureFirebaseSessionAlive(true);
               },
             },
-            () => loadDatabaseFromFirestore(googleUid, googleEmail, { forceRefresh: true }),
+            () => loadDifferentialChangesFromFirestore(googleUid, remoteMeta),
           )
             .then((reloaded) => {
               const applyNowMs = Date.now();
@@ -4814,6 +4833,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   ),
                 };
                 currentDb = applyIncrementalDeltaToDatabase(currentDb, additiveGuestEnvelope, { additiveMerge: true });
+                currentDb = applyTombstonesToMergedDatabase(currentDb, 'offline_guest');
                 currentDb = reconcileCompletedAndArchivedItems(
                   currentDb,
                   candidateGuestDb,
@@ -4823,6 +4843,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
             hasLocalAny = true;
             rescuedGuestEdits = true;
+            clearDeletedTombstones('offline_guest');
             const mergedIso = new Date(Math.max(candidateGuestMs, Date.now())).toISOString();
             saveSyncMeta(scope, {
               lastMergedGuestEditAt: mergedIso,
@@ -13360,32 +13381,50 @@ function isEmailAuthorized(email?: string | null): boolean {
   );
 
   // Backup & Settings
-  const exportBackupJson = useCallback((): { fileCount: number } => {
-    const payload = {
-      app: 'Central de Estudos',
-      exportedAt: new Date().toISOString(),
-      data: db,
-    };
-    const json = JSON.stringify(payload, null, 2);
-    const filename = `backup_central_estudos_${localDateIso()}.json`;
-    triggerBlobDownload(new Blob([json], { type: 'application/json;charset=utf-8' }), filename);
-    const itemCount =
-      db.questions.length +
-      db.completedSimulations.length +
-      db.annotations.length +
-      db.caseLaw.length +
-      Object.keys(db.laws).length;
-    toast(`Backup exportado com sucesso (${filename}).`);
-    return { fileCount: itemCount };
-  }, [db, toast]);
+  const exportBackupJson = useCallback(
+    async (options?: { passphrase?: string }): Promise<{ fileCount: number }> => {
+      const payload = {
+        app: 'Central de Estudos',
+        exportedAt: new Date().toISOString(),
+        data: db,
+      };
+      const plainJson = JSON.stringify(payload, null, 2);
+      const cleanPass = options?.passphrase?.trim() || '';
+      let outputText = plainJson;
+      let filename = `backup_central_estudos_${localDateIso()}.json`;
+      if (cleanPass) {
+        const encryptedEnvelope = await encryptBackupJson(plainJson, cleanPass);
+        outputText = JSON.stringify(encryptedEnvelope, null, 2);
+        filename = `backup_criptografado_central_estudos_${localDateIso()}.json`;
+      }
+      triggerBlobDownload(new Blob([outputText], { type: 'application/json;charset=utf-8' }), filename);
+      const itemCount =
+        db.questions.length +
+        db.completedSimulations.length +
+        db.annotations.length +
+        db.caseLaw.length +
+        Object.keys(db.laws).length;
+      toast(
+        cleanPass
+          ? `Backup criptografado (AES-256-GCM) exportado com sucesso (${filename}).`
+          : `Backup exportado com sucesso (${filename}).`,
+      );
+      return { fileCount: itemCount };
+    },
+    [db, toast],
+  );
 
   const importBackupJson = useCallback(
-    async (file: File) => {
+    async (file: File, options?: { passphrase?: string }) => {
       if (!file.name.toLowerCase().endsWith('.json')) {
         throw new Error('Selecione um arquivo de backup .json.');
       }
       const raw = await file.text();
-      const parsed = JSON.parse(raw) as unknown;
+      let parsed = JSON.parse(raw) as unknown;
+      if (isEncryptedBackupEnvelope(parsed)) {
+        const decryptedText = await decryptBackupEnvelope(parsed, options?.passphrase || '');
+        parsed = JSON.parse(decryptedText) as unknown;
+      }
       if (isIncrementalBackupPayload(parsed)) {
         const merged = applyIncrementalDeltaToDatabase(dbRef.current, parsed);
         setDb(merged);
@@ -13404,7 +13443,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       setDb(merged);
       toast('Backup restaurado com sucesso.');
     },
-    [toast],
+    [setDb, toast],
   );
 
   const resetDemoData = useCallback(async () => {

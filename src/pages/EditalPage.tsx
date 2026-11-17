@@ -16,11 +16,13 @@ import {
   Plus,
   Save,
   Search,
+  Sparkles,
   Square,
   Trash2,
   X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
+import { analyzeEditalWithAi } from '../lib/aiApi';
 import {
   WEEKDAYS,
   itemMatchesMultiArticleSpec,
@@ -81,6 +83,7 @@ export const EditalPage: React.FC = () => {
   const [batchText, setBatchText] = useState('');
   const [replaceOnImport, setReplaceOnImport] = useState(false);
   const [uploadingFile, setUploadingFile] = useState(false);
+  const [aiExtracting, setAiExtracting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
   // Filters
@@ -262,6 +265,39 @@ export const EditalPage: React.FC = () => {
     } finally {
       setUploadingFile(false);
       e.target.value = '';
+    }
+  };
+
+  const handleAiExtractBatch = async () => {
+    if (!activeContest) return;
+    const clean = batchText.trim();
+    if (clean.length < 10) {
+      toast('Cole o texto do edital na caixa abaixo para estruturar com IA.', true);
+      return;
+    }
+    setAiExtracting(true);
+    try {
+      const { topics } = await analyzeEditalWithAi({
+        text: clean,
+        defaultSubject: batchDefaultSubject.trim() || 'Geral',
+        contestName: activeContest.concurso,
+      });
+      if (!topics.length) {
+        toast('Nenhum tópico programático identificado no texto enviado.', true);
+        return;
+      }
+      const added = saveContestEditalPoints(activeContest.id, topics, {
+        replace: replaceOnImport,
+      });
+      if (added > 0 || replaceOnImport) {
+        setBatchText('');
+        setReplaceOnImport(false);
+      }
+      toast(`${topics.length} tópico(s) estruturado(s) com IA.`);
+    } catch (err) {
+      toast((err as Error).message || 'Falha ao analisar edital com IA.', true);
+    } finally {
+      setAiExtracting(false);
     }
   };
 
@@ -627,13 +663,25 @@ export const EditalPage: React.FC = () => {
                       ? `${parsedBatchPreview.length} ponto(s) pronto(s) para importar.`
                       : 'Aceita listas simples, cabeçalhos terminados em ":" ou "Matéria | Ponto".'}
                   </span>
-                  <button
-                    type="submit"
-                    className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Importar pontos do texto
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={aiExtracting || !batchText.trim()}
+                      onClick={() => void handleAiExtractBatch()}
+                      title="Usar análise semântica no servidor para separar matérias e pontos do texto bruto do edital"
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-55 whitespace-nowrap"
+                    >
+                      <Sparkles className={`w-3.5 h-3.5 text-[var(--accent)] ${aiExtracting ? 'animate-pulse' : ''}`} />
+                      {aiExtracting ? 'Analisando com IA…' : 'Extrair com IA'}
+                    </button>
+                    <button
+                      type="submit"
+                      className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      Importar pontos do texto
+                    </button>
+                  </div>
                 </div>
               </form>
             )}

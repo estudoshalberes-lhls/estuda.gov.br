@@ -1030,3 +1030,198 @@ export function reconcileCompletedAndArchivedItems(
     ...(weeklyChanged ? { weeklySchedules: nextWeeklySchedules } : {}),
   };
 }
+
+const TOMBSTONE_STORAGE_PREFIX = 'ce_deleted_tombstones_v1_';
+const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface TombstoneEntry {
+  section: string;
+  key: string;
+  deletedAt: number;
+}
+
+const TOMBSTONE_ARRAY_SECTIONS: Array<{
+  section: keyof StudyDatabase;
+  getKey: (item: any) => string;
+}> = [
+  { section: 'questions', getKey: (x) => x?.id || '' },
+  { section: 'submittedSimulations', getKey: (x) => x?.id || '' },
+  { section: 'completedSimulations', getKey: (x) => x?.id || '' },
+  { section: 'history', getKey: (x) => x?.id || '' },
+  { section: 'studyTimeRecords', getKey: (x) => x?.quizId || '' },
+  { section: 'annotations', getKey: (x) => x?.id || '' },
+  { section: 'caseLaw', getKey: (x) => x?.id || '' },
+  { section: 'contests', getKey: (x) => x?.id || '' },
+  { section: 'completedGoals', getKey: (x) => x?.id || '' },
+  { section: 'incompleteGoals', getKey: (x) => x?.id || '' },
+  { section: 'proofFiles', getKey: (x) => x?.id || '' },
+  { section: 'essays', getKey: (x) => x?.id || '' },
+  { section: 'criticalPoints', getKey: (x) => x?.id || '' },
+  { section: 'savedIncidenceFilters', getKey: (x) => x?.id || '' },
+];
+
+const TOMBSTONE_RECORD_SECTIONS: Array<keyof StudyDatabase> = [
+  'laws',
+  'weeklySchedules',
+  'pdfFolders',
+  'summaryFolders',
+];
+
+function getTombstoneStorageKey(scope: string): string {
+  return `${TOMBSTONE_STORAGE_PREFIX}${scope || 'offline_guest'}`;
+}
+
+export function loadDeletedTombstones(scope: string): TombstoneEntry[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
+    const raw = window.localStorage.getItem(getTombstoneStorageKey(scope));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+    return parsed.filter(
+      (e): e is TombstoneEntry =>
+        Boolean(e) &&
+        typeof e.section === 'string' &&
+        typeof e.key === 'string' &&
+        typeof e.deletedAt === 'number' &&
+        e.deletedAt >= cutoff,
+    );
+  } catch {
+    return [];
+  }
+}
+
+export function recordDeletedTombstones(
+  scope: string,
+  entries: Array<{ section: string; key: string }>,
+): void {
+  if (!entries.length) return;
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const now = Date.now();
+    const existing = loadDeletedTombstones(scope);
+    const map = new Map<string, TombstoneEntry>();
+    for (const item of existing) {
+      map.set(`${item.section}::${item.key}`, item);
+    }
+    for (const e of entries) {
+      if (!e.section || !e.key) continue;
+      map.set(`${e.section}::${e.key}`, {
+        section: e.section,
+        key: e.key,
+        deletedAt: now,
+      });
+    }
+    window.localStorage.setItem(
+      getTombstoneStorageKey(scope),
+      JSON.stringify(Array.from(map.values()).slice(-1000)),
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function clearDeletedTombstones(scope: string): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.removeItem(getTombstoneStorageKey(scope));
+  } catch {
+    // ignore
+  }
+}
+
+export function detectDeletedEntitiesBetweenDatabases(
+  prevDb: StudyDatabase,
+  nextDb: StudyDatabase,
+): Array<{ section: string; key: string }> {
+  const deleted: Array<{ section: string; key: string }> = [];
+  for (const cfg of TOMBSTONE_ARRAY_SECTIONS) {
+    const prevArr = (prevDb[cfg.section] as unknown as any[]) || [];
+    const nextArr = (nextDb[cfg.section] as unknown as any[]) || [];
+    if (prevArr.length <= nextArr.length && nextArr.length > 0) {
+      const nextKeys = new Set(nextArr.map((item) => cfg.getKey(item)).filter(Boolean));
+      for (const item of prevArr) {
+        const k = cfg.getKey(item);
+        if (k && !nextKeys.has(k)) {
+          deleted.push({ section: String(cfg.section), key: k });
+        }
+      }
+    } else if (prevArr.length > nextArr.length) {
+      const nextKeys = new Set(nextArr.map((item) => cfg.getKey(item)).filter(Boolean));
+      for (const item of prevArr) {
+        const k = cfg.getKey(item);
+        if (k && !nextKeys.has(k)) {
+          deleted.push({ section: String(cfg.section), key: k });
+        }
+      }
+    }
+  }
+
+  for (const sec of TOMBSTONE_RECORD_SECTIONS) {
+    const prevRec = (prevDb[sec] as Record<string, unknown> | undefined) || {};
+    const nextRec = (nextDb[sec] as Record<string, unknown> | undefined) || {};
+    for (const k of Object.keys(prevRec)) {
+      if (!(k in nextRec)) {
+        deleted.push({ section: String(sec), key: k });
+      }
+    }
+  }
+  return deleted;
+}
+
+export function applyTombstonesToMergedDatabase(
+  mergedDb: StudyDatabase,
+  scope: string,
+): StudyDatabase {
+  const tombstones = loadDeletedTombstones(scope);
+  if (tombstones.length === 0) return mergedDb;
+
+  const deletedBySection = new Map<string, Set<string>>();
+  for (const t of tombstones) {
+    let set = deletedBySection.get(t.section);
+    if (!set) {
+      set = new Set<string>();
+      deletedBySection.set(t.section, set);
+    }
+    set.add(t.key);
+  }
+
+  let changed = false;
+  const nextDb: StudyDatabase = { ...mergedDb };
+
+  for (const cfg of TOMBSTONE_ARRAY_SECTIONS) {
+    const secName = String(cfg.section);
+    const delSet = deletedBySection.get(secName);
+    if (!delSet || delSet.size === 0) continue;
+    const arr = (nextDb[cfg.section] as unknown as any[]) || [];
+    const filtered = arr.filter((item) => {
+      const k = cfg.getKey(item);
+      return !k || !delSet.has(k);
+    });
+    if (filtered.length !== arr.length) {
+      (nextDb as any)[cfg.section] = filtered;
+      changed = true;
+    }
+  }
+
+  for (const sec of TOMBSTONE_RECORD_SECTIONS) {
+    const secName = String(sec);
+    const delSet = deletedBySection.get(secName);
+    if (!delSet || delSet.size === 0) continue;
+    const rec = { ...((nextDb[sec] as Record<string, unknown> | undefined) || {}) };
+    let recChanged = false;
+    for (const k of delSet) {
+      if (k in rec) {
+        delete rec[k];
+        recChanged = true;
+      }
+    }
+    if (recChanged) {
+      (nextDb as any)[sec] = rec;
+      changed = true;
+    }
+  }
+
+  return changed ? nextDb : mergedDb;
+}

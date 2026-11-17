@@ -20,8 +20,18 @@ service cloud.firestore {
       return resource.data;
     }
 
+    function isAuthorizedEmail() {
+      return request.auth.token.email is string &&
+        request.auth.token.email.lower() in [
+          'estudos.halberes@gmail.com',
+          'ayla.tayna22@gmail.com'
+        ];
+    }
+
     function isSignedIn() {
-      return request.auth != null && request.auth.token.email_verified == true;
+      return request.auth != null &&
+        request.auth.token.email_verified == true &&
+        isAuthorizedEmail();
     }
 
     // Pillar 1: Master Gate (Relational Sync with Parent UserWorkspace)
@@ -47,6 +57,8 @@ service cloud.firestore {
           'schemaVersion',
           'sectionCount',
           'timerState',
+          'revision',
+          'chunkHashes',
           'createdAt',
           'updatedAt'
         ]) &&
@@ -67,6 +79,8 @@ service cloud.firestore {
         data.timerState is map &&
         data.timerState.size() >= 1 &&
         data.timerState.size() <= 10 &&
+        (!('revision' in data) || (data.revision is number && data.revision >= 0)) &&
+        (!('chunkHashes' in data) || (data.chunkHashes is map && data.chunkHashes.size() <= 500)) &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
     }
@@ -145,6 +159,7 @@ service cloud.firestore {
         incoming().ownerId == existing().ownerId &&
         incoming().createdAt == existing().createdAt &&
         incoming().updatedAt == request.time &&
+        (!('revision' in existing()) || ('revision' in incoming() && incoming().revision >= existing().revision)) &&
         (
           // Action: SyncWorkspaceMeta
           incoming().diff(existing()).affectedKeys().hasOnly([
@@ -152,11 +167,14 @@ service cloud.firestore {
             'schemaVersion',
             'sectionCount',
             'timerState',
+            'revision',
+            'chunkHashes',
             'updatedAt'
           ]) ||
           // Action: SyncTimerOnly
           incoming().diff(existing()).affectedKeys().hasOnly([
             'timerState',
+            'revision',
             'updatedAt'
           ])
         );
