@@ -453,7 +453,10 @@ export async function refreshDriveAccessTokenSilently(options?: {
               }
             },
             error_callback: (err: any) => {
-              console.warn('[Google Drive OAuth] Falha na renovação silenciosa do token:', err?.type || err?.message || err);
+              const errType = err?.type || err?.message || String(err || '');
+              if (!errType.includes('popup_failed_to_open')) {
+                console.debug('[Google Drive OAuth] Renovação silenciosa adiada:', errType);
+              }
               lastSilentRefreshFailureAt = Date.now();
               finish(null);
             },

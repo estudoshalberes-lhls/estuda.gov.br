@@ -4,7 +4,35 @@ import { decomposeDatabaseToFirestoreChunks, sanitizeForFirestore } from './fire
 
 export { decomposeDatabaseToFirestoreChunks, sanitizeForFirestore };
 
-export async function supabaseGoogleSignIn() {
+// Keep synchronous auth proxy updated with Supabase session
+if (typeof window !== 'undefined') {
+  supabase.auth.getUser().then(({ data: { user } }) => {
+    if (user) {
+      (window as any).__supabaseUser = user;
+    }
+  });
+  supabase.auth.onAuthStateChange((_event, session) => {
+    (window as any).__supabaseUser = session?.user || null;
+  });
+}
+
+export const auth = {
+  get currentUser() {
+    const sessionUser = (window as any).__supabaseUser;
+    if (!sessionUser) return null;
+    return {
+      uid: sessionUser.id,
+      email: sessionUser.email,
+      emailVerified: true,
+      isAnonymous: false,
+      getIdToken: async () => sessionUser.access_token || 'supabase-token',
+      getIdTokenResult: async () => ({ expirationTime: new Date(Date.now() + 3600000).toISOString() }),
+      providerData: [{ providerId: 'google.com', email: sessionUser.email }],
+    };
+  },
+};
+
+export async function googleSignIn() {
   const { data, error } = await supabase.auth.signInWithOAuth({
     provider: 'google',
     options: {
@@ -15,9 +43,19 @@ export async function supabaseGoogleSignIn() {
   return data;
 }
 
-export async function supabaseSignOut() {
+export async function googleSignOut() {
   const { error } = await supabase.auth.signOut();
   if (error) throw error;
+  (window as any).__supabaseUser = null;
+}
+
+export const supabaseGoogleSignIn = googleSignIn;
+export const supabaseSignOut = googleSignOut;
+
+export async function ensureFirebaseSessionAlive(_forceRefresh = false) {
+  const { data: { user } } = await supabase.auth.getUser();
+  if (!user) return null;
+  return auth.currentUser;
 }
 
 export async function loadDatabaseFromSupabase(userId: string) {
@@ -146,7 +184,7 @@ export const subscribeToFirestoreWorkspace = (
         onRemoteUpdate({ contentHash: 'updated', updatedAt: new Date().toISOString() });
       }
     )
-    .subscribe((status, err) => {
+    .subscribe((_status, err) => {
       if (err && onListenerError) onListenerError(err);
     });
 
