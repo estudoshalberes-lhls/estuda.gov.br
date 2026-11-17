@@ -993,9 +993,17 @@ export async function saveDatabaseToFirestore(
     pendingOps: ops.length,
   });
 
+  const workspaceMetaDirty =
+    Boolean(options?.forceFullWrite) ||
+    ops.length > 0 ||
+    cache.lastWorkspaceContentHash !== safeContentHash ||
+    cache.lastWorkspaceTimerSig !== timerSig;
+
   const BATCH_LIMIT = 400;
+  let workspaceMetaCommittedInBatch = false;
   for (let i = 0; i < ops.length; i += BATCH_LIMIT) {
     const slice = ops.slice(i, i + BATCH_LIMIT);
+    const isLastSlice = i + BATCH_LIMIT >= ops.length;
     const batch = writeBatch(db);
     for (const op of slice) {
       const id = op.type === 'delete' ? op.recordId : op.chunk.recordId;
@@ -1024,8 +1032,24 @@ export async function saveDatabaseToFirestore(
       }
     }
 
+    const includeWorkspaceMetaInBatch =
+      isLastSlice && !createdWorkspaceJustNow && workspaceMetaDirty;
+    if (includeWorkspaceMetaInBatch) {
+      batch.update(userDocRef, {
+        contentHash: safeContentHash,
+        schemaVersion: SCHEMA_VERSION,
+        sectionCount: rawChunks.length,
+        timerState: safeTimerState,
+        updatedAt: serverTimestamp(),
+      });
+    }
+
     try {
+      cache.lastLocalWriteMs = Date.now();
       await batch.commit();
+      if (includeWorkspaceMetaInBatch) {
+        workspaceMetaCommittedInBatch = true;
+      }
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, recordsPath);
     }
@@ -1043,15 +1067,10 @@ export async function saveDatabaseToFirestore(
     }
   }
 
-  // Update workspace metadata only when chunks changed, metadata/timer changed, or forced
-  const workspaceMetaDirty =
-    Boolean(options?.forceFullWrite) ||
-    ops.length > 0 ||
-    cache.lastWorkspaceContentHash !== safeContentHash ||
-    cache.lastWorkspaceTimerSig !== timerSig;
-
-  if (!createdWorkspaceJustNow && workspaceMetaDirty) {
+  // Fallback atomic update when only workspace metadata or timer changed (ops.length === 0)
+  if (!createdWorkspaceJustNow && workspaceMetaDirty && !workspaceMetaCommittedInBatch) {
     try {
+      cache.lastLocalWriteMs = Date.now();
       await updateDoc(userDocRef, {
         contentHash: safeContentHash,
         schemaVersion: SCHEMA_VERSION,

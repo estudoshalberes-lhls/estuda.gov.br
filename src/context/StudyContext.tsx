@@ -4128,6 +4128,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             firestoreDatabaseId: fbDiag.firestoreDatabaseId,
           });
           await ensureFirebaseSessionAlive(false);
+          const dbAtHydrateStart = dbRef.current;
+          const hashAtHydrateStart = computeDatabaseContentHash(dbAtHydrateStart);
           const [loadedFirestore, idbSnap, guestIdbSnap, guestIdbMeta] = await Promise.all([
             executeWithFirebaseBackoff(
               {
@@ -4152,6 +4154,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               localDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
             } catch {
               // ignore
+            }
+          }
+          let userEditedDuringHydrate = false;
+          if (computeDatabaseContentHash(dbRef.current) !== hashAtHydrateStart && dbRef.current !== dbAtHydrateStart) {
+            const liveConcurrentDelta = buildIncrementalDatabaseBackup(dbAtHydrateStart, dbRef.current, {
+              updatedAt: new Date().toISOString(),
+              userEmail: googleEmail || undefined,
+            });
+            if (liveConcurrentDelta.hasChanges) {
+              const preConcurrent = localDb;
+              localDb = applyIncrementalDeltaToDatabase(localDb, liveConcurrentDelta.envelope);
+              localDb = reconcileCompletedAndArchivedItems(localDb, dbRef.current, preConcurrent);
+              userEditedDuringHydrate = true;
             }
           }
 
@@ -4309,7 +4324,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               } finally {
                 firebaseInFlightRef.current = false;
               }
-            } else if (!rescuedGuestEdits && (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))) {
+            } else if (
+              !rescuedGuestEdits &&
+              !userEditedDuringHydrate &&
+              (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))
+            ) {
               if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
                 applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
                   skipFirestorePush: !remoteHadDirtyClassification,
@@ -4351,7 +4370,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               let mergedDb = delta.hasChanges
                 ? applyIncrementalDeltaToDatabase(remoteNormalized, additiveEnvelope)
                 : localDb;
-              if (!rescuedGuestEdits && !localUntouched && localEditMs > remoteMs + 1500) {
+              if (!rescuedGuestEdits && !localUntouched && (userEditedDuringHydrate || localEditMs > remoteMs + 1500)) {
                 mergedDb = {
                   ...mergedDb,
                   schedule: localDb.schedule,
@@ -5257,6 +5276,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
     cloudSaveInFlightRef.current = true;
     pendingCloudSyncRef.current = false;
+    let shouldRetryConcurrentEdit = false;
     try {
       const nowIso = new Date().toISOString();
       const mergedCloudDb: StudyDatabase = currentDb;
@@ -5285,6 +5305,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (computeDatabaseContentHash(dbRef.current) !== curHash) {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
+        shouldRetryConcurrentEdit = true;
       } else {
         setHasPendingCloudChanges(false);
       }
@@ -5314,7 +5335,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     } finally {
       cloudSaveInFlightRef.current = false;
-      if (pendingCloudSyncRef.current && syncedScopeOnceRef.current === activeScopeRef.current) {
+      if (shouldRetryConcurrentEdit && pendingCloudSyncRef.current && syncedScopeOnceRef.current === activeScopeRef.current) {
         window.setTimeout(() => {
           void flushCloudSyncNow();
         }, 350);
@@ -5428,7 +5449,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setHasPendingCloudChanges(false);
       toast('Backup incremental automático salvo no Google Drive.');
     } catch (err: any) {
-      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+      const errMsg = String(err?.message || '');
+      if (errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE')) {
+        lastAutoBackupAtRef.current = Date.now();
+        toast(
+          'Backup do Google Drive mais recente detectado. Snapshot base preservado sem sobrescrita.',
+          true,
+        );
+      } else if (errMsg.includes('TOKEN_EXPIRED')) {
         setDriveTokenReady(false);
       } else {
         // Backoff 1 minute before retrying failed periodic backup
