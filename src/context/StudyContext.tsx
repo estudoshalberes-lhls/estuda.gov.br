@@ -150,20 +150,25 @@ import {
   readStudyTextFile,
 } from '../lib/pdfExtract';
 import {
-  clearUserFirestoreCacheState,
-  decomposeDatabaseToFirestoreChunks,
-  executeWithFirebaseBackoff,
-  FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
-  FirestoreAuthHealthReport,
-  getFirestoreConfigDiagnostics,
+  loadDatabaseFromSupabase,
+  saveDatabaseToSupabase,
+  supabaseGoogleSignIn,
+  supabaseSignOut,
   loadDatabaseFromFirestore,
+  saveDatabaseToFirestore,
+  syncTimerStateToFirestore,
+  subscribeToFirestoreWorkspace,
   ParsedFirestoreError,
   parseFirestoreError,
-  saveDatabaseToFirestore,
-  subscribeToFirestoreWorkspace,
-  syncTimerStateToFirestore,
+  FirestoreAuthHealthReport,
   validateFirestoreAuthConnection,
-} from '../lib/firebaseDb';
+  getFirestoreConfigDiagnostics,
+  FIREBASE_RECONNECT_BACKOFF_DELAYS_MS,
+  executeWithFirebaseBackoff,
+  decomposeDatabaseToFirestoreChunks,
+  clearUserFirestoreCacheState,
+} from '../lib/supabaseSync';
+import { supabase } from '../lib/supabase';
 import {
   ActiveTimerLink,
   AppPreferences,
