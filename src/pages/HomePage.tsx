@@ -40,6 +40,7 @@ export const HomePage: React.FC = () => {
   const {
     db,
     setActivePage,
+    openLawAt,
     openContestEdital,
     allErrorEntries,
     activeTimerTopic,
@@ -49,6 +50,8 @@ export const HomePage: React.FC = () => {
     logQuickStudyMinutes,
     completeScheduleTopic,
     advanceErrorReview,
+    startErrorNotebookQuiz,
+    addLawReadDate,
     googleUser,
     toast,
   } = useStudy();
@@ -66,6 +69,64 @@ export const HomePage: React.FC = () => {
       ),
     [allErrorEntries, todayIso],
   );
+
+  const spacedLawReviews = useMemo(() => {
+    const todayMs = new Date(`${todayIso}T00:00:00`).getTime();
+    const list: Array<{
+      folder: string;
+      daysSinceRead: number;
+      curveStageLabel: string;
+      highIncidenceUnread: number;
+      firstPriorityArticle?: string;
+    }> = [];
+
+    for (const [folder, lawData] of Object.entries(db.laws || {})) {
+      const readList = [...(db.lawReadDates?.[folder] || [])].sort((a, b) =>
+        b.data.localeCompare(a.data),
+      );
+      const readIds = new Set(db.readLawItems?.[folder] || []);
+      const items = lawData?.items || [];
+      const unreadPriority = items.filter(
+        (it) =>
+          (it.grau === 'Muito Alto' || it.grau === 'Alto') &&
+          !readIds.has(it.id),
+      );
+      const latestReadIso = readList[0]?.data;
+      let daysSinceRead = -1;
+      if (latestReadIso) {
+        const readMs = new Date(`${latestReadIso}T00:00:00`).getTime();
+        if (Number.isFinite(readMs) && Number.isFinite(todayMs)) {
+          daysSinceRead = Math.max(0, Math.round((todayMs - readMs) / 86400000));
+        }
+      }
+      const isCurveDue =
+        daysSinceRead === 1 ||
+        daysSinceRead === 7 ||
+        daysSinceRead === 15 ||
+        daysSinceRead >= 30;
+      if (isCurveDue || unreadPriority.length > 0) {
+        const curveStageLabel =
+          daysSinceRead >= 30
+            ? `Ciclo 30+ dias (${daysSinceRead}d sem leitura)`
+            : daysSinceRead === 15
+              ? 'Ciclo de 15 dias (Revisão quinzenal)'
+              : daysSinceRead === 7
+                ? 'Ciclo de 7 dias (Revisão semanal)'
+                : daysSinceRead === 1
+                  ? 'Ciclo de 24h (Revisão D+1)'
+                  : 'Incidência Alta pendente de leitura';
+        list.push({
+          folder,
+          daysSinceRead,
+          curveStageLabel,
+          highIncidenceUnread: unreadPriority.length,
+          firstPriorityArticle:
+            unreadPriority[0]?.artigo_base || unreadPriority[0]?.dispositivo,
+        });
+      }
+    }
+    return list.sort((a, b) => b.daysSinceRead - a.daysSinceRead).slice(0, 6);
+  }, [db.lawReadDates, db.laws, db.readLawItems, todayIso]);
 
   const attempted = db.history.length;
   const totalCorrect = db.history.filter((h) => h.correct).length;
@@ -369,6 +430,152 @@ export const HomePage: React.FC = () => {
           </button>
         </div>
       </section>
+
+      {/* Fila de Revisão Espaçada Automática (Curva 1-7-15-30 dias) */}
+      {(dueReviews.length > 0 || spacedLawReviews.length > 0) && (
+        <Panel
+          title="Fila de Revisão Espaçada de Hoje (Curva 1–7–15–30 dias)"
+          subtitle="Consolidado automático de questões do Caderno de Erros vencidas hoje, legislações nos marcos da curva de esquecimento e dispositivos de alta incidência pendentes."
+          className="mb-5"
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              {dueReviews.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => startErrorNotebookQuiz(undefined, true)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] transition-colors cursor-pointer"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  Treinar {dueReviews.length} erro(s) do dia
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setActivePage('Lei Seca')}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors cursor-pointer"
+              >
+                <Scale className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Ir para Lei Seca
+              </button>
+            </div>
+          }
+        >
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5">
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5">
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <span className="text-[11.5px] font-extrabold uppercase tracking-[0.05em] text-[var(--accent)]">
+                  Caderno de Erros · Revisões Vencidas ({dueReviews.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActivePage('Caderno de Erros')}
+                  className="text-[11px] font-bold text-[var(--accent)] hover:underline"
+                >
+                  Ver todas
+                </button>
+              </div>
+              {dueReviews.length === 0 ? (
+                <p className="m-0 text-[12px] text-[var(--muted)]">
+                  Nenhuma anotação ou questão vencida no Caderno de Erros hoje.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {dueReviews.slice(0, 4).map((err) => (
+                    <div
+                      key={err.id}
+                      className="flex items-center justify-between gap-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-1.5 text-[10.5px] font-bold text-[var(--accent)]">
+                          <span>{err.materia || 'Geral'}</span>
+                          <span>·</span>
+                          <span className="text-[var(--muted)]">
+                            Ciclo #{(err.nivel_revisao || 0) + 1}
+                          </span>
+                        </div>
+                        <p className="m-0 text-[12px] font-semibold text-[var(--text)] truncate">
+                          {err.texto || err.questao?.enunciado || 'Erro anotado para revisão'}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => advanceErrorReview(err.id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--good)]/50 bg-[var(--good)]/12 text-[var(--good)] text-[11px] font-bold hover:bg-[var(--good)] hover:text-white transition-colors shrink-0"
+                        title="Concluir ciclo atual e agendar próxima revisão (1/7/15/30d)"
+                      >
+                        <Check className="w-3 h-3" />
+                        Revisado
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5">
+              <div className="flex items-center justify-between gap-2 mb-2.5">
+                <span className="text-[11.5px] font-extrabold uppercase tracking-[0.05em] text-[var(--accent)]">
+                  Lei Seca & Matriz · Curva 1–7–15–30d ({spacedLawReviews.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActivePage('Matriz de Incidência')}
+                  className="text-[11px] font-bold text-[var(--accent)] hover:underline"
+                >
+                  Abrir Matriz
+                </button>
+              </div>
+              {spacedLawReviews.length === 0 ? (
+                <p className="m-0 text-[12px] text-[var(--muted)]">
+                  Todas as legislações estão com leitura e dispositivos de alta incidência em dia!
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {spacedLawReviews.slice(0, 4).map((item) => (
+                    <div
+                      key={item.folder}
+                      className="flex items-center justify-between gap-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <strong className="block text-[12px] font-bold text-[var(--text)] truncate">
+                          {visibleName(item.folder)}
+                        </strong>
+                        <span className="block text-[11px] text-[var(--muted)] truncate">
+                          {item.curveStageLabel}
+                          {item.highIncidenceUnread > 0
+                            ? ` · ${item.highIncidenceUnread} art(s) Alto/Muito Alto não lido(s)`
+                            : ''}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            openLawAt(item.folder, item.firstPriorityArticle || '', {
+                              tab: 'continuous',
+                            })
+                          }
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors"
+                        >
+                          Ler agora
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => addLawReadDate(item.folder, todayIso, 'Revisão espaçada')}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--good)] hover:border-[var(--good)] text-[11px] font-bold"
+                          title="Registrar leitura de hoje nesta lei"
+                        >
+                          <Check className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </Panel>
+      )}
 
       {/* Contagem Regressiva Oficial para a Próxima Prova */}
       {nextExamCountdown && (

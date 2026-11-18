@@ -69,6 +69,7 @@ export const LawsPage: React.FC = () => {
     linkEditalPointToLaw,
     unlinkEditalPointFromLaw,
     addLawHighlight,
+    cycleLawHighlightColor,
     removeLawHighlightText,
     removeLastLawHighlight,
     saveLawNote,
@@ -85,6 +86,8 @@ export const LawsPage: React.FC = () => {
   } = useStudy();
   const [reprocessingLaw, setReprocessingLaw] = useState(false);
   const [eraserModeActive, setEraserModeActive] = useState(false);
+  const [visibleArticleLimit, setVisibleArticleLimit] = useState(80);
+  const [showStructuralOutline, setShowStructuralOutline] = useState(false);
 
   const {
     prefs: readingPrefs,
@@ -142,6 +145,7 @@ export const LawsPage: React.FC = () => {
 
   useEffect(() => {
     setShowGapDetails(false);
+    setVisibleArticleLimit(80);
   }, [activeFolder]);
 
   const savedLawNote = activeFolder ? db.lawNotes?.[activeFolder] || '' : '';
@@ -191,6 +195,13 @@ export const LawsPage: React.FC = () => {
     if (readerTab === 'continuous' && !showMatrixGuidesInContinuous) {
       setFocusSearchTerm(resolvedLabel);
       return;
+    }
+
+    const targetIdx = groupedContinuousArticles.findIndex(
+      (g) => g.canonicalKey === (canonicalKey || resolveCanonicalArticleIdentity({ dispositivo: articleKey }).canonicalKey),
+    );
+    if (targetIdx >= visibleArticleLimit) {
+      setVisibleArticleLimit(Math.max(visibleArticleLimit, targetIdx + 40));
     }
 
     setPendingJumpTarget({
@@ -549,6 +560,42 @@ export const LawsPage: React.FC = () => {
     return Array.from(groupsMap.values());
   }, [filteredItems, sequentialIndex.itemMetaById]);
 
+  const structuralOutline = useMemo(() => {
+    const entries: Array<{
+      id: string;
+      heading: string;
+      articleKey: string;
+      articleLabel: string;
+    }> = [];
+    const headingRegex = /\b((?:LIVRO|T[ÍI]TULO|CAP[ÍI]TULO|SE[ÇC][ÃA]O|SUBSE[ÇC][ÃA]O)\s+[IVXLCDM0-9A-Zº°ª-]+(?:\s*[-–—:]\s*[^\n.]{2,90})?)/i;
+    const seen = new Set<string>();
+    for (const group of groupedContinuousArticles) {
+      for (const item of group.items) {
+        const hay = `${item.dispositivo || ''}\n${item.texto || ''}`;
+        const m = headingRegex.exec(hay);
+        if (m) {
+          const clean = m[1].replace(/\s+/g, ' ').trim();
+          const norm = clean.toUpperCase();
+          if (!seen.has(norm)) {
+            seen.add(norm);
+            entries.push({
+              id: `${group.canonicalKey}-${entries.length}`,
+              heading: clean,
+              articleKey: group.canonicalKey,
+              articleLabel: group.key,
+            });
+          }
+        }
+      }
+    }
+    return entries;
+  }, [groupedContinuousArticles]);
+
+  const visibleContinuousGroups = useMemo(
+    () => groupedContinuousArticles.slice(0, visibleArticleLimit),
+    [groupedContinuousArticles, visibleArticleLimit],
+  );
+
   const highlightedSegments = useMemo(
     () => buildHighlightedSegments(continuousText, highlights),
     [continuousText, highlights],
@@ -627,9 +674,65 @@ export const LawsPage: React.FC = () => {
       toast('Selecione o trecho diretamente no leitor de Lei Seca abaixo.', true);
       return;
     }
-    addLawHighlight(activeFolder, rawText, color);
+    let targetItemId: string | undefined;
+    const anchorEl =
+      selection?.anchorNode instanceof HTMLElement
+        ? selection.anchorNode
+        : selection?.anchorNode?.parentElement;
+    const voiceContainer = anchorEl?.closest?.('[data-voice-item-id]');
+    if (voiceContainer instanceof HTMLElement && voiceContainer.dataset.voiceItemId) {
+      targetItemId = voiceContainer.dataset.voiceItemId;
+    }
+    addLawHighlight(activeFolder, rawText, color, targetItemId ? { itemId: targetItemId } : undefined);
     selection?.removeAllRanges();
   };
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!activeFolder) return;
+      const target = e.target as HTMLElement | null;
+      const isInput =
+        target &&
+        (target.tagName === 'INPUT' ||
+          target.tagName === 'TEXTAREA' ||
+          target.tagName === 'SELECT' ||
+          target.isContentEditable);
+      if (isInput) return;
+
+      if (e.altKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        voiceReader.togglePlayPause();
+        return;
+      }
+
+      if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+        const keyMap: Record<string, HighlightColorKey> = {
+          '1': 'yellow',
+          '2': 'green',
+          '3': 'blue',
+          '4': 'pink',
+          '5': 'orange',
+        };
+        if (keyMap[e.key]) {
+          const sel = window.getSelection()?.toString().trim();
+          if (sel) {
+            e.preventDefault();
+            handleApplyHighlight(keyMap[e.key]);
+          }
+          return;
+        }
+        if (e.key.toLowerCase() === 'e') {
+          const sel = window.getSelection()?.toString().trim();
+          if (sel || highlights.length > 0) {
+            e.preventDefault();
+            handleEraseHighlightSelection();
+          }
+        }
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [activeFolder, highlights.length, voiceReader]);
 
   const handleEraseHighlightSelection = () => {
     if (!activeFolder) return;
@@ -658,8 +761,8 @@ export const LawsPage: React.FC = () => {
       return;
     }
     try {
-      exportLawWithHighlightsPdf(activeFolder, continuousText, highlights);
-      toast('PDF da Lei Seca com grifos gerado.');
+      exportLawWithHighlightsPdf(activeFolder, continuousText, highlights, savedLawNote);
+      toast('PDF da Lei Seca com grifos e observações gerado.');
     } catch (err) {
       toast((err as Error).message, true);
     }
@@ -1272,6 +1375,21 @@ export const LawsPage: React.FC = () => {
                     <Newspaper className="w-3 h-3" />
                     Modo Diário Oficial {douMode ? '(Ativo)' : ''}
                   </button>
+                  {structuralOutline.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowStructuralOutline((v) => !v)}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors whitespace-nowrap ${
+                        showStructuralOutline
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                      }`}
+                      title="Abrir Sumário Estrutural por Títulos, Capítulos e Seções"
+                    >
+                      <ListOrdered className="w-3 h-3 text-[var(--accent)]" />
+                      Sumário ({structuralOutline.length})
+                    </button>
+                  )}
                   <button
                     type="button"
                     onClick={() => window.print()}
@@ -1282,6 +1400,35 @@ export const LawsPage: React.FC = () => {
                 </div>
               }
             >
+              {showStructuralOutline && structuralOutline.length > 0 && (
+                <div className="mb-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3">
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <span className="text-[11.5px] font-extrabold uppercase tracking-[0.06em] text-[var(--accent)]">
+                      Sumário Estrutural · Títulos, Capítulos e Seções
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setShowStructuralOutline(false)}
+                      className="text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
+                    >
+                      Ocultar
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-1.5 max-h-[150px] overflow-y-auto pr-1">
+                    {structuralOutline.map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        onClick={() => handleJumpToArticle(entry.articleLabel)}
+                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] hover:border-[var(--accent)] text-[11px] font-semibold text-[var(--text)] transition-colors text-left"
+                      >
+                        <span className="font-extrabold text-[var(--accent)]">{entry.articleLabel}</span>
+                        <span className="truncate max-w-[260px]">{entry.heading}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               {showContinuousLinker && (
                 <div className="mb-3 rounded-xl border border-[var(--accent)]/40 bg-[var(--panel-soft)] p-3 flex flex-wrap items-center gap-2">
                   <span className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--text)]">
@@ -1372,9 +1519,18 @@ export const LawsPage: React.FC = () => {
                   </button>
                 </div>
               )}
-              {continuousText ? (
+                  { continuousText ? (
                 <div
                   id="law-reader"
+                  onScroll={(e) => {
+                    if (visibleArticleLimit >= groupedContinuousArticles.length) return;
+                    const el = e.currentTarget;
+                    if (el.scrollHeight - el.scrollTop - el.clientHeight < 420) {
+                      setVisibleArticleLimit((prev) =>
+                        Math.min(groupedContinuousArticles.length, prev + 60),
+                      );
+                    }
+                  }}
                   style={{
                     fontSize: FONT_SIZE_PX[readingPrefs.fontSize],
                     lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
@@ -1402,7 +1558,7 @@ export const LawsPage: React.FC = () => {
                   <div className={douMode ? 'md:columns-2 md:gap-8 md:[column-rule:1px_solid_var(--line)]' : ''}>
                   {showMatrixGuidesInContinuous ? (
                     <div className="space-y-4">
-                      {groupedContinuousArticles.map((group) => {
+                      {visibleContinuousGroups.map((group) => {
                         const groupReadCount = group.items.filter((it) => readSet.has(it.id)).length;
                         const allGroupRead = groupReadCount === group.items.length && group.items.length > 0;
                         const topGradeItem = group.items.find(
@@ -1557,7 +1713,9 @@ export const LawsPage: React.FC = () => {
                                   ? 'pl-3'
                                   : '';
                                 const lineStr = `${displayDevice} — ${item.texto}`;
-                                const lineSegments = buildHighlightedSegments(lineStr, highlights);
+                                const lineSegments = buildHighlightedSegments(lineStr, highlights, {
+                                  itemId: item.id,
+                                });
                                 const isSpeakingThis = voiceReader.speakingItemId === item.id;
 
                                 return (
@@ -1585,20 +1743,27 @@ export const LawsPage: React.FC = () => {
                                           <mark
                                             key={sIdx}
                                             onClick={(e) => {
-                                              if (!eraserModeActive) return;
                                               e.stopPropagation();
-                                              removeLawHighlightText(activeFolder, seg.text);
-                                              setEraserModeActive(false);
+                                              if (eraserModeActive) {
+                                                removeLawHighlightText(activeFolder, seg.text);
+                                                setEraserModeActive(false);
+                                              } else {
+                                                cycleLawHighlightColor(
+                                                  activeFolder,
+                                                  seg.highlightId || seg.text,
+                                                  item.id,
+                                                );
+                                              }
                                             }}
                                             title={
                                               eraserModeActive
                                                 ? 'Clique para remover esta marcação'
-                                                : undefined
+                                                : 'Clique para alternar a cor da marcação'
                                             }
                                             className={
                                               eraserModeActive
                                                 ? 'cursor-pointer ring-1 ring-[var(--bad)] hover:opacity-75'
-                                                : undefined
+                                                : 'cursor-pointer hover:brightness-95 transition-all'
                                             }
                                             style={{
                                               backgroundColor: HIGHLIGHT_COLOR_RGB[seg.color].bg,
@@ -1652,6 +1817,29 @@ export const LawsPage: React.FC = () => {
                           </div>
                         );
                       })}
+                      {visibleArticleLimit < groupedContinuousArticles.length && (
+                        <div className="pt-2 pb-1 flex flex-wrap items-center justify-center gap-2 select-none">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setVisibleArticleLimit((prev) =>
+                                Math.min(groupedContinuousArticles.length, prev + 100),
+                              )
+                            }
+                            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[12px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors"
+                          >
+                            Carregar mais artigos ({visibleContinuousGroups.length} de{' '}
+                            {groupedContinuousArticles.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setVisibleArticleLimit(groupedContinuousArticles.length)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
+                          >
+                            Exibir todos os {groupedContinuousArticles.length} artigos
+                          </button>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="whitespace-pre-wrap">
@@ -1660,17 +1848,22 @@ export const LawsPage: React.FC = () => {
                           <mark
                             key={i}
                             onClick={() => {
-                              if (!eraserModeActive) return;
-                              removeLawHighlightText(activeFolder, seg.text);
-                              setEraserModeActive(false);
+                              if (eraserModeActive) {
+                                removeLawHighlightText(activeFolder, seg.text);
+                                setEraserModeActive(false);
+                              } else {
+                                cycleLawHighlightColor(activeFolder, seg.highlightId || seg.text);
+                              }
                             }}
                             title={
-                              eraserModeActive ? 'Clique para remover esta marcação' : undefined
+                              eraserModeActive
+                                ? 'Clique para remover esta marcação'
+                                : 'Clique para alternar a cor da marcação'
                             }
                             className={
                               eraserModeActive
                                 ? 'cursor-pointer ring-1 ring-[var(--bad)] hover:opacity-75'
-                                : undefined
+                                : 'cursor-pointer hover:brightness-95 transition-all'
                             }
                             style={{
                               backgroundColor: HIGHLIGHT_COLOR_RGB[seg.color].bg,

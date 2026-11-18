@@ -71,6 +71,13 @@ export const BackupPage: React.FC = () => {
     restoreCloudBackup,
     deleteCloudBackup,
     pruneOldCloudBackups,
+    driveUploadOutboxItems,
+    driveUploadOutboxCount,
+    flushDriveUploadOutboxNow,
+    localRestorePoints,
+    createManualRestorePoint,
+    restoreFromLocalRestorePoint,
+    deleteLocalRestorePointById,
   } = useStudy();
 
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -1134,6 +1141,127 @@ export const BackupPage: React.FC = () => {
       </Panel>
 
       <SyncActivityLogPanel />
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
+        <Panel
+          title={`Histórico de Versões (Pontos de Restauração Locais · ${localRestorePoints.length}/5)`}
+          subtitle="Snapshots automáticos e manuais salvos no IndexedDB deste navegador para reversão instantânea em 1 clique."
+          action={
+            <button
+              type="button"
+              onClick={() => void createManualRestorePoint('Snapshot manual criado pelo usuário')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
+            >
+              <Clock className="w-3.5 h-3.5" />
+              Criar ponto agora
+            </button>
+          }
+        >
+          {localRestorePoints.length === 0 ? (
+            <p className="m-0 text-[12px] text-[var(--muted)]">
+              Nenhum ponto de restauração local gravado ainda. Clique em &ldquo;Criar ponto agora&rdquo; ou realize uma sincronização em nuvem para gerar um snapshot de segurança.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              {localRestorePoints.map((pt) => (
+                <div
+                  key={pt.id}
+                  className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-3 py-2.5"
+                >
+                  <div className="min-w-0">
+                    <strong className="block text-[12px] font-bold text-[var(--text)] truncate">
+                      {pt.label || pt.reason}
+                    </strong>
+                    <span className="block text-[11px] text-[var(--muted)] font-mono-num">
+                      {new Date(pt.createdAt).toLocaleString('pt-BR')} · {formatUploadSize(pt.byteLength)} ·{' '}
+                      {pt.stats?.laws ?? 0} lei(s) · {pt.stats?.questions ?? 0} questão(ões)
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const ok = await requestConfirm({
+                          title: 'Restaurar ponto de versão local',
+                          description: `Deseja reverter o banco de dados para o ponto "${pt.label || pt.reason}" de ${new Date(pt.createdAt).toLocaleString('pt-BR')}? Um snapshot automático do estado atual será salvo antes da reversão.`,
+                          confirmLabel: 'Reverter versão',
+                        });
+                        if (ok) {
+                          await restoreFromLocalRestorePoint(pt.id);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors"
+                    >
+                      Restaurar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void deleteLocalRestorePointById(pt.id)}
+                      aria-label="Excluir ponto de restauração"
+                      className="inline-flex items-center justify-center w-7 h-7 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </Panel>
+
+        <Panel
+          title={`Fila Persistente de Uploads (Outbox · ${driveUploadOutboxCount}) & Deduplicação SHA-256`}
+          subtitle="Arquivos aguardando reconexão OAuth/rede no IndexedDB e motor de deduplicação criptográfica de PDFs."
+          action={
+            driveUploadOutboxCount > 0 ? (
+              <button
+                type="button"
+                onClick={() => void flushDriveUploadOutboxNow()}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 transition-opacity whitespace-nowrap"
+              >
+                <CloudUpload className="w-3.5 h-3.5" />
+                Reenviar fila ({driveUploadOutboxCount})
+              </button>
+            ) : undefined
+          }
+        >
+          <div className="space-y-2.5">
+            <div className="rounded-xl border border-[var(--good)]/35 bg-[var(--good)]/10 px-3 py-2 text-[11.5px] text-[var(--text)] flex items-center gap-2">
+              <ShieldCheck className="w-4 h-4 text-[var(--good)] shrink-0" />
+              <span>
+                <strong>Deduplicação SHA-256 ativa:</strong> arquivos PDF ou TXT idênticos reutilizam o mesmo blob binário no armazenamento local e evitam uploads duplicados.
+              </span>
+            </div>
+
+            {driveUploadOutboxItems.length === 0 ? (
+              <p className="m-0 text-[12px] text-[var(--muted)]">
+                Fila Outbox vazia: todos os arquivos locais enviados já foram sincronizados ou não há pendências de upload para o Google Drive.
+              </p>
+            ) : (
+              <div className="space-y-1.5 max-h-[180px] overflow-y-auto pr-1">
+                {driveUploadOutboxItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11.5px]"
+                  >
+                    <div className="min-w-0">
+                      <strong className="block font-bold text-[var(--text)] truncate">
+                        {item.filename}
+                      </strong>
+                      <span className="block text-[10.5px] text-[var(--muted)] truncate">
+                        {item.moduleTag || 'Geral'} · {item.lastError || 'Aguardando sessão OAuth'}
+                      </span>
+                    </div>
+                    <span className="px-2 py-0.5 rounded bg-[var(--warning)]/20 text-[var(--warning)] text-[10px] font-bold shrink-0">
+                      Na fila
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </Panel>
+      </div>
 
       <Panel
         title="O que é feito em cada tipo de backup"

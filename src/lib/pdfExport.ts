@@ -33,15 +33,45 @@ function safePdfText(value: unknown): string {
 export interface TextSegment {
   text: string;
   color?: HighlightColorKey;
+  highlightId?: string;
 }
 
-export function buildHighlightedSegments(source: string, highlights: LawHighlight[]): TextSegment[] {
+export function buildHighlightedSegments(
+  source: string,
+  highlights: LawHighlight[],
+  options?: { itemId?: string },
+): TextSegment[] {
   if (!source || !highlights.length) return [{ text: source }];
 
   const cleanSource = safePdfText(source);
-  const ranges: Array<{ start: number; end: number; color: HighlightColorKey }> = [];
+  const ranges: Array<{ start: number; end: number; color: HighlightColorKey; highlightId?: string }> = [];
 
   highlights.forEach((h) => {
+    if (h.itemId && options?.itemId && h.itemId !== options.itemId) {
+      return;
+    }
+
+    if (
+      typeof h.startOffset === 'number' &&
+      typeof h.endOffset === 'number' &&
+      h.endOffset > h.startOffset &&
+      h.startOffset >= 0 &&
+      h.endOffset <= cleanSource.length &&
+      (!h.itemId || !options?.itemId || h.itemId === options.itemId)
+    ) {
+      const slice = cleanSource.slice(h.startOffset, h.endOffset);
+      const rawNeedle = safePdfText(h.text).trim();
+      if (!rawNeedle || safePdfText(slice).toLowerCase().includes(rawNeedle.toLowerCase())) {
+        ranges.push({
+          start: h.startOffset,
+          end: h.endOffset,
+          color: h.color,
+          highlightId: h.id,
+        });
+        return;
+      }
+    }
+
     const rawNeedle = safePdfText(h.text).trim();
     if (!rawNeedle) return;
 
@@ -54,7 +84,12 @@ export function buildHighlightedSegments(source: string, highlights: LawHighligh
       let m: RegExpExecArray | null;
       while ((m = reg.exec(cleanSource)) !== null) {
         found = true;
-        ranges.push({ start: m.index, end: m.index + m[0].length, color: h.color });
+        ranges.push({
+          start: m.index,
+          end: m.index + m[0].length,
+          color: h.color,
+          highlightId: h.id,
+        });
         if (m.index === reg.lastIndex) reg.lastIndex++;
       }
     } catch {
@@ -64,7 +99,12 @@ export function buildHighlightedSegments(source: string, highlights: LawHighligh
     if (!found) {
       let idx = cleanSource.indexOf(rawNeedle);
       while (idx !== -1) {
-        ranges.push({ start: idx, end: idx + rawNeedle.length, color: h.color });
+        ranges.push({
+          start: idx,
+          end: idx + rawNeedle.length,
+          color: h.color,
+          highlightId: h.id,
+        });
         idx = cleanSource.indexOf(rawNeedle, idx + rawNeedle.length);
       }
     }
@@ -73,7 +113,7 @@ export function buildHighlightedSegments(source: string, highlights: LawHighligh
   if (!ranges.length) return [{ text: source }];
 
   ranges.sort((a, b) => a.start - b.start || b.end - a.end);
-  const merged: Array<{ start: number; end: number; color: HighlightColorKey }> = [];
+  const merged: Array<{ start: number; end: number; color: HighlightColorKey; highlightId?: string }> = [];
   let cursor = 0;
   for (const r of ranges) {
     if (r.start < cursor) continue;
@@ -87,7 +127,11 @@ export function buildHighlightedSegments(source: string, highlights: LawHighligh
     if (m.start > pos) {
       result.push({ text: cleanSource.slice(pos, m.start) });
     }
-    result.push({ text: cleanSource.slice(m.start, m.end), color: m.color });
+    result.push({
+      text: cleanSource.slice(m.start, m.end),
+      color: m.color,
+      highlightId: m.highlightId,
+    });
     pos = m.end;
   }
   if (pos < cleanSource.length) {
@@ -320,6 +364,7 @@ export function exportLawWithHighlightsPdf(
   lawName: string,
   text: string,
   highlights: LawHighlight[],
+  lawNote?: string,
 ): void {
   if (!text.trim()) {
     throw new Error('Não há texto para exportar.');
@@ -380,6 +425,32 @@ export function exportLawWithHighlightsPdf(
       });
       ctx.y += boxHeight + 2;
     });
+  }
+
+  // Include per-law Quadro de Observações when present
+  const cleanNote = String(lawNote || '').trim();
+  if (cleanNote) {
+    ctx.ensureSpace(26);
+    ctx.y += 6;
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(11);
+    doc.setTextColor(19, 81, 180);
+    doc.text(safePdfText(`Quadro de Observações · ${visibleName(lawName)}`), margin, ctx.y);
+    ctx.y += 5.5;
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(9.5);
+    const noteLines = doc.splitTextToSize(safePdfText(cleanNote), maxWidth - 8) as string[];
+    for (const line of noteLines) {
+      ctx.ensureSpace(6);
+      doc.setFillColor(244, 247, 252);
+      doc.setDrawColor(205, 218, 238);
+      doc.rect(margin, ctx.y - 4.1, maxWidth, 5.6, 'F');
+      doc.setTextColor(25, 35, 55);
+      doc.text(line, margin + 3.5, ctx.y);
+      ctx.y += 5.2;
+    }
   }
 
   // Add page numbers

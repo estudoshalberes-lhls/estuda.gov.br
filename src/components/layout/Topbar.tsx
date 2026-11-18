@@ -31,6 +31,54 @@ const DEFAULT_QUICK_MODULES: [ModuleName, ModuleName, ModuleName] = [
   'Matriz de Incidência',
 ];
 
+const TopbarWallClock: React.FC = React.memo(() => {
+  const [wallSecond, setWallSecond] = useState<number>(() => Math.floor(Date.now() / 1000));
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const next = Math.floor(Date.now() / 1000);
+      setWallSecond((prev) => (prev !== next ? next : prev));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const { clockText, dateText, fullDateTitle } = useMemo(() => {
+    const now = new Date(wallSecond * 1000);
+    return {
+      clockText: new Intl.DateTimeFormat('pt-BR', {
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      }).format(now),
+      dateText: new Intl.DateTimeFormat('pt-BR', {
+        day: '2-digit',
+        month: '2-digit',
+      }).format(now),
+      fullDateTitle: new Intl.DateTimeFormat('pt-BR', {
+        weekday: 'long',
+        day: '2-digit',
+        month: 'long',
+        year: 'numeric',
+      }).format(now),
+    };
+  }, [wallSecond]);
+
+  return (
+    <div
+      title={fullDateTitle}
+      className="hidden xl:flex flex-col justify-center leading-none pr-2.5 border-r border-[var(--line)] h-7"
+    >
+      <span className="text-[8px] font-extrabold tracking-[0.14em] text-[var(--muted)] uppercase whitespace-nowrap leading-none mb-1">
+        {dateText}
+      </span>
+      <strong className="font-mono-num text-[12.5px] font-bold text-[var(--text)] tabular-nums leading-none">
+        {clockText}
+      </strong>
+    </div>
+  );
+});
+
 export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
   const {
     db,
@@ -42,7 +90,6 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     focusQuote,
     changeFocusQuote,
     updatePreferences,
-    nowTick,
     timerSeconds,
     timerRunning,
     toggleTimer,
@@ -76,32 +123,9 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     setPomodoroMode(next);
   };
 
-  const wallSecond = Math.floor(nowTick / 1000);
-  const { clockText, dateText, fullDateTitle } = useMemo(() => {
-    const now = new Date(wallSecond * 1000);
-    return {
-      clockText: new Intl.DateTimeFormat('pt-BR', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).format(now),
-      dateText: new Intl.DateTimeFormat('pt-BR', {
-        day: '2-digit',
-        month: '2-digit',
-      }).format(now),
-      fullDateTitle: new Intl.DateTimeFormat('pt-BR', {
-        weekday: 'long',
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
-      }).format(now),
-    };
-  }, [wallSecond]);
-
   const [linkMenuOpen, setLinkMenuOpen] = useState(false);
   const [customSubject, setCustomSubject] = useState('');
-  const todayWeekday: WeekdayName = WEEKDAYS[(new Date(wallSecond * 1000).getDay() + 6) % 7];
+  const todayWeekday: WeekdayName = WEEKDAYS[(new Date().getDay() + 6) % 7];
   const [pickerDay, setPickerDay] = useState<WeekdayName>(todayWeekday);
   const linkPopoverRef = useRef<HTMLDivElement | null>(null);
 
@@ -197,7 +221,6 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
           </div>
           <p
             className="m-0 text-[12px] font-medium text-[var(--text)] leading-[1.35] whitespace-normal break-words"
-            aria-live="polite"
           >
             “{focusQuote}”
           </p>
@@ -346,14 +369,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
         className="relative flex items-center justify-between sm:justify-start w-full sm:w-auto gap-1.5 sm:gap-2.5 min-h-10 px-2 sm:px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] shrink-0"
         aria-label="Cronômetro"
       >
-        <div className="hidden xl:flex flex-col justify-center leading-none pr-2.5 border-r border-[var(--line)] h-7">
-          <span className="text-[8px] font-extrabold tracking-[0.14em] text-[var(--muted)] uppercase whitespace-nowrap leading-none mb-1">
-            {dateText}
-          </span>
-          <strong className="font-mono-num text-[12.5px] font-bold text-[var(--text)] tabular-nums leading-none">
-            {clockText}
-          </strong>
-        </div>
+        <TopbarWallClock />
 
         <div
           className={`flex flex-col justify-center leading-none h-8 px-2.5 rounded-lg transition-colors shrink-0 ${

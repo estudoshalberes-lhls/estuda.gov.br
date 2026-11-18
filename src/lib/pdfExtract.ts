@@ -236,7 +236,21 @@ function extractOrderedPageLines(spans: PositionedTextSpan[]): string[] {
   return assembleVisualLines(spans).map((l) => l.text);
 }
 
-export async function extractTextFromPdfFile(file: File | Blob, kind = 'documento'): Promise<string> {
+function yieldToMainThread(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof window !== 'undefined' && 'requestIdleCallback' in window) {
+      (window as any).requestIdleCallback(() => resolve(), { timeout: 16 });
+    } else {
+      setTimeout(resolve, 0);
+    }
+  });
+}
+
+export async function extractTextFromPdfFile(
+  file: File | Blob,
+  kind = 'documento',
+  onProgress?: (currentPage: number, totalPages: number) => void,
+): Promise<string> {
   const pdfjsLib = await getPdfJs();
   const buffer = await file.arrayBuffer();
   let pdf: import('pdfjs-dist').PDFDocumentProxy;
@@ -249,6 +263,10 @@ export async function extractTextFromPdfFile(file: File | Blob, kind = 'document
 
   const pageTexts: string[] = [];
   for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex++) {
+    if (pageIndex > 1 && pageIndex % 2 === 0) {
+      await yieldToMainThread();
+    }
+    onProgress?.(pageIndex, pdf.numPages);
     const page = await pdf.getPage(pageIndex);
     const content = await page.getTextContent();
     const spans: PositionedTextSpan[] = [];

@@ -267,8 +267,12 @@ export interface LawFolderData {
 export type HighlightColorKey = 'yellow' | 'green' | 'blue' | 'pink' | 'orange';
 
 export interface LawHighlight {
+  id?: string;
   text: string;
   color: HighlightColorKey;
+  itemId?: string;
+  startOffset?: number;
+  endOffset?: number;
 }
 
 export interface LawReadingEntry {

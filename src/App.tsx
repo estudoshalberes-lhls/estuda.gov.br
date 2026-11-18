@@ -143,7 +143,6 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         <section
           className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-7 py-5 sm:py-6"
           id="page-content"
-          aria-live="polite"
         >
           <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
         </section>

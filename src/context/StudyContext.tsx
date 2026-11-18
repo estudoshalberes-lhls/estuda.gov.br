@@ -28,6 +28,15 @@ import {
   StoredDatabaseSnapshot,
   triggerBlobDownload,
   setStorageUserScope,
+  DriveUploadOutboxItem,
+  getDriveUploadOutbox,
+  enqueueDriveUploadOutbox,
+  removeDriveUploadOutboxItem,
+  LocalRestorePointMeta,
+  listLocalRestorePoints,
+  createLocalRestorePoint,
+  loadLocalRestorePointJson,
+  deleteLocalRestorePoint,
 } from '../lib/fileStorage';
 import type { User } from 'firebase/auth';
 import {
@@ -844,7 +853,13 @@ interface StudyContextValue {
     payload: Omit<SavedIncidenceFilter, 'id' | 'criado_em'> & { id?: string },
   ) => SavedIncidenceFilter;
   deleteIncidenceFilter: (id: string) => void;
-  addLawHighlight: (folder: string, text: string, color: HighlightColorKey) => void;
+  addLawHighlight: (
+    folder: string,
+    text: string,
+    color: HighlightColorKey,
+    options?: { itemId?: string; startOffset?: number; endOffset?: number },
+  ) => void;
+  cycleLawHighlightColor: (folder: string, targetTextOrId: string, itemId?: string) => void;
   removeLawHighlightText: (folder: string, text: string) => boolean;
   removeLastLawHighlight: (folder: string) => void;
   saveLawNote: (folder: string, note: string, silent?: boolean) => void;
@@ -1017,6 +1032,13 @@ interface StudyContextValue {
   resolveAllDriveConflictsRestoreLocal: () => Promise<void>;
   dismissDriveSyncConflicts: () => void;
   checkDriveTimestampConflictsNow: () => Promise<DeletedDriveConflict[]>;
+  driveUploadOutboxItems: DriveUploadOutboxItem[];
+  driveUploadOutboxCount: number;
+  flushDriveUploadOutboxNow: () => Promise<number>;
+  localRestorePoints: LocalRestorePointMeta[];
+  createManualRestorePoint: (reason?: string) => Promise<LocalRestorePointMeta | null>;
+  restoreFromLocalRestorePoint: (pointId: string) => Promise<boolean>;
+  deleteLocalRestorePointById: (pointId: string) => Promise<void>;
 }
 
 const StudyContext = createContext<StudyContextValue | null>(null);
@@ -3346,6 +3368,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   >({});
   const [resolvingDriveConflictId, setResolvingDriveConflictId] = useState<string | null>(null);
   const dismissedConflictIdsRef = useRef<Set<string>>(new Set());
+  const [driveUploadOutboxItems, setDriveUploadOutboxItems] = useState<DriveUploadOutboxItem[]>([]);
+  const [localRestorePoints, setLocalRestorePoints] = useState<LocalRestorePointMeta[]>([]);
 
   // Firebase Firestore cloud DB state
   const [isSyncingFirebase, setIsSyncingFirebase] = useState<boolean>(false);
@@ -4222,12 +4246,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   pomodoroModeRef.current = pomodoroMode;
   pomodoroPhaseRef.current = pomodoroPhase;
 
-  // Synchronized precision ticker: drives wall clock, stopwatch, Pomodoro & quiz without 1s jitter/drift
+  // Precision ticker: ONLY ticks when the study timer/Pomodoro or a quiz is actively running!
+  // Never calls setNowTick when idle so the app never suffers 1Hz background re-render storms.
   useEffect(() => {
     const id = window.setInterval(() => {
+      const t = timerStateRef.current;
+      const activeQuiz = quizRef.current;
+      const hasRunningQuiz = Boolean(activeQuiz && !activeQuiz.completed);
+      if (t.startedAt === 0 && !hasRunningQuiz) {
+        return;
+      }
+
       const now = Date.now();
       const wallSec = Math.floor(now / 1000);
-      const t = timerStateRef.current;
       const curTimerSec = computeCurrentTimerSeconds(t, now);
 
       const wallChanged = wallSec !== lastWallSecRef.current;
@@ -4240,7 +4271,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const deltaSec = t.startedAt > 0 ? Math.max(0, curTimerSec - prevTimerSec) : 0;
       lastTimerSecRef.current = curTimerSec;
 
-      setNowTick(now);
+      if (t.startedAt > 0) {
+        setNowTick(now);
+      }
 
       if (pomodoroModeRef.current !== 'continuous' && t.startedAt > 0 && deltaSec > 0) {
         const mode = pomodoroModeRef.current;
@@ -4286,7 +4319,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           };
         });
       }
-    }, 200);
+    }, 250);
     return () => window.clearInterval(id);
   }, [computeCurrentTimerSeconds, toast]);
 
@@ -8767,13 +8800,57 @@ function isEmailAuthorized(email?: string | null): boolean {
     [ensureDriveToken, toast],
   );
 
+  const refreshLocalOutboxAndRestorePoints = useCallback(async (explicitScope?: string) => {
+    const scope = explicitScope || activeScopeRef.current || 'offline_guest';
+    const [outbox, points] = await Promise.all([
+      getDriveUploadOutbox(scope),
+      listLocalRestorePoints(scope),
+    ]);
+    if (scope === activeScopeRef.current) {
+      setDriveUploadOutboxItems(outbox);
+      setLocalRestorePoints(points);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshLocalOutboxAndRestorePoints();
+  }, [googleUser?.uid, refreshLocalOutboxAndRestorePoints]);
+
   const autoSyncFileToDrive = useCallback(
     async (
       fileOrBlob: File | Blob,
       filename: string,
       subfolderName?: string | string[],
+      blobKeyHint?: string,
     ): Promise<boolean> => {
-      if (!driveConnected) return false;
+      const scope = activeScopeRef.current || 'offline_guest';
+      const moduleTag = Array.isArray(subfolderName) ? subfolderName[0] : subfolderName;
+      const subfolderStr = Array.isArray(subfolderName) ? subfolderName.join('/') : subfolderName;
+      const outboxId = `${scope}::${subfolderStr || 'root'}::${filename}`;
+
+      const queueForRetry = async (errMsg: string) => {
+        if (blobKeyHint) {
+          await enqueueDriveUploadOutbox(
+            {
+              id: outboxId,
+              blobKey: blobKeyHint,
+              filename,
+              subfolder: subfolderStr,
+              moduleTag,
+              queuedAt: new Date().toISOString(),
+              attempts: 1,
+              lastError: errMsg,
+            },
+            scope,
+          );
+          void refreshLocalOutboxAndRestorePoints(scope);
+        }
+      };
+
+      if (!driveConnected) {
+        await queueForRetry('Google Drive desconectado');
+        return false;
+      }
       const notifyThrottle = (msg: string) => {
         const now = Date.now();
         if (now - lastDriveUploadAlertAtRef.current > 4000) {
@@ -8785,27 +8862,29 @@ function isEmailAuthorized(email?: string | null): boolean {
       const token = await getAccessToken();
       if (!token) {
         setDriveTokenReady(false);
+        await queueForRetry('Sessão OAuth expirada');
         recordSyncActivity({
           category: 'drive-upload',
-          operation: 'Envio automático para o Drive adiado',
+          operation: 'Envio automático enfileirado (Outbox)',
           status: 'warning',
           errorCode: 'oauth/drive-token-expired',
-          message: `Sessão OAuth do Google Drive indisponível para enviar "${filename}". Reconecte a conta Google para concluir o envio.`,
-          affectedFiles: [{ name: filename, action: 'failed', detail: 'Sessão OAuth expirada' }],
+          message: `Sessão OAuth do Google Drive indisponível para enviar "${filename}". O arquivo foi salvo na Fila Persistente (Outbox) e será enviado ao reconectar.`,
+          affectedFiles: [{ name: filename, action: 'failed', detail: 'Salvo na fila Outbox' }],
         });
         notifyThrottle(
-          'Sua permissão temporária do Google Drive expirou. Clique em "Reconectar Drive" em Backup e Restauração para enviar arquivos na nuvem.',
+          'Sua permissão temporária do Google Drive expirou. O arquivo foi guardado na fila segura e será enviado assim que reconectar.',
         );
         return false;
       }
       setDriveTokenReady(true);
 
       try {
-        const moduleTag = Array.isArray(subfolderName) ? subfolderName[0] : subfolderName;
         const uploaded = await uploadFileToDrive(fileOrBlob, filename, token, subfolderName, {
           moduleTag,
           sourceAction: 'auto-upload',
         });
+        await removeDriveUploadOutboxItem(outboxId, scope);
+        void refreshLocalOutboxAndRestorePoints(scope);
         const updatedMeta = recordUploadedFilesInCacheMeta(activeScopeRef.current, {
           driveFiles: [uploaded],
         });
@@ -8829,29 +8908,30 @@ function isEmailAuthorized(email?: string | null): boolean {
         return true;
       } catch (err: any) {
         const msg = String(err?.message || '');
+        await queueForRetry(msg || 'Erro de rede no upload');
         if (msg.includes('TOKEN_EXPIRED')) {
           setDriveTokenReady(false);
           notifyThrottle(
-            'Sua sessão do Google Drive expirou. Reconecte a conta em Backup e Restauração para enviar o arquivo.',
+            'Sua sessão do Google Drive expirou. O arquivo ficou na fila segura (Outbox) para reenvio automático.',
           );
         } else if (msg.includes('DRIVE_FOLDER_PERMISSION')) {
           notifyThrottle(
             `O Google Drive bloqueou o envio para a pasta "${activeDriveFolderNameRef.current}". Em Backup e Restauração, clique em "Escolher pasta no Drive" para liberar a gravação.`,
           );
         } else {
-          notifyThrottle(`Falha ao salvar "${filename}" no Google Drive: ${msg || 'Erro no envio'}`);
+          notifyThrottle(`Falha ao salvar "${filename}" no Google Drive: ${msg || 'Mantido na fila Outbox'}`);
         }
         recordSyncActivity({
           category: 'drive-upload',
-          operation: 'Falha ao enviar arquivo ao Drive',
+          operation: 'Falha ao enviar arquivo ao Drive (mantido na fila Outbox)',
           status: 'error',
           errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
-          message: `Não foi possível enviar "${filename}" para o Google Drive.`,
+          message: `Não foi possível enviar "${filename}" agora; mantido na fila segura (Outbox).`,
           affectedFiles: [
             {
               name: filename,
               action: 'failed',
-              detail: msg || 'Erro no envio',
+              detail: msg || 'Na fila Outbox',
               module: Array.isArray(subfolderName) ? subfolderName.join(' / ') : subfolderName,
             },
           ],
@@ -8860,7 +8940,109 @@ function isEmailAuthorized(email?: string | null): boolean {
         return false;
       }
     },
-    [driveConnected, recordSyncActivity, toast],
+    [driveConnected, recordSyncActivity, refreshLocalOutboxAndRestorePoints, toast],
+  );
+
+  const flushDriveUploadOutboxNow = useCallback(async (): Promise<number> => {
+    const scope = activeScopeRef.current || 'offline_guest';
+    const items = await getDriveUploadOutbox(scope);
+    if (!items.length) return 0;
+    const token = await getAccessToken();
+    if (!token) {
+      toast('Conecte ou renove a sessão do Google Drive para reenviar a fila Outbox.', true);
+      return 0;
+    }
+    let sent = 0;
+    for (const item of items) {
+      try {
+        const blob = await getFileBlob(item.blobKey);
+        if (!blob) {
+          await removeDriveUploadOutboxItem(item.id, scope);
+          continue;
+        }
+        await uploadFileToDrive(blob, item.filename, token, item.subfolder, {
+          moduleTag: item.moduleTag,
+          sourceAction: 'auto-upload',
+        });
+        await removeDriveUploadOutboxItem(item.id, scope);
+        sent += 1;
+      } catch {
+        // Keep in outbox for future retry
+      }
+    }
+    await refreshLocalOutboxAndRestorePoints(scope);
+    if (sent > 0) {
+      toast(`${sent} arquivo(s) pendente(s) da fila Outbox enviado(s) ao Google Drive!`);
+    }
+    return sent;
+  }, [refreshLocalOutboxAndRestorePoints, toast]);
+
+  const createManualRestorePoint = useCallback(
+    async (label = 'Ponto de restauração manual'): Promise<LocalRestorePointMeta | null> => {
+      const scope = activeScopeRef.current || 'offline_guest';
+      const curDb = dbRef.current;
+      const points = await createLocalRestorePoint(scope, JSON.stringify(curDb), {
+        label,
+        reason: 'manual',
+        contentHash: computeDatabaseContentHash(curDb),
+        stats: {
+          laws: Object.keys(curDb.laws || {}).length,
+          questions: curDb.questions?.length || 0,
+          contests: curDb.contests?.length || 0,
+          errors: curDb.annotations?.length || 0,
+        },
+      });
+      await refreshLocalOutboxAndRestorePoints(scope);
+      if (points[0]) {
+        toast('Ponto de restauração local criado com sucesso!');
+      }
+      return points[0] || null;
+    },
+    [refreshLocalOutboxAndRestorePoints, toast],
+  );
+
+  const restoreFromLocalRestorePoint = useCallback(
+    async (pointId: string): Promise<boolean> => {
+      const scope = activeScopeRef.current || 'offline_guest';
+      const rawJson = await loadLocalRestorePointJson(scope, pointId);
+      if (!rawJson) {
+        toast('Não foi possível localizar os dados deste ponto de restauração.', true);
+        return false;
+      }
+      try {
+        const parsed = normalizeAndMergeDatabase(JSON.parse(rawJson));
+        const curDb = dbRef.current;
+        await createLocalRestorePoint(scope, JSON.stringify(curDb), {
+          label: 'Snapshot automático antes de reverter versão',
+          reason: 'auto-pre-restore',
+          contentHash: computeDatabaseContentHash(curDb),
+          stats: {
+            laws: Object.keys(curDb.laws || {}).length,
+            questions: curDb.questions?.length || 0,
+            contests: curDb.contests?.length || 0,
+            errors: curDb.annotations?.length || 0,
+          },
+        });
+        applyRestoredDatabaseForScope(scope, parsed, new Date().toISOString());
+        await refreshLocalOutboxAndRestorePoints(scope);
+        toast('Banco de dados restaurado a partir do ponto de restauração local!');
+        return true;
+      } catch {
+        toast('Arquivo do ponto de restauração inválido ou corrompido.', true);
+        return false;
+      }
+    },
+    [applyRestoredDatabaseForScope, refreshLocalOutboxAndRestorePoints, toast],
+  );
+
+  const deleteLocalRestorePointById = useCallback(
+    async (pointId: string): Promise<void> => {
+      const scope = activeScopeRef.current || 'offline_guest';
+      await deleteLocalRestorePoint(scope, pointId);
+      await refreshLocalOutboxAndRestorePoints(scope);
+      toast('Ponto de restauração removido.');
+    },
+    [refreshLocalOutboxAndRestorePoints, toast],
   );
 
   const driveSyncConflictsRef = useRef<DeletedDriveConflict[]>(driveSyncConflicts);
@@ -13297,7 +13479,12 @@ function isEmailAuthorized(email?: string | null): boolean {
   );
 
   const addLawHighlight = useCallback(
-    (folder: string, text: string, color: HighlightColorKey) => {
+    (
+      folder: string,
+      text: string,
+      color: HighlightColorKey,
+      options?: { itemId?: string; startOffset?: number; endOffset?: number },
+    ) => {
       const trimmed = text.trim();
       if (!trimmed) {
         toast('Selecione um trecho da lei antes de grifar.', true);
@@ -13305,11 +13492,23 @@ function isEmailAuthorized(email?: string | null): boolean {
       }
       setDb((prev) => {
         const existing = prev.lawHighlights[folder] || [];
-        const matchIdx = existing.findIndex((h) => h.text === trimmed);
+        const matchIdx = existing.findIndex(
+          (h) =>
+            h.text === trimmed &&
+            (!options?.itemId || !h.itemId || h.itemId === options.itemId),
+        );
+        const nextEntry: LawHighlight = {
+          id: matchIdx >= 0 && existing[matchIdx].id ? existing[matchIdx].id : uid(8),
+          text: trimmed,
+          color,
+          ...(options?.itemId ? { itemId: options.itemId } : {}),
+          ...(typeof options?.startOffset === 'number' ? { startOffset: options.startOffset } : {}),
+          ...(typeof options?.endOffset === 'number' ? { endOffset: options.endOffset } : {}),
+        };
         const next =
           matchIdx >= 0
-            ? existing.map((h, i) => (i === matchIdx ? { ...h, color } : h))
-            : [...existing, { text: trimmed, color }];
+            ? existing.map((h, i) => (i === matchIdx ? { ...h, ...nextEntry } : h))
+            : [...existing, nextEntry];
         return {
           ...prev,
           lawHighlights: { ...prev.lawHighlights, [folder]: next },
@@ -13317,7 +13516,46 @@ function isEmailAuthorized(email?: string | null): boolean {
       });
       toast('Trecho salvo nos grifos.');
     },
-    [toast],
+    [setDb, toast],
+  );
+
+  const cycleLawHighlightColor = useCallback(
+    (folder: string, targetTextOrId: string, itemId?: string) => {
+      const COLOR_ORDER: HighlightColorKey[] = ['yellow', 'green', 'blue', 'pink', 'orange'];
+      const COLOR_LABELS: Record<HighlightColorKey, string> = {
+        yellow: 'Amarelo',
+        green: 'Verde',
+        blue: 'Azul',
+        pink: 'Rosa',
+        orange: 'Laranja',
+      };
+      const cleanTarget = String(targetTextOrId || '').trim();
+      if (!cleanTarget) return;
+      let nextColorLabel: string | null = null;
+      setDb((prev) => {
+        const existing = prev.lawHighlights[folder] || [];
+        const idx = existing.findIndex(
+          (h) =>
+            h.id === cleanTarget ||
+            (h.text.toLowerCase() === cleanTarget.toLowerCase() &&
+              (!itemId || !h.itemId || h.itemId === itemId)),
+        );
+        if (idx < 0) return prev;
+        const currentColor = existing[idx].color;
+        const nextColor =
+          COLOR_ORDER[(COLOR_ORDER.indexOf(currentColor) + 1) % COLOR_ORDER.length];
+        nextColorLabel = COLOR_LABELS[nextColor];
+        const next = existing.map((h, i) => (i === idx ? { ...h, color: nextColor } : h));
+        return {
+          ...prev,
+          lawHighlights: { ...prev.lawHighlights, [folder]: next },
+        };
+      });
+      if (nextColorLabel) {
+        toast(`Cor da marcação alterada para ${nextColorLabel}.`);
+      }
+    },
+    [setDb, toast],
   );
 
   const removeLawHighlightText = useCallback(
@@ -14860,6 +15098,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         saveIncidenceFilter,
         deleteIncidenceFilter,
         addLawHighlight,
+        cycleLawHighlightColor,
         removeLawHighlightText,
         removeLastLawHighlight,
         saveLawNote,
@@ -14953,6 +15192,13 @@ function isEmailAuthorized(email?: string | null): boolean {
         resolveAllDriveConflictsRestoreLocal,
         dismissDriveSyncConflicts,
         checkDriveTimestampConflictsNow,
+        driveUploadOutboxItems,
+        driveUploadOutboxCount: driveUploadOutboxItems.length,
+        flushDriveUploadOutboxNow,
+        localRestorePoints,
+        createManualRestorePoint,
+        restoreFromLocalRestorePoint,
+        deleteLocalRestorePointById,
         examFocusMode,
         setExamFocusMode,
       }}

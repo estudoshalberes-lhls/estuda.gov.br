@@ -413,3 +413,354 @@ export function triggerBlobDownload(blob: Blob, filename: string): void {
   link.remove();
   window.setTimeout(() => URL.revokeObjectURL(url), 1500);
 }
+
+// ============================================================================
+// 1. SHA-256 Content Hash Deduplication for Local & Drive Blobs
+// ============================================================================
+
+export interface BlobSha256IndexRecord {
+  hashToKey: Record<string, string>;
+  keyToHash: Record<string, string>;
+  updatedAt: string;
+}
+
+function getScopedBlobHashIndexKey(scope = currentStorageScope): string {
+  return `blob_sha256_index::${scope || 'offline_guest'}`;
+}
+
+export async function computeBlobSha256(blob: Blob): Promise<string> {
+  try {
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      const buffer = await blob.arrayBuffer();
+      const digest = await crypto.subtle.digest('SHA-256', buffer);
+      const bytes = new Uint8Array(digest);
+      let hex = '';
+      for (let i = 0; i < bytes.length; i++) {
+        hex += bytes[i].toString(16).padStart(2, '0');
+      }
+      return hex;
+    }
+  } catch {
+    // fallback below
+  }
+  const text = await blob.text().catch(() => `${blob.size}:${blob.type}`);
+  let h = 2166136261;
+  for (let i = 0; i < text.length; i++) {
+    h ^= text.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return `fnv1a_${blob.size}_${(h >>> 0).toString(16)}`;
+}
+
+export async function loadBlobSha256Index(
+  scope = currentStorageScope,
+): Promise<BlobSha256IndexRecord> {
+  try {
+    const db = await openDatabase();
+    const res = await new Promise<BlobSha256IndexRecord | undefined>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readonly');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      const req = store.get(getScopedBlobHashIndexKey(scope));
+      req.onsuccess = () => resolve(req.result as BlobSha256IndexRecord | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    if (res && res.hashToKey && res.keyToHash) {
+      return res;
+    }
+  } catch {
+    // ignore
+  }
+  return { hashToKey: {}, keyToHash: {}, updatedAt: '' };
+}
+
+export async function saveFileBlobWithDedup(
+  key: string,
+  blob: Blob,
+  scope = currentStorageScope,
+): Promise<{ key: string; sha256: string; deduplicatedFromKey: string | null }> {
+  const [sha256, index] = await Promise.all([
+    computeBlobSha256(blob),
+    loadBlobSha256Index(scope),
+  ]);
+  const existingKey = index.hashToKey[sha256] || null;
+  await saveFileBlob(key, blob, scope);
+  try {
+    index.hashToKey[sha256] = existingKey || key;
+    index.keyToHash[key] = sha256;
+    index.updatedAt = new Date().toISOString();
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(index, getScopedBlobHashIndexKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // ignore index update failure
+  }
+  return {
+    key,
+    sha256,
+    deduplicatedFromKey: existingKey && existingKey !== key ? existingKey : null,
+  };
+}
+
+// ============================================================================
+// 2. Persistent IndexedDB Outbox Queue for Google Drive File Uploads
+// ============================================================================
+
+export interface DriveUploadOutboxItem {
+  id: string;
+  blobKey: string;
+  filename: string;
+  subfolder?: string;
+  moduleTag?: string;
+  sourceAction?: string;
+  existingFileId?: string;
+  sha256?: string;
+  queuedAt: string;
+  attempts: number;
+  lastError?: string;
+}
+
+function getScopedDriveOutboxKey(scope = currentStorageScope): string {
+  return `drive_upload_outbox::${scope || 'offline_guest'}`;
+}
+
+export async function getDriveUploadOutbox(
+  scope = currentStorageScope,
+): Promise<DriveUploadOutboxItem[]> {
+  try {
+    const db = await openDatabase();
+    const res = await new Promise<DriveUploadOutboxItem[] | undefined>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readonly');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      const req = store.get(getScopedDriveOutboxKey(scope));
+      req.onsuccess = () => resolve(req.result as DriveUploadOutboxItem[] | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function enqueueDriveUploadOutbox(
+  item: Omit<DriveUploadOutboxItem, 'id' | 'queuedAt' | 'attempts'> & {
+    id?: string;
+    queuedAt?: string;
+    attempts?: number;
+  },
+  scope = currentStorageScope,
+): Promise<DriveUploadOutboxItem[]> {
+  try {
+    const existing = await getDriveUploadOutbox(scope);
+    const dedupIdx = existing.findIndex(
+      (e) =>
+        e.blobKey === item.blobKey ||
+        (item.sha256 && e.sha256 === item.sha256 && e.subfolder === item.subfolder) ||
+        (e.filename === item.filename && e.subfolder === item.subfolder),
+    );
+    const entry: DriveUploadOutboxItem = {
+      id: item.id || `${item.blobKey || item.filename}::${item.subfolder || 'root'}`,
+      blobKey: item.blobKey,
+      filename: item.filename,
+      subfolder: item.subfolder,
+      moduleTag: item.moduleTag,
+      sourceAction: item.sourceAction,
+      existingFileId: item.existingFileId,
+      sha256: item.sha256,
+      queuedAt: item.queuedAt || new Date().toISOString(),
+      attempts: item.attempts ?? (dedupIdx >= 0 ? existing[dedupIdx].attempts : 0),
+      lastError: item.lastError,
+    };
+    const next = [...existing];
+    if (dedupIdx >= 0) {
+      next[dedupIdx] = entry;
+    } else {
+      next.push(entry);
+    }
+    const trimmed = next.slice(-150);
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(trimmed, getScopedDriveOutboxKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return trimmed;
+  } catch {
+    return [];
+  }
+}
+
+export async function removeDriveUploadOutboxItem(
+  idOrBlobKey: string,
+  scope = currentStorageScope,
+): Promise<DriveUploadOutboxItem[]> {
+  try {
+    const existing = await getDriveUploadOutbox(scope);
+    const next = existing.filter((e) => e.id !== idOrBlobKey && e.blobKey !== idOrBlobKey);
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(next, getScopedDriveOutboxKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return next;
+  } catch {
+    return [];
+  }
+}
+
+export async function clearDriveUploadOutbox(scope = currentStorageScope): Promise<void> {
+  try {
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.delete(getScopedDriveOutboxKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+  } catch {
+    // ignore
+  }
+}
+
+// ============================================================================
+// 3. Automatic Local Restore Points (Version History Before Cloud Merges)
+// ============================================================================
+
+export interface LocalRestorePointMeta {
+  id: string;
+  createdAt: string;
+  label: string;
+  reason: 'auto-pre-restore' | 'auto-pre-merge' | 'manual';
+  contentHash: string;
+  byteLength: number;
+  stats: {
+    questions: number;
+    laws: number;
+    contests: number;
+    errors: number;
+  };
+}
+
+interface StoredLocalRestorePoint extends LocalRestorePointMeta {
+  rawJson: string;
+}
+
+const MAX_LOCAL_RESTORE_POINTS = 5;
+
+function getScopedRestorePointsKey(scope = currentStorageScope): string {
+  return `restore_points::${scope || 'offline_guest'}`;
+}
+
+async function readStoredRestorePoints(
+  scope = currentStorageScope,
+): Promise<StoredLocalRestorePoint[]> {
+  try {
+    const db = await openDatabase();
+    const res = await new Promise<StoredLocalRestorePoint[] | undefined>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readonly');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      const req = store.get(getScopedRestorePointsKey(scope));
+      req.onsuccess = () => resolve(req.result as StoredLocalRestorePoint[] | undefined);
+      req.onerror = () => reject(req.error);
+    });
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function listLocalRestorePoints(
+  scope = currentStorageScope,
+): Promise<LocalRestorePointMeta[]> {
+  const list = await readStoredRestorePoints(scope);
+  return list.map(({ rawJson: _raw, ...meta }) => meta);
+}
+
+export async function createLocalRestorePoint(
+  scope: string,
+  rawJson: string,
+  options: {
+    label: string;
+    reason: LocalRestorePointMeta['reason'];
+    contentHash: string;
+    stats: LocalRestorePointMeta['stats'];
+  },
+): Promise<LocalRestorePointMeta[]> {
+  if (!rawJson) return listLocalRestorePoints(scope);
+  try {
+    const current = await readStoredRestorePoints(scope);
+    if (
+      options.reason !== 'manual' &&
+      current.length > 0 &&
+      current[0].contentHash === options.contentHash
+    ) {
+      return current.map(({ rawJson: _raw, ...meta }) => meta);
+    }
+    const entry: StoredLocalRestorePoint = {
+      id: `rp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      createdAt: new Date().toISOString(),
+      label: options.label,
+      reason: options.reason,
+      contentHash: options.contentHash,
+      byteLength: rawJson.length,
+      stats: options.stats,
+      rawJson,
+    };
+    const next = [
+      entry,
+      ...current.filter((item) => item.contentHash !== options.contentHash || options.reason === 'manual'),
+    ].slice(0, MAX_LOCAL_RESTORE_POINTS);
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(next, getScopedRestorePointsKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return next.map(({ rawJson: _raw, ...meta }) => meta);
+  } catch {
+    return [];
+  }
+}
+
+export async function loadLocalRestorePointJson(
+  scope: string,
+  restorePointId: string,
+): Promise<string | null> {
+  const list = await readStoredRestorePoints(scope);
+  const found = list.find((item) => item.id === restorePointId);
+  return found?.rawJson || null;
+}
+
+export async function deleteLocalRestorePoint(
+  scope: string,
+  restorePointId: string,
+): Promise<LocalRestorePointMeta[]> {
+  try {
+    const current = await readStoredRestorePoints(scope);
+    const next = current.filter((item) => item.id !== restorePointId);
+    const db = await openDatabase();
+    await new Promise<void>((resolve, reject) => {
+      const tx = db.transaction(STATE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STATE_STORE_NAME);
+      store.put(next, getScopedRestorePointsKey(scope));
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    return next.map(({ rawJson: _raw, ...meta }) => meta);
+  } catch {
+    return [];
+  }
+}
+
