@@ -2701,19 +2701,92 @@ export async function downloadDriveFileBlob(
   return blob;
 }
 
+export type DriveTrashFailureReason =
+  | 'token-expired'
+  | 'picker-permission'
+  | 'forbidden-readonly'
+  | 'network'
+  | 'unknown';
+
+export interface DriveTrashResult {
+  ok: boolean;
+  fileId: string;
+  alreadyMissing?: boolean;
+  reason?: DriveTrashFailureReason;
+  httpStatus?: number;
+  detail?: string;
+}
+
+async function inspectDriveFileTrashCapabilities(
+  cleanId: string,
+  token: string,
+): Promise<{ ownedByMe?: boolean; canTrash?: boolean; canDelete?: boolean } | null> {
+  try {
+    const res = await fetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?fields=id,ownedByMe,capabilities(canTrash,canDelete)&supportsAllDrives=true`,
+      { headers: { Authorization: `Bearer ${token}` } },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as {
+      ownedByMe?: boolean;
+      capabilities?: { canTrash?: boolean; canDelete?: boolean };
+    };
+    return {
+      ownedByMe: data.ownedByMe,
+      canTrash: data.capabilities?.canTrash,
+      canDelete: data.capabilities?.canDelete,
+    };
+  } catch {
+    return null;
+  }
+}
+
+function isDriveScopeInsufficientText(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return (
+    raw.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+    raw.includes('insufficientPermissions') ||
+    lower.includes('insufficient authentication scopes')
+  );
+}
+
+function isDrivePickerFilePermissionText(raw: string): boolean {
+  const lower = raw.toLowerCase();
+  return (
+    raw.includes('appNotAuthorizedToFile') ||
+    raw.includes('insufficientFilePermissions') ||
+    raw.includes('fileNotAuthorized') ||
+    lower.includes('has not granted the app') ||
+    lower.includes('not authorized to access')
+  );
+}
+
 /**
- * Trashes (or permanently deletes as fallback) a file or folder in Google Drive.
- * Returns true if removed/already absent, false if auth/network failed.
+ * Trashes (or permanently deletes as fallback) a file or folder in Google Drive,
+ * returning structured failure reasons (token expired, Picker permission needed, read-only shared, etc.).
  */
-export async function deleteFileFromDrive(fileId: string, token?: string): Promise<boolean> {
+export async function trashFileInDriveDetailed(
+  fileId: string,
+  token?: string,
+): Promise<DriveTrashResult> {
   const cleanId = String(fileId || '').replace(/^drive_/, '').trim();
-  if (!cleanId) return true;
+  if (!cleanId) {
+    return { ok: true, fileId: '', alreadyMissing: true };
+  }
+
   const activeToken = token || (await getAccessToken());
-  if (!activeToken) return false;
+  if (!activeToken) {
+    return {
+      ok: false,
+      fileId: cleanId,
+      reason: 'token-expired',
+      detail: 'Sessão OAuth do Google Drive expirada ou não conectada.',
+    };
+  }
 
   try {
-    // Prefer moving to Trash via PATCH so shared/restricted files still disappear cleanly
-    const { res } = await authorizedDriveFetch(
+    // Prefer moving to Trash via PATCH so recoverable Drive Trash works cleanly
+    const { res, usedToken } = await authorizedDriveFetch(
       `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?supportsAllDrives=true`,
       (t) => ({
         method: 'PATCH',
@@ -2727,24 +2800,31 @@ export async function deleteFileFromDrive(fileId: string, token?: string): Promi
     );
 
     if (res.ok || res.status === 404) {
-      return true;
+      clearDrivePermissionBlockedFiles([cleanId]);
+      return { ok: true, fileId: cleanId, alreadyMissing: res.status === 404 };
     }
 
     if (res.status === 401) {
       clearAccessTokenOnly();
-      return false;
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: 'token-expired',
+        httpStatus: 401,
+        detail: 'Sessão OAuth do Google Drive expirada ou revogada.',
+      };
     }
 
-    if (res.status === 403) {
-      const errText = await res.clone().text().catch(() => '');
-      if (
-        errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
-        errText.includes('insufficientPermissions') ||
-        errText.toLowerCase().includes('insufficient authentication scopes')
-      ) {
-        clearAccessTokenOnly();
-        return false;
-      }
+    const patchErrText = await res.clone().text().catch(() => '');
+    if (res.status === 403 && isDriveScopeInsufficientText(patchErrText)) {
+      clearAccessTokenOnly();
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: 'token-expired',
+        httpStatus: 403,
+        detail: 'O token atual não possui permissão do Google Drive. Reconecte sua conta Google.',
+      };
     }
 
     // Fallback: direct DELETE
@@ -2754,19 +2834,109 @@ export async function deleteFileFromDrive(fileId: string, token?: string): Promi
         method: 'DELETE',
         headers: { Authorization: `Bearer ${t}` },
       }),
-      activeToken,
+      usedToken,
     );
 
     if (delRes.ok || delRes.status === 404) {
-      return true;
+      clearDrivePermissionBlockedFiles([cleanId]);
+      return { ok: true, fileId: cleanId, alreadyMissing: delRes.status === 404 };
     }
+
     if (delRes.status === 401) {
       clearAccessTokenOnly();
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: 'token-expired',
+        httpStatus: 401,
+        detail: 'Sessão OAuth do Google Drive expirada ou revogada.',
+      };
     }
-    return false;
-  } catch {
-    return false;
+
+    const delErrText = await delRes.clone().text().catch(() => '');
+    const combinedErr = `${patchErrText}\n${delErrText}`;
+    const finalStatus = delRes.status || res.status;
+
+    if (finalStatus === 403 || res.status === 403) {
+      if (isDriveScopeInsufficientText(combinedErr)) {
+        clearAccessTokenOnly();
+        return {
+          ok: false,
+          fileId: cleanId,
+          reason: 'token-expired',
+          httpStatus: 403,
+          detail: 'O token atual não possui permissão do Google Drive. Reconecte sua conta Google.',
+        };
+      }
+
+      if (isDrivePickerFilePermissionText(combinedErr)) {
+        const meta = await inspectDriveFileTrashCapabilities(cleanId, usedToken);
+        if (
+          meta &&
+          meta.ownedByMe === false &&
+          meta.canTrash === false &&
+          meta.canDelete === false
+        ) {
+          return {
+            ok: false,
+            fileId: cleanId,
+            reason: 'forbidden-readonly',
+            httpStatus: 403,
+            detail:
+              'Arquivo compartilhado somente para leitura no Google Drive (você não tem permissão para movê-lo à lixeira).',
+          };
+        }
+
+        markDriveFilePermissionBlocked(cleanId);
+        return {
+          ok: false,
+          fileId: cleanId,
+          reason: 'picker-permission',
+          httpStatus: 403,
+          detail:
+            'Este arquivo foi enviado ao Google Drive fora do app (ou em outra sessão/cliente). Autorize-o pelo Seletor do Drive para movê-lo à lixeira.',
+        };
+      }
+
+      const rawParsed = parseGoogleDriveErrorMessage(delErrText || patchErrText);
+      const isReadonly =
+        combinedErr.includes('cannotTrash') ||
+        combinedErr.includes('cannotDelete') ||
+        combinedErr.toLowerCase().includes('insufficient permissions for this file');
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: isReadonly ? 'forbidden-readonly' : 'unknown',
+        httpStatus: 403,
+        detail: rawParsed || 'Permissão negada pelo Google Drive ao mover arquivo para a lixeira.',
+      };
+    }
+
+    const parsedMsg = parseGoogleDriveErrorMessage(delErrText || patchErrText);
+    return {
+      ok: false,
+      fileId: cleanId,
+      reason: 'unknown',
+      httpStatus: finalStatus,
+      detail: parsedMsg || `O Google Drive recusou a exclusão (HTTP ${finalStatus}).`,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      fileId: cleanId,
+      reason: 'network',
+      detail: String(err?.message || 'Falha de rede ao se comunicar com o Google Drive.'),
+    };
   }
+}
+
+/**
+ * Trashes (or permanently deletes as fallback) a file or folder in Google Drive.
+ * Returns true if removed/already absent, false if auth/network failed.
+ */
+export async function deleteFileFromDrive(fileId: string, token?: string): Promise<boolean> {
+  const result = await trashFileInDriveDetailed(fileId, token);
+  return result.ok;
 }
 
 export interface DriveDeleteTarget {
@@ -2944,10 +3114,26 @@ export async function deleteStudyFilesFromDrive(
   target: DriveDeleteTarget,
   token?: string,
   prefetchedFiles?: DriveFileInfo[],
-): Promise<{ deletedCount: number; deletedIds: string[]; deletedNames: string[]; failed: boolean }> {
+): Promise<{
+  deletedCount: number;
+  deletedIds: string[];
+  deletedNames: string[];
+  failed: boolean;
+  permissionBlockedIds: string[];
+  tokenExpired: boolean;
+  firstErrorDetail?: string;
+}> {
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
-    return { deletedCount: 0, deletedIds: [], deletedNames: [], failed: true };
+    return {
+      deletedCount: 0,
+      deletedIds: [],
+      deletedNames: [],
+      failed: true,
+      permissionBlockedIds: [],
+      tokenExpired: true,
+      firstErrorDetail: 'Sessão OAuth do Google Drive expirada ou não conectada.',
+    };
   }
 
   const directIds = new Set(
@@ -2976,7 +3162,15 @@ export async function deleteStudyFilesFromDrive(
       filesList = await listAllStudyFilesInDrive(activeToken);
     } catch (err: any) {
       if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
-        return { deletedCount: 0, deletedIds: [], deletedNames: [], failed: true };
+        return {
+          deletedCount: 0,
+          deletedIds: [],
+          deletedNames: [],
+          failed: true,
+          permissionBlockedIds: [],
+          tokenExpired: true,
+          firstErrorDetail: String(err?.message || ''),
+        };
       }
       filesList = [];
     }
@@ -3033,15 +3227,22 @@ export async function deleteStudyFilesFromDrive(
 
   const deletedIds: string[] = [];
   const deletedNamesSet = new Set<string>();
+  const permissionBlockedIds: string[] = [];
   let failed = false;
+  let tokenExpired = false;
+  let firstErrorDetail: string | undefined;
+
   for (const id of idsToDelete) {
-    const ok = await deleteFileFromDrive(id, activeToken);
-    if (ok) {
+    const res = await trashFileInDriveDetailed(id, activeToken);
+    if (res.ok) {
       deletedIds.push(id);
       const matchedLabel = idToLabel.get(id);
       if (matchedLabel) deletedNamesSet.add(matchedLabel);
     } else {
       failed = true;
+      if (res.reason === 'token-expired') tokenExpired = true;
+      if (res.reason === 'picker-permission') permissionBlockedIds.push(id);
+      if (!firstErrorDetail && res.detail) firstErrorDetail = res.detail;
     }
   }
 
@@ -3059,6 +3260,9 @@ export async function deleteStudyFilesFromDrive(
     deletedIds,
     deletedNames: Array.from(deletedNamesSet),
     failed,
+    permissionBlockedIds,
+    tokenExpired,
+    firstErrorDetail,
   };
 }
 
@@ -3066,17 +3270,37 @@ export async function flushPendingDriveDeletes(
   scope: string,
   token?: string,
   prefetchedFiles?: DriveFileInfo[],
-): Promise<{ deletedIds: string[]; deletedNames: string[]; remainingCount: number }> {
+): Promise<{
+  deletedIds: string[];
+  deletedNames: string[];
+  remainingCount: number;
+  permissionBlockedIds: string[];
+  tokenExpired: boolean;
+  firstErrorDetail?: string;
+}> {
   const scopeQueue = getPendingDriveDeletes(scope);
   const guestQueue = scope !== 'offline_guest' ? getPendingDriveDeletes('offline_guest') : [];
   const combined = [...scopeQueue, ...guestQueue];
   if (combined.length === 0) {
-    return { deletedIds: [], deletedNames: [], remainingCount: 0 };
+    return {
+      deletedIds: [],
+      deletedNames: [],
+      remainingCount: 0,
+      permissionBlockedIds: [],
+      tokenExpired: false,
+    };
   }
 
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
-    return { deletedIds: [], deletedNames: [], remainingCount: combined.length };
+    return {
+      deletedIds: [],
+      deletedNames: [],
+      remainingCount: combined.length,
+      permissionBlockedIds: [],
+      tokenExpired: true,
+      firstErrorDetail: 'Sessão OAuth do Google Drive expirada ou não conectada.',
+    };
   }
 
   let filesList = prefetchedFiles;
@@ -3085,7 +3309,14 @@ export async function flushPendingDriveDeletes(
       filesList = await listAllStudyFilesInDrive(activeToken);
     } catch (err: any) {
       if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
-        return { deletedIds: [], deletedNames: [], remainingCount: combined.length };
+        return {
+          deletedIds: [],
+          deletedNames: [],
+          remainingCount: combined.length,
+          permissionBlockedIds: [],
+          tokenExpired: true,
+          firstErrorDetail: String(err?.message || ''),
+        };
       }
       filesList = [];
     }
@@ -3093,12 +3324,18 @@ export async function flushPendingDriveDeletes(
 
   const deletedSet = new Set<string>();
   const deletedNamesSet = new Set<string>();
+  const permissionBlockedSet = new Set<string>();
   const remaining: DriveDeleteTarget[] = [];
+  let tokenExpired = false;
+  let firstErrorDetail: string | undefined;
 
   for (const item of combined) {
     const res = await deleteStudyFilesFromDrive(item, activeToken, filesList);
     res.deletedIds.forEach((id) => deletedSet.add(id));
     res.deletedNames.forEach((name) => deletedNamesSet.add(name));
+    res.permissionBlockedIds.forEach((id) => permissionBlockedSet.add(id));
+    if (res.tokenExpired) tokenExpired = true;
+    if (!firstErrorDetail && res.firstErrorDetail) firstErrorDetail = res.firstErrorDetail;
     if (res.failed) {
       remaining.push(item);
     }
@@ -3123,6 +3360,9 @@ export async function flushPendingDriveDeletes(
     deletedIds: Array.from(deletedSet),
     deletedNames: Array.from(deletedNamesSet),
     remainingCount: remaining.length,
+    permissionBlockedIds: Array.from(permissionBlockedSet),
+    tokenExpired,
+    firstErrorDetail,
   };
 }
 
@@ -3238,7 +3478,7 @@ export async function openDrivePicker(options?: {
       .setTitle(
         options?.title ||
           (options?.mode === 'files-only'
-            ? 'Selecione os arquivos dentro da pasta para importar'
+            ? 'Selecione os arquivos dentro da pasta para autorizar'
             : options?.mode === 'folders-only'
               ? 'Selecione a pasta do Google Drive onde salvar seus dados e arquivos'
               : 'Selecione uma pasta ou arquivos no Google Drive'),
@@ -3267,6 +3507,13 @@ export async function openDrivePicker(options?: {
         docsView.setParent(options.parentFolderId);
       }
       builder.addView(docsView);
+
+      if (options?.parentFolderId && options.parentFolderId !== 'root') {
+        const allDocsView = new pickerNs.DocsView(pickerNs.ViewId.DOCS)
+          .setIncludeFolders(true)
+          .setSelectFolderEnabled(false);
+        builder.addView(allDocsView);
+      }
     }
 
     builder.setCallback((data: any) => {

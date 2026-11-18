@@ -7,6 +7,7 @@ import {
   Check,
   CheckCircle2,
   Download,
+  Eraser,
   ExternalLink,
   Eye,
   Highlighter,
@@ -16,8 +17,10 @@ import {
   Newspaper,
   Play,
   RefreshCw,
+  Save,
   Search,
   Sparkles,
+  StickyNote,
   Trash2,
   Undo2,
   Volume2,
@@ -66,7 +69,9 @@ export const LawsPage: React.FC = () => {
     linkEditalPointToLaw,
     unlinkEditalPointFromLaw,
     addLawHighlight,
+    removeLawHighlightText,
     removeLastLawHighlight,
+    saveLawNote,
     toggleLawItemRead,
     markLawItemsRead,
     addLawReadDate,
@@ -79,6 +84,7 @@ export const LawsPage: React.FC = () => {
     toast,
   } = useStudy();
   const [reprocessingLaw, setReprocessingLaw] = useState(false);
+  const [eraserModeActive, setEraserModeActive] = useState(false);
 
   const {
     prefs: readingPrefs,
@@ -137,6 +143,22 @@ export const LawsPage: React.FC = () => {
   useEffect(() => {
     setShowGapDetails(false);
   }, [activeFolder]);
+
+  const savedLawNote = activeFolder ? db.lawNotes?.[activeFolder] || '' : '';
+  const [lawNoteDraft, setLawNoteDraft] = useState<string>(savedLawNote);
+
+  useEffect(() => {
+    setLawNoteDraft(activeFolder ? db.lawNotes?.[activeFolder] || '' : '');
+  }, [activeFolder, db.lawNotes]);
+
+  useEffect(() => {
+    if (!activeFolder) return;
+    if (lawNoteDraft === (db.lawNotes?.[activeFolder] || '')) return;
+    const t = window.setTimeout(() => {
+      saveLawNote(activeFolder, lawNoteDraft, true);
+    }, 650);
+    return () => window.clearTimeout(t);
+  }, [activeFolder, db.lawNotes, lawNoteDraft, saveLawNote]);
 
   const handleJumpToArticle = (articleKey: string) => {
     const canonicalKey = resolveCanonicalArticleKeyFromQuery(articleKey);
@@ -593,6 +615,7 @@ export const LawsPage: React.FC = () => {
 
   const handleApplyHighlight = (color: HighlightColorKey) => {
     if (!activeFolder) return;
+    setEraserModeActive(false);
     const selection = window.getSelection();
     const rawText = selection?.toString().trim() || '';
     if (!rawText) {
@@ -606,6 +629,27 @@ export const LawsPage: React.FC = () => {
     }
     addLawHighlight(activeFolder, rawText, color);
     selection?.removeAllRanges();
+  };
+
+  const handleEraseHighlightSelection = () => {
+    if (!activeFolder) return;
+    const selection = window.getSelection();
+    const rawText = selection?.toString().trim() || '';
+    if (rawText) {
+      const removed = removeLawHighlightText(activeFolder, rawText);
+      if (removed) {
+        selection?.removeAllRanges();
+        setEraserModeActive(false);
+      }
+      return;
+    }
+    setEraserModeActive((prev) => {
+      const next = !prev;
+      if (next) {
+        toast('Selecione um trecho grifado e clique em "Remover marcação", ou clique diretamente sobre qualquer trecho grifado.');
+      }
+      return next;
+    });
   };
 
   const handleExportPdf = () => {
@@ -1130,8 +1174,9 @@ export const LawsPage: React.FC = () => {
           {readerTab === 'continuous' ? (
             <Panel
               title={`Texto contínuo · ${visibleName(activeFolder)}`}
-              subtitle="Selecione qualquer trecho abaixo e clique em uma cor para grifar."
+              subtitle="Selecione qualquer trecho abaixo e clique em uma cor para grifar, ou use Remover marcação para apagar um trecho já marcado."
               className="mb-4"
+              stackHeader
               action={
                 <div className="flex flex-wrap items-center gap-1.5">
                   {(Object.keys(HIGHLIGHT_COLOR_RGB) as HighlightColorKey[]).map((key) => {
@@ -1150,6 +1195,20 @@ export const LawsPage: React.FC = () => {
                       </button>
                     );
                   })}
+                  <button
+                    type="button"
+                    onClick={handleEraseHighlightSelection}
+                    disabled={!highlights.length}
+                    title="Selecione um trecho já grifado e clique aqui para remover sua marcação (ou ative e clique sobre o grifo)"
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-bold transition-colors whitespace-nowrap disabled:opacity-45 ${
+                      eraserModeActive
+                        ? 'border-[var(--bad)] bg-[var(--bad)] text-white'
+                        : 'border-[var(--bad)]/45 bg-[var(--bad)]/10 text-[var(--bad)] hover:bg-[var(--bad)]/20'
+                    }`}
+                  >
+                    <Eraser className="w-3 h-3" />
+                    {eraserModeActive ? 'Clique no grifo para apagar' : 'Remover marcação'}
+                  </button>
                   <button
                     type="button"
                     onClick={() => removeLastLawHighlight(activeFolder)}
@@ -1525,6 +1584,22 @@ export const LawsPage: React.FC = () => {
                                         seg.color ? (
                                           <mark
                                             key={sIdx}
+                                            onClick={(e) => {
+                                              if (!eraserModeActive) return;
+                                              e.stopPropagation();
+                                              removeLawHighlightText(activeFolder, seg.text);
+                                              setEraserModeActive(false);
+                                            }}
+                                            title={
+                                              eraserModeActive
+                                                ? 'Clique para remover esta marcação'
+                                                : undefined
+                                            }
+                                            className={
+                                              eraserModeActive
+                                                ? 'cursor-pointer ring-1 ring-[var(--bad)] hover:opacity-75'
+                                                : undefined
+                                            }
                                             style={{
                                               backgroundColor: HIGHLIGHT_COLOR_RGB[seg.color].bg,
                                               color: HIGHLIGHT_COLOR_RGB[seg.color].fg,
@@ -1584,6 +1659,19 @@ export const LawsPage: React.FC = () => {
                         seg.color ? (
                           <mark
                             key={i}
+                            onClick={() => {
+                              if (!eraserModeActive) return;
+                              removeLawHighlightText(activeFolder, seg.text);
+                              setEraserModeActive(false);
+                            }}
+                            title={
+                              eraserModeActive ? 'Clique para remover esta marcação' : undefined
+                            }
+                            className={
+                              eraserModeActive
+                                ? 'cursor-pointer ring-1 ring-[var(--bad)] hover:opacity-75'
+                                : undefined
+                            }
                             style={{
                               backgroundColor: HIGHLIGHT_COLOR_RGB[seg.color].bg,
                               color: HIGHLIGHT_COLOR_RGB[seg.color].fg,
@@ -1631,6 +1719,60 @@ export const LawsPage: React.FC = () => {
               ) : (
                 <EmptyState message="Nenhum dispositivo encontrado nesta pasta ou com o filtro aplicado." />
               )}
+
+              <div className="mt-4 pt-4 border-t border-[var(--line)]">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[var(--text)]">
+                      <StickyNote className="w-4 h-4 text-[var(--accent)] shrink-0" />
+                      Quadro de Observações · {visibleName(activeFolder)}
+                    </span>
+                    <span className="text-[11px] font-semibold text-[var(--muted)]">
+                      {lawNoteDraft !== savedLawNote
+                        ? 'Salvando alterações…'
+                        : savedLawNote.trim()
+                          ? 'Salvo automaticamente nesta lei'
+                          : 'Associado exclusivamente a esta lei'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {lawNoteDraft.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLawNoteDraft('');
+                          saveLawNote(activeFolder, '', false);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Limpar
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => saveLawNote(activeFolder, lawNoteDraft, false)}
+                      className="inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)]"
+                    >
+                      <Save className="w-3 h-3" />
+                      Salvar observações
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  aria-label={`Observações importantes de ${visibleName(activeFolder)}`}
+                  value={lawNoteDraft}
+                  onChange={(e) => setLawNoteDraft(e.target.value)}
+                  onBlur={() => {
+                    if (activeFolder && lawNoteDraft !== savedLawNote) {
+                      saveLawNote(activeFolder, lawNoteDraft, true);
+                    }
+                  }}
+                  rows={4}
+                  placeholder={`Digite aqui pontos importantes, prazos, exceções, súmulas ou pegadinhas de banca sobre ${visibleName(activeFolder)}...`}
+                  className="ce-textarea w-full min-h-[105px] text-[13px] leading-relaxed"
+                />
+              </div>
             </Panel>
           ) : (
             <Panel
@@ -2031,6 +2173,60 @@ export const LawsPage: React.FC = () => {
                 <EmptyState message="Nenhum dispositivo encontrado nesta pasta ou com o filtro aplicado." />
               );
               })()}
+
+              <div className="mt-4 pt-4 border-t border-[var(--line)]">
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[var(--text)]">
+                      <StickyNote className="w-4 h-4 text-[var(--accent)] shrink-0" />
+                      Quadro de Observações · {visibleName(activeFolder)}
+                    </span>
+                    <span className="text-[11px] font-semibold text-[var(--muted)]">
+                      {lawNoteDraft !== savedLawNote
+                        ? 'Salvando alterações…'
+                        : savedLawNote.trim()
+                          ? 'Salvo automaticamente nesta lei'
+                          : 'Associado exclusivamente a esta lei'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    {lawNoteDraft.trim() && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setLawNoteDraft('');
+                          saveLawNote(activeFolder, '', false);
+                        }}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Limpar
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => saveLawNote(activeFolder, lawNoteDraft, false)}
+                      className="inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)]"
+                    >
+                      <Save className="w-3 h-3" />
+                      Salvar observações
+                    </button>
+                  </div>
+                </div>
+                <textarea
+                  aria-label={`Observações importantes de ${visibleName(activeFolder)}`}
+                  value={lawNoteDraft}
+                  onChange={(e) => setLawNoteDraft(e.target.value)}
+                  onBlur={() => {
+                    if (activeFolder && lawNoteDraft !== savedLawNote) {
+                      saveLawNote(activeFolder, lawNoteDraft, true);
+                    }
+                  }}
+                  rows={4}
+                  placeholder={`Digite aqui pontos importantes, prazos, exceções, súmulas ou pegadinhas de banca sobre ${visibleName(activeFolder)}...`}
+                  className="ce-textarea w-full min-h-[105px] text-[13px] leading-relaxed"
+                />
+              </div>
             </Panel>
           )}
         </>

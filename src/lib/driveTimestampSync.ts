@@ -91,6 +91,71 @@ export interface TimestampSyncComparisonReport {
 
 const TIMESTAMP_TOLERANCE_MS = 15_000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+const IGNORED_DRIVE_CONFLICTS_PREFIX = 'ce_ignored_drive_conflicts_v1_';
+
+function getIgnoredDriveConflictsKey(scope: string): string {
+  return `${IGNORED_DRIVE_CONFLICTS_PREFIX}${scope || 'offline_guest'}`;
+}
+
+export function getIgnoredDriveConflictFileIds(scope: string): Set<string> {
+  const result = new Set<string>();
+  const scopesToRead = scope && scope !== 'offline_guest' ? [scope, 'offline_guest'] : [scope || 'offline_guest'];
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return result;
+    for (const s of scopesToRead) {
+      const raw = window.localStorage.getItem(getIgnoredDriveConflictsKey(s));
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        for (const id of parsed) {
+          if (typeof id === 'string' && id.trim()) result.add(id.trim());
+        }
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return result;
+}
+
+export function addIgnoredDriveConflictFileId(scope: string, fileId: string): void {
+  const cleanId = String(fileId || '').replace(/^drive_/, '').trim();
+  if (!cleanId) return;
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const key = getIgnoredDriveConflictsKey(scope);
+    const raw = window.localStorage.getItem(key);
+    const existing: string[] = raw ? JSON.parse(raw) : [];
+    const next = Array.from(new Set([...(Array.isArray(existing) ? existing : []), cleanId])).slice(-300);
+    window.localStorage.setItem(key, JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function removeIgnoredDriveConflictFileId(scope: string, fileId: string): void {
+  const cleanId = String(fileId || '').replace(/^drive_/, '').trim();
+  if (!cleanId) return;
+  const scopesToClean = scope && scope !== 'offline_guest' ? [scope, 'offline_guest'] : [scope || 'offline_guest'];
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    for (const s of scopesToClean) {
+      const key = getIgnoredDriveConflictsKey(s);
+      const raw = window.localStorage.getItem(key);
+      if (!raw) continue;
+      const existing: string[] = JSON.parse(raw);
+      if (!Array.isArray(existing)) continue;
+      const next = existing.filter((id) => id !== cleanId);
+      if (next.length > 0) {
+        window.localStorage.setItem(key, JSON.stringify(next));
+      } else {
+        window.localStorage.removeItem(key);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
 
 function stripDrivePrefix(name: string): string {
   return String(name || '')
@@ -490,9 +555,11 @@ export function compareLocalAndDriveFileTimestamps(
 
   const deletedConflicts: DeletedDriveConflict[] = [];
   const seenConflictDriveIds = new Set<string>();
+  const ignoredConflictIds = getIgnoredDriveConflictFileIds(scope);
 
   for (const df of activeDriveFiles) {
     if (seenConflictDriveIds.has(df.id)) continue;
+    if (ignoredConflictIds.has(df.id)) continue;
     if (matchedActiveDriveIds.has(df.id)) continue;
 
     // Never flag a file that is still actively present in localDb by exact/stripped name

@@ -70,6 +70,7 @@ export interface IncrementalDatabaseDelta {
   lawReadDates?: RecordDelta<LawReadingEntry[]>;
   savedIncidenceFilters?: ArrayDelta<SavedIncidenceFilter>;
   lawLastReadPosition?: RecordDelta<string>;
+  lawNotes?: RecordDelta<string>;
   pdfFolders?: RecordDelta<PersonalPdfFile[]>;
   pdfAnnotations?: RecordDelta<PdfFileAnnotations>;
   summaryFolders?: RecordDelta<SummaryFile[]>;
@@ -280,6 +281,7 @@ export function buildIncrementalDatabaseBackup(
   trackRecord('lawReadDates', baseDb?.lawReadDates, currentDb.lawReadDates);
   trackArray('savedIncidenceFilters', baseDb?.savedIncidenceFilters, currentDb.savedIncidenceFilters, (f) => f.id);
   trackRecord('lawLastReadPosition', baseDb?.lawLastReadPosition, currentDb.lawLastReadPosition);
+  trackRecord('lawNotes', baseDb?.lawNotes, currentDb.lawNotes);
   trackRecord('pdfFolders', baseDb?.pdfFolders, currentDb.pdfFolders);
   trackRecord('pdfAnnotations', baseDb?.pdfAnnotations, currentDb.pdfAnnotations);
   trackRecord('summaryFolders', baseDb?.summaryFolders, currentDb.summaryFolders);
@@ -686,6 +688,7 @@ export function applyIncrementalDeltaToDatabase(
       (x) => x.id,
     ),
     lawLastReadPosition: mergeRecordDelta(baseDb.lawLastReadPosition, d.lawLastReadPosition),
+    lawNotes: mergeRecordDelta(baseDb.lawNotes, d.lawNotes),
     pdfFolders: mergeRecordDelta(
       baseDb.pdfFolders,
       d.pdfFolders,
@@ -1973,6 +1976,7 @@ export function applyTombstonesToMergedDatabase(
     nextDb.readLawItems = cleanLawMetaRecord(nextDb.readLawItems);
     nextDb.lawReadDates = cleanLawMetaRecord(nextDb.lawReadDates);
     nextDb.lawLastReadPosition = cleanLawMetaRecord(nextDb.lawLastReadPosition);
+    nextDb.lawNotes = cleanLawMetaRecord(nextDb.lawNotes);
   }
 
   // Filter nested contestEditalPoints

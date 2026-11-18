@@ -63,6 +63,8 @@ import {
   downloadLatestCloudSync,
   downloadDriveFileBlob,
   deleteFileFromDrive,
+  trashFileInDriveDetailed,
+  DriveTrashFailureReason,
   deleteStudyFilesFromDrive,
   flushPendingDriveDeletes,
   getPendingDriveDeletes,
@@ -142,8 +144,10 @@ import {
 import {
   DeletedDriveConflict,
   TimestampSyncComparisonReport,
+  addIgnoredDriveConflictFileId,
   compareLocalAndDriveFileTimestamps,
   isDriveTimestampNewerThanLocal,
+  removeIgnoredDriveConflictFileId,
 } from '../lib/driveTimestampSync';
 import {
   decryptBackupEnvelope,
@@ -841,7 +845,9 @@ interface StudyContextValue {
   ) => SavedIncidenceFilter;
   deleteIncidenceFilter: (id: string) => void;
   addLawHighlight: (folder: string, text: string, color: HighlightColorKey) => void;
+  removeLawHighlightText: (folder: string, text: string) => boolean;
   removeLastLawHighlight: (folder: string) => void;
+  saveLawNote: (folder: string, note: string, silent?: boolean) => void;
 
   // Personal PDFs
   createPdfFolder: (name: string) => string;
@@ -1001,8 +1007,11 @@ interface StudyContextValue {
   syncActivityLogs: SyncActivityLogEntry[];
   clearSyncActivityLogs: () => void;
   driveSyncConflicts: DeletedDriveConflict[];
+  driveConflictErrors: Record<string, { reason: DriveTrashFailureReason; message: string }>;
   resolvingDriveConflictId: string | null;
   resolveDriveConflictRemoveCloud: (conflictId: string) => Promise<boolean>;
+  authorizeAndRemoveDriveConflict: (conflictId: string) => Promise<boolean>;
+  ignoreDriveConflict: (conflictId: string) => void;
   resolveDriveConflictRestoreLocal: (conflictId: string) => Promise<boolean>;
   resolveAllDriveConflictsRemoveCloud: () => Promise<void>;
   resolveAllDriveConflictsRestoreLocal: () => Promise<void>;
@@ -1342,12 +1351,21 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
             : {}),
         }
       : { ...(seed.lawLastReadPosition || {}) };
+  const normalizedLawNotes: Record<string, string> =
+    dataObj.lawNotes !== undefined
+      ? {
+          ...(dataObj.lawNotes && typeof dataObj.lawNotes === 'object' && !Array.isArray(dataObj.lawNotes)
+            ? dataObj.lawNotes
+            : {}),
+        }
+      : { ...(seed.lawNotes || {}) };
 
   const dropLawFolderMetadata = (folderKey: string) => {
     delete normalizedLawHighlights[folderKey];
     delete normalizedReadLawItems[folderKey];
     delete normalizedLawReadDates[folderKey];
     delete normalizedLawLastReadPosition[folderKey];
+    delete normalizedLawNotes[folderKey];
   };
 
   const lawGroups = new Map<string, Array<{ key: string; folder: LawFolderData }>>();
@@ -1487,6 +1505,13 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         normalizedLawLastReadPosition[winner.key] = normalizedLawLastReadPosition[loser.key];
       }
       delete normalizedLawLastReadPosition[loser.key];
+
+      if (normalizedLawNotes[loser.key]) {
+        const wNote = (normalizedLawNotes[winner.key] || '').trim();
+        const lNote = normalizedLawNotes[loser.key].trim();
+        normalizedLawNotes[winner.key] = wNote && wNote !== lNote ? `${wNote}\n\n${lNote}` : wNote || lNote;
+      }
+      delete normalizedLawNotes[loser.key];
     }
 
     const healedMergedItems = healAndNormalizeLawItems(mergedItems);
@@ -1667,6 +1692,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     lawHighlights: normalizedLawHighlights,
     readLawItems: normalizedReadLawItems,
     lawLastReadPosition: normalizedLawLastReadPosition,
+    lawNotes: normalizedLawNotes,
     savedIncidenceFilters: normalizedSavedFilters,
     fixedSubjects: normalizedFixedSubjects,
     contests: normalizedContests,
@@ -3315,6 +3341,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     loadSyncActivityLogs(initialScope),
   );
   const [driveSyncConflicts, setDriveSyncConflicts] = useState<DeletedDriveConflict[]>([]);
+  const [driveConflictErrors, setDriveConflictErrors] = useState<
+    Record<string, { reason: DriveTrashFailureReason; message: string }>
+  >({});
   const [resolvingDriveConflictId, setResolvingDriveConflictId] = useState<string | null>(null);
   const dismissedConflictIdsRef = useRef<Set<string>>(new Set());
 
@@ -3432,6 +3461,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         : report.deletedConflicts.filter((c) => !dismissedConflictIdsRef.current.has(c.id));
 
       setDriveSyncConflicts(visibleConflicts);
+      setDriveConflictErrors((prev) => {
+        const visibleSet = new Set(visibleConflicts.map((c) => c.id));
+        const next: Record<string, { reason: DriveTrashFailureReason; message: string }> = {};
+        let changed = false;
+        for (const [k, v] of Object.entries(prev)) {
+          if (visibleSet.has(k)) next[k] = v;
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
 
       if (
         report.localNewer.length > 0 ||
@@ -3612,7 +3651,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
           return;
         }
-        const { deletedIds, deletedNames, remainingCount } = await flushPendingDriveDeletes(scope, token);
+        const {
+          deletedIds,
+          deletedNames,
+          remainingCount,
+          permissionBlockedIds,
+          tokenExpired,
+          firstErrorDetail,
+        } = await flushPendingDriveDeletes(scope, token);
+        if (tokenExpired) {
+          setDriveTokenReady(false);
+        }
         if (deletedIds.length > 0) {
           removeFileIdsFromCacheMeta(scope, deletedIds);
           const labels = deletedNames.length > 0 ? deletedNames : targetLabels;
@@ -3634,17 +3683,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             scope,
           );
         } else if (remainingCount > 0 && targetLabels.length > 0) {
+          const isPickerBlocked = permissionBlockedIds.length > 0;
           recordSyncActivity(
             {
               category: 'drive-delete',
-              operation: 'Falha ao excluir arquivo no Google Drive',
-              status: 'error',
+              operation: tokenExpired
+                ? 'Exclusão no Drive aguardando sessão OAuth'
+                : isPickerBlocked
+                  ? 'Exclusão no Drive aguardando autorização pelo Seletor'
+                  : 'Falha ao excluir arquivo no Google Drive',
+              status: tokenExpired || isPickerBlocked ? 'warning' : 'error',
+              errorCode: tokenExpired ? 'oauth/drive-token-expired' : undefined,
               message:
+                firstErrorDetail ||
                 'Não foi possível mover os itens selecionados para a lixeira do Google Drive agora; permaneceram na fila de exclusão.',
               affectedFiles: targetLabels.map((name) => ({
                 name,
-                action: 'failed' as const,
-                detail: 'Mantido na fila de exclusão',
+                action: tokenExpired || isPickerBlocked ? ('queued-delete' as const) : ('failed' as const),
+                detail: firstErrorDetail || 'Mantido na fila de exclusão',
               })),
               stats: { queuedDeletes: remainingCount },
             },
@@ -7678,6 +7734,7 @@ function isEmailAuthorized(email?: string | null): boolean {
     setLastFirebaseSyncAt(null);
     setLastCacheVerifiedAt(null);
     setDriveSyncConflicts([]);
+    setDriveConflictErrors({});
     dismissedConflictIdsRef.current.clear();
     activeFirebaseOpsRef.current = 0;
     firebaseInFlightRef.current = false;
@@ -8809,6 +8866,51 @@ function isEmailAuthorized(email?: string | null): boolean {
   const driveSyncConflictsRef = useRef<DeletedDriveConflict[]>(driveSyncConflicts);
   driveSyncConflictsRef.current = driveSyncConflicts;
 
+  const finalizeDriveConflictRemoved = useCallback(
+    (conflictId: string, target: DeletedDriveConflict, scope: string, customMessage?: string) => {
+      removePendingDriveDeletesForDriveFile(scope, target.driveFile);
+      removeIgnoredDriveConflictFileId(scope, target.driveFile.id);
+      removeFileIdsFromCacheMeta(scope, [target.driveFile.id]);
+      dismissedConflictIdsRef.current.delete(conflictId);
+      setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
+      setDriveConflictErrors((prev) => {
+        if (!(conflictId in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[conflictId];
+        return copy;
+      });
+      lastDeletionMsRef.current = Date.now();
+      pendingCloudSyncRef.current = true;
+      setHasPendingCloudChanges(true);
+      saveSyncMeta(scope, { hasPendingCloudSync: true });
+      void flushCloudSyncNow();
+
+      recordSyncActivity(
+        {
+          category: 'drive-delete',
+          operation: 'Conflito resolvido: cópia removida do Drive',
+          status: 'success',
+          message:
+            customMessage ||
+            `O arquivo "${target.displayName}" foi movido para a lixeira do Google Drive conforme escolha do usuário.`,
+          affectedFiles: [
+            {
+              name: target.displayName,
+              action: 'trashed',
+              module: target.moduleLabel,
+              driveFileId: target.driveFile.id,
+              syncOrigin: target.syncOrigin,
+            },
+          ],
+          stats: { trashed: 1 },
+        },
+        scope,
+      );
+      toast(`"${target.displayName}" removido do Google Drive (movido para a lixeira).`);
+    },
+    [flushCloudSyncNow, recordSyncActivity, toast],
+  );
+
   const resolveDriveConflictRemoveCloud = useCallback(
     async (conflictId: string): Promise<boolean> => {
       const target = driveSyncConflictsRef.current.find((c) => c.id === conflictId);
@@ -8819,71 +8921,216 @@ function isEmailAuthorized(email?: string | null): boolean {
       const scope = activeScopeRef.current || 'offline_guest';
       setResolvingDriveConflictId(conflictId);
       try {
-        const deleted = await deleteFileFromDrive(target.driveFile.id, activeToken);
-        if (!deleted) {
+        const trashRes = await trashFileInDriveDetailed(target.driveFile.id, activeToken);
+        if (!trashRes.ok) {
+          if (trashRes.reason === 'token-expired') {
+            setDriveTokenReady(false);
+          }
+          const detailMsg =
+            trashRes.detail ||
+            'Não foi possível mover o arquivo para a lixeira do Google Drive.';
+          setDriveConflictErrors((prev) => ({
+            ...prev,
+            [conflictId]: {
+              reason: trashRes.reason || 'unknown',
+              message: detailMsg,
+            },
+          }));
           recordSyncActivity(
             {
               category: 'drive-delete',
-              operation: 'Falha ao remover conflito da nuvem',
-              status: 'error',
-              message: `Não foi possível enviar "${target.displayName}" para a lixeira do Google Drive.`,
+              operation:
+                trashRes.reason === 'picker-permission'
+                  ? 'Exclusão bloqueada por permissão externa do Drive'
+                  : 'Falha ao remover conflito da nuvem',
+              status: trashRes.reason === 'picker-permission' ? 'warning' : 'error',
+              errorCode:
+                trashRes.reason === 'token-expired' ? 'oauth/drive-token-expired' : undefined,
+              message: `"${target.displayName}": ${detailMsg}`,
               affectedFiles: [
                 {
                   name: target.displayName,
                   action: 'failed',
                   module: target.moduleLabel,
                   driveFileId: target.driveFile.id,
-                  detail: 'Permissão ou falha de rede no Drive',
+                  detail: detailMsg,
                 },
               ],
             },
             scope,
           );
-          toast(`Não foi possível mover "${target.displayName}" para a lixeira do Google Drive.`, true);
+          if (trashRes.reason === 'picker-permission') {
+            toast(
+              `"${target.displayName}" foi enviado ao Drive fora do app. Clique em "Autorizar no Drive e apagar" para movê-lo à lixeira.`,
+              true,
+            );
+          } else if (trashRes.reason === 'token-expired') {
+            toast(
+              'Sessão OAuth do Google Drive expirada. Reconecte sua conta Google e tente novamente.',
+              true,
+            );
+          } else {
+            toast(
+              `Não foi possível mover "${target.displayName}" para a lixeira: ${detailMsg}`,
+              true,
+            );
+          }
           return false;
         }
 
-        removePendingDriveDeletesForDriveFile(scope, target.driveFile);
-        removeFileIdsFromCacheMeta(scope, [target.driveFile.id]);
-        dismissedConflictIdsRef.current.delete(conflictId);
-        setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
-        lastDeletionMsRef.current = Date.now();
-        pendingCloudSyncRef.current = true;
-        setHasPendingCloudChanges(true);
-        saveSyncMeta(scope, { hasPendingCloudSync: true });
-        void flushCloudSyncNow();
-
-        recordSyncActivity(
-          {
-            category: 'drive-delete',
-            operation: 'Conflito resolvido: cópia removida do Drive',
-            status: 'success',
-            message: `O arquivo "${target.displayName}" foi movido para a lixeira do Google Drive conforme escolha do usuário.`,
-            affectedFiles: [
-              {
-                name: target.displayName,
-                action: 'trashed',
-                module: target.moduleLabel,
-                driveFileId: target.driveFile.id,
-                syncOrigin: target.syncOrigin,
-              },
-            ],
-            stats: { trashed: 1 },
-          },
-          scope,
-        );
-        toast(`"${target.displayName}" removido do Google Drive (movido para a lixeira).`);
+        finalizeDriveConflictRemoved(conflictId, target, scope);
         return true;
       } catch (err: any) {
         const msg = String(err?.message || '');
         if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        setDriveConflictErrors((prev) => ({
+          ...prev,
+          [conflictId]: {
+            reason: msg.includes('TOKEN_EXPIRED') ? 'token-expired' : 'unknown',
+            message: msg || 'Erro inesperado ao remover arquivo do Google Drive.',
+          },
+        }));
         toast(`Erro ao remover arquivo do Drive: ${msg || 'Falha'}`, true);
         return false;
       } finally {
         setResolvingDriveConflictId((prev) => (prev === conflictId ? null : prev));
       }
     },
-    [ensureDriveToken, flushCloudSyncNow, recordSyncActivity, toast],
+    [ensureDriveToken, finalizeDriveConflictRemoved, recordSyncActivity, toast],
+  );
+
+  const authorizeAndRemoveDriveConflict = useCallback(
+    async (conflictId: string): Promise<boolean> => {
+      const target = driveSyncConflictsRef.current.find((c) => c.id === conflictId);
+      if (!target) return false;
+      const activeToken = await ensureDriveToken();
+      if (!activeToken) return false;
+
+      const scope = activeScopeRef.current || 'offline_guest';
+      setResolvingDriveConflictId(conflictId);
+      try {
+        const picked = await openDrivePicker({
+          token: activeToken,
+          parentFolderId: target.driveFile.parents?.[0],
+          mode: 'files-only',
+          title: `Selecione "${target.displayName}" para autorizar a exclusão no Drive`,
+        });
+
+        if (!picked) {
+          return false;
+        }
+        if (picked.files.length === 0) {
+          toast(
+            `Nenhum arquivo selecionado. Selecione "${target.displayName}" no seletor do Google Drive.`,
+            true,
+          );
+          return false;
+        }
+
+        const pickedIds = new Set(picked.files.map((f) => f.id));
+        const pickedMatchingName = picked.files.find(
+          (f) =>
+            normalizeFileLookup(f.name) === normalizeFileLookup(target.driveFile.name) ||
+            normalizeFileLookup(stripDrivePrefix(f.name)) === normalizeFileLookup(target.displayName),
+        );
+        const primaryDeleteId = pickedIds.has(target.driveFile.id)
+          ? target.driveFile.id
+          : pickedMatchingName?.id || target.driveFile.id;
+
+        const trashRes = await trashFileInDriveDetailed(primaryDeleteId, activeToken);
+        if (!trashRes.ok) {
+          if (trashRes.reason === 'token-expired') setDriveTokenReady(false);
+          const notSelectedHint =
+            !pickedIds.has(target.driveFile.id) &&
+            !pickedMatchingName &&
+            trashRes.reason === 'picker-permission'
+              ? `Selecione especificamente o arquivo "${target.displayName}" no seletor do Drive para liberar a exclusão.`
+              : trashRes.detail || 'Não foi possível mover o arquivo para a lixeira após a seleção.';
+          setDriveConflictErrors((prev) => ({
+            ...prev,
+            [conflictId]: {
+              reason: trashRes.reason || 'unknown',
+              message: notSelectedHint,
+            },
+          }));
+          toast(notSelectedHint, true);
+          return false;
+        }
+
+        finalizeDriveConflictRemoved(
+          conflictId,
+          target,
+          scope,
+          `O arquivo "${target.displayName}" foi autorizado pelo Seletor do Drive e movido para a lixeira.`,
+        );
+
+        // If user multi-selected other conflicted files in the same Picker session, trash them too
+        const otherPickedConflicts = driveSyncConflictsRef.current.filter(
+          (c) => c.id !== conflictId && pickedIds.has(c.driveFile.id),
+        );
+        for (const extra of otherPickedConflicts) {
+          const extraRes = await trashFileInDriveDetailed(extra.driveFile.id, activeToken);
+          if (extraRes.ok) {
+            finalizeDriveConflictRemoved(extra.id, extra, scope);
+          }
+        }
+
+        return true;
+      } catch (err: any) {
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        setDriveConflictErrors((prev) => ({
+          ...prev,
+          [conflictId]: {
+            reason: msg.includes('TOKEN_EXPIRED') ? 'token-expired' : 'unknown',
+            message: msg || 'Não foi possível abrir o Seletor do Google Drive.',
+          },
+        }));
+        toast(`Falha ao autorizar arquivo no Drive: ${msg || 'Erro'}`, true);
+        return false;
+      } finally {
+        setResolvingDriveConflictId((prev) => (prev === conflictId ? null : prev));
+      }
+    },
+    [ensureDriveToken, finalizeDriveConflictRemoved, toast],
+  );
+
+  const ignoreDriveConflict = useCallback(
+    (conflictId: string) => {
+      const target = driveSyncConflictsRef.current.find((c) => c.id === conflictId);
+      if (!target) return;
+      const scope = activeScopeRef.current || 'offline_guest';
+      addIgnoredDriveConflictFileId(scope, target.driveFile.id);
+      removePendingDriveDeletesForDriveFile(scope, target.driveFile);
+      dismissedConflictIdsRef.current.add(conflictId);
+      setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
+      setDriveConflictErrors((prev) => {
+        if (!(conflictId in prev)) return prev;
+        const copy = { ...prev };
+        delete copy[conflictId];
+        return copy;
+      });
+      recordSyncActivity(
+        {
+          category: 'drive-delete',
+          operation: 'Arquivo mantido somente no Google Drive',
+          status: 'warning',
+          message: `"${target.displayName}" foi removido da fila de conflitos locais e permanecerá apenas no Google Drive sem voltar ao app.`,
+          affectedFiles: [
+            {
+              name: target.displayName,
+              action: 'skipped-tombstone',
+              module: target.moduleLabel,
+              driveFileId: target.driveFile.id,
+              detail: 'Ignorado neste dispositivo',
+            },
+          ],
+        },
+        scope,
+      );
+      toast(`"${target.displayName}" ignorado neste app (mantido apenas no Google Drive).`);
+    },
+    [recordSyncActivity, toast],
   );
 
   const resolveDriveConflictRestoreLocal = useCallback(
@@ -8940,10 +9187,17 @@ function isEmailAuthorized(email?: string | null): boolean {
 
         const updatedDbToApply = changed ? res.updatedDb : baseDbWithoutTombstone;
         applyRestoredDatabaseForScope(scope, updatedDbToApply);
+        removeIgnoredDriveConflictFileId(scope, target.driveFile.id);
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
         dismissedConflictIdsRef.current.delete(conflictId);
         setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
+        setDriveConflictErrors((prev) => {
+          if (!(conflictId in prev)) return prev;
+          const copy = { ...prev };
+          delete copy[conflictId];
+          return copy;
+        });
 
         recordSyncActivity(
           {
@@ -12487,6 +12741,9 @@ function isEmailAuthorized(email?: string | null): boolean {
         const nextLastReadPos = { ...(prev.lawLastReadPosition || {}) };
         delete nextLastReadPos[folder];
 
+        const nextLawNotes = { ...(prev.lawNotes || {}) };
+        delete nextLawNotes[folder];
+
         return {
           ...prev,
           laws: nextLaws,
@@ -12494,6 +12751,7 @@ function isEmailAuthorized(email?: string | null): boolean {
           lawReadDates: nextReadDates,
           readLawItems: nextReadLawItems,
           lawLastReadPosition: nextLastReadPos,
+          lawNotes: nextLawNotes,
         };
       });
 
@@ -13062,6 +13320,47 @@ function isEmailAuthorized(email?: string | null): boolean {
     [toast],
   );
 
+  const removeLawHighlightText = useCallback(
+    (folder: string, text: string): boolean => {
+      const normalize = (v: string) =>
+        String(v || '')
+          .replace(/\u2013|\u2014/g, '-')
+          .replace(/\s+/g, ' ')
+          .trim()
+          .toLowerCase();
+      const targetNorm = normalize(text);
+      if (!targetNorm) {
+        toast('Selecione um trecho grifado para remover a marcação.', true);
+        return false;
+      }
+
+      const existing = dbRef.current.lawHighlights[folder] || [];
+      if (!existing.length) {
+        toast('Não há marcações salvas nesta lei.', true);
+        return false;
+      }
+
+      const next = existing.filter((h) => {
+        const hNorm = normalize(h.text);
+        if (!hNorm) return false;
+        return hNorm !== targetNorm && !hNorm.includes(targetNorm) && !targetNorm.includes(hNorm);
+      });
+
+      if (next.length === existing.length) {
+        toast('Nenhuma marcação encontrada no trecho selecionado.', true);
+        return false;
+      }
+
+      setDb((prev) => ({
+        ...prev,
+        lawHighlights: { ...prev.lawHighlights, [folder]: next },
+      }));
+      toast('Marcação removida do texto.');
+      return true;
+    },
+    [setDb, toast],
+  );
+
   const removeLastLawHighlight = useCallback(
     (folder: string) => {
       setDb((prev) => {
@@ -13075,6 +13374,34 @@ function isEmailAuthorized(email?: string | null): boolean {
       toast('Último grifo removido.');
     },
     [toast],
+  );
+
+  const saveLawNote = useCallback(
+    (folder: string, note: string, silent = false) => {
+      const cleanFolder = String(folder || '').trim();
+      if (!cleanFolder) return;
+      setDb((prev) => {
+        const prevMap = prev.lawNotes || {};
+        if ((prevMap[cleanFolder] || '') === note) return prev;
+        const nextMap = { ...prevMap };
+        if (note.trim()) {
+          nextMap[cleanFolder] = note;
+        } else {
+          delete nextMap[cleanFolder];
+        }
+        const next: StudyDatabase = {
+          ...prev,
+          lawNotes: nextMap,
+        };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
+      });
+      if (!silent) {
+        toast('Observações da lei salvas.');
+      }
+    },
+    [setDb, toast],
   );
 
   // Personal PDFs (protecting reserved backup folders from view/edit/deletion)
@@ -14533,7 +14860,9 @@ function isEmailAuthorized(email?: string | null): boolean {
         saveIncidenceFilter,
         deleteIncidenceFilter,
         addLawHighlight,
+        removeLawHighlightText,
         removeLastLawHighlight,
+        saveLawNote,
         createPdfFolder,
         renamePdfFolder,
         uploadPersonalPdfs,
@@ -14614,8 +14943,11 @@ function isEmailAuthorized(email?: string | null): boolean {
         syncActivityLogs,
         clearSyncActivityLogs,
         driveSyncConflicts,
+        driveConflictErrors,
         resolvingDriveConflictId,
         resolveDriveConflictRemoveCloud,
+        authorizeAndRemoveDriveConflict,
+        ignoreDriveConflict,
         resolveDriveConflictRestoreLocal,
         resolveAllDriveConflictsRemoveCloud,
         resolveAllDriveConflictsRestoreLocal,

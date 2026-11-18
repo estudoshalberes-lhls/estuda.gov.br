@@ -3,7 +3,9 @@ import {
   AlertTriangle,
   Clock,
   Cloud,
+  EyeOff,
   Folder,
+  FolderCheck,
   HardDriveDownload,
   RotateCcw,
   ShieldCheck,
@@ -12,6 +14,7 @@ import {
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
 import { DeletedDriveConflict } from '../../lib/driveTimestampSync';
+import { isDriveFilePermissionBlocked } from '../../lib/googleDrive';
 
 function formatTimestampBr(ms: number): string {
   if (!ms || !Number.isFinite(ms)) return 'Data não registrada';
@@ -81,8 +84,11 @@ function getSyncTagBadge(conflict: DeletedDriveConflict): {
 export const DriveSyncConflictDialog: React.FC = () => {
   const {
     driveSyncConflicts,
+    driveConflictErrors,
     resolvingDriveConflictId,
     resolveDriveConflictRemoveCloud,
+    authorizeAndRemoveDriveConflict,
+    ignoreDriveConflict,
     resolveDriveConflictRestoreLocal,
     resolveAllDriveConflictsRemoveCloud,
     resolveAllDriveConflictsRestoreLocal,
@@ -159,6 +165,10 @@ export const DriveSyncConflictDialog: React.FC = () => {
             const isItemBusy = resolvingDriveConflictId === conflict.id || batchRunning !== null;
             const newerBadge = getNewerBadge(conflict);
             const syncTagBadge = getSyncTagBadge(conflict);
+            const conflictError = driveConflictErrors[conflict.id];
+            const needsPickerAuth =
+              conflictError?.reason === 'picker-permission' ||
+              isDriveFilePermissionBlocked(conflict.driveFile.id);
 
             return (
               <div
@@ -229,7 +239,42 @@ export const DriveSyncConflictDialog: React.FC = () => {
                   </div>
                 </div>
 
+                {(conflictError || needsPickerAuth) && (
+                  <div
+                    className={`rounded-lg border px-3 py-2 text-[11.5px] leading-snug ${
+                      conflictError?.reason === 'token-expired' || conflictError?.reason === 'forbidden-readonly'
+                        ? 'border-[var(--bad)]/40 bg-[var(--bad)]/10 text-[var(--text)]'
+                        : 'border-[var(--warning)]/40 bg-[var(--warning)]/10 text-[var(--text)]'
+                    }`}
+                  >
+                    {conflictError?.message ||
+                      'Este arquivo foi criado fora desta sessão do aplicativo. Clique em "Autorizar no Drive e apagar" para selecioná-lo no Google Drive e movê-lo para a lixeira.'}
+                  </div>
+                )}
+
                 <div className="flex flex-wrap items-center justify-end gap-2 pt-0.5">
+                  {(conflictError || needsPickerAuth) && (
+                    <button
+                      type="button"
+                      disabled={isItemBusy}
+                      onClick={() => ignoreDriveConflict(conflict.id)}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-semibold hover:text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-55 transition-colors cursor-pointer"
+                    >
+                      <EyeOff className="w-3.5 h-3.5 shrink-0" />
+                      <span>Ignorar neste app</span>
+                    </button>
+                  )}
+                  {needsPickerAuth && (
+                    <button
+                      type="button"
+                      disabled={isItemBusy}
+                      onClick={() => void authorizeAndRemoveDriveConflict(conflict.id)}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--warning)] bg-[var(--warning)] text-black text-[12px] font-bold hover:opacity-90 disabled:opacity-55 transition-opacity cursor-pointer"
+                    >
+                      <FolderCheck className="w-3.5 h-3.5 shrink-0" />
+                      <span>Autorizar no Drive e apagar</span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     disabled={isItemBusy}

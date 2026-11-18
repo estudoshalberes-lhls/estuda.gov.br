@@ -477,6 +477,7 @@ export interface StudyDatabase {
   lawReadDates?: Record<string, LawReadingEntry[]>;
   savedIncidenceFilters?: SavedIncidenceFilter[];
   lawLastReadPosition?: Record<string, string>;
+  lawNotes?: Record<string, string>;
   fixedSubjects?: string[];
   pdfFolders: Record<string, PersonalPdfFile[]>;
   pdfAnnotations?: Record<string, PdfFileAnnotations>;

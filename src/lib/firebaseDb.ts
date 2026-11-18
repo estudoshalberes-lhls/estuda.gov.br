@@ -333,6 +333,7 @@ const RECORD_SECTIONS = [
   'readLawItems',
   'lawReadDates',
   'lawLastReadPosition',
+  'lawNotes',
   'pdfFolders',
   'pdfAnnotations',
   'summaryFolders',

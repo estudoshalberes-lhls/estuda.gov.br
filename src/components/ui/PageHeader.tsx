@@ -37,6 +37,7 @@ interface PanelProps {
   action?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  stackHeader?: boolean;
 }
 
 export const Panel: React.FC<PanelProps> = ({
@@ -45,13 +46,24 @@ export const Panel: React.FC<PanelProps> = ({
   action,
   children,
   className = '',
+  stackHeader = false,
 }) => (
   <section className={`ce-panel min-w-0 max-w-full p-4 sm:p-5 rounded-[10px] ${className}`}>
     {(title || action) && (
-      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-2.5 sm:gap-3 mb-4 pb-3 border-b border-[var(--line)]">
-        <div className="min-w-0">
+      <div
+        className={`flex flex-col ${
+          stackHeader ? '' : 'sm:flex-row sm:items-start sm:justify-between'
+        } gap-2.5 sm:gap-3 mb-4 pb-3 border-b border-[var(--line)]`}
+      >
+        <div className="min-w-0 w-full">
           {title && (
-            <h3 className="m-0 font-display text-[15.5px] font-bold tracking-[-0.015em] text-[var(--text)]">{title}</h3>
+            <h3
+              className={`m-0 font-display text-[15.5px] font-bold tracking-[-0.015em] text-[var(--text)] ${
+                stackHeader ? 'whitespace-nowrap overflow-x-auto' : ''
+              }`}
+            >
+              {title}
+            </h3>
           )}
           {subtitle && <p className="mt-0.5 mb-0 text-[12.5px] text-[var(--muted)]">{subtitle}</p>}
         </div>
