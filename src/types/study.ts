@@ -255,6 +255,7 @@ export interface LawPdfEntry {
   size: number;
   blobKey: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface LawFolderData {
@@ -322,6 +323,7 @@ export interface SummaryFile {
   mimeType: string;
   blobKey: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface ProofCorrection {
@@ -353,6 +355,7 @@ export interface ProofFileRecord {
   observacoes: string;
   correcoes: ProofCorrection[];
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface EssayRecord {
@@ -360,6 +363,7 @@ export interface EssayRecord {
   titulo: string;
   data: string;
   created_at: string;
+  updatedAt?: string;
   original_arquivo: string;
   original_blobKey: string;
   original_mime: string;
@@ -483,6 +487,7 @@ export interface StudyDatabase {
   criticalPoints: CriticalPoint[];
   phrases: string[];
   preferences: AppPreferences;
+  deletedTombstones?: Record<string, number>;
 }
 
 export type PomodoroMode = 'continuous' | '25-5' | '50-10';

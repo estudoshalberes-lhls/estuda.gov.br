@@ -77,6 +77,7 @@ export interface IncrementalDatabaseDelta {
   fixedSubjects?: string[];
   phrases?: string[];
   preferences?: AppPreferences;
+  deletedTombstones?: Record<string, number>;
 }
 
 export interface IncrementalBackupEnvelope {
@@ -302,6 +303,15 @@ export function buildIncrementalDatabaseBackup(
     delta.preferences = currentDb.preferences;
     changedSections.push('preferences');
     addedOrUpdated += 1;
+  }
+  if (
+    currentDb.deletedTombstones &&
+    Object.keys(currentDb.deletedTombstones).length > 0 &&
+    (!baseDb || stableJson(baseDb.deletedTombstones || {}) !== stableJson(currentDb.deletedTombstones))
+  ) {
+    delta.deletedTombstones = currentDb.deletedTombstones;
+    changedSections.push('deletedTombstones');
+    addedOrUpdated += Object.keys(currentDb.deletedTombstones).length;
   }
 
   const envelope: IncrementalBackupEnvelope = {
@@ -587,7 +597,7 @@ function isSeedScheduleTopic(topic: ScheduleTopic): boolean {
 function mergeScheduleDayIncrementally(
   baseTopics: ScheduleTopic[] | undefined,
   deltaTopics: ScheduleTopic[],
-  additiveMerge = false,
+  _additiveMerge = false,
 ): ScheduleTopic[] {
   const prev = baseTopics || [];
   const prevHasCustom = prev.some((t) => !isSeedScheduleTopic(t));
@@ -596,29 +606,7 @@ function mergeScheduleDayIncrementally(
   if (prevHasCustom && deltaOnlySeed) {
     return prev;
   }
-  if (additiveMerge && prevHasCustom) {
-    const customDelta = deltaTopics.filter((t) => !isSeedScheduleTopic(t));
-    if (customDelta.length === 0) {
-      return prev;
-    }
-    const deltaById = new Map<string, ScheduleTopic>();
-    for (const t of customDelta) {
-      if (t?.id) deltaById.set(t.id, t);
-    }
-    const seen = new Set<string>();
-    const merged: ScheduleTopic[] = [];
-    for (const t of prev) {
-      if (t?.id) seen.add(t.id);
-      merged.push(t?.id && deltaById.has(t.id) ? deltaById.get(t.id)! : t);
-    }
-    for (const t of customDelta) {
-      if (!t?.id || !seen.has(t.id)) {
-        if (t?.id) seen.add(t.id);
-        merged.push(t);
-      }
-    }
-    return merged;
-  }
+  // deltaTopics is the authoritative updated topic list for this day (including topic deletions)
   return deltaTopics;
 }
 
@@ -737,6 +725,7 @@ export function applyIncrementalDeltaToDatabase(
           },
         }
       : baseDb.preferences,
+    deletedTombstones: mergeTombstoneMaps(baseDb.deletedTombstones, d.deletedTombstones),
   };
 }
 
@@ -1037,6 +1026,7 @@ export function reconcileCompletedAndArchivedItems(
 
 const TOMBSTONE_STORAGE_PREFIX = 'ce_deleted_tombstones_v1_';
 const TOMBSTONE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_TOMBSTONES = 1200;
 
 export interface TombstoneEntry {
   section: string;
@@ -1044,22 +1034,135 @@ export interface TombstoneEntry {
   deletedAt: number;
 }
 
+export function normalizeTombstoneName(val?: string): string {
+  return String(val || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/_/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function stripDrivePrefixForTombstone(val?: string): string {
+  return String(val || '')
+    .replace(/^(LEI|PROVA|GABARITO|RESUMO|DISCURSIVA|CORRECAO|CRONOGRAMA|DATAS\s*E\s*LOCAIS|EDITAL)\s*-\s*/i, '')
+    .trim();
+}
+
+export function mergeTombstoneMaps(
+  ...maps: Array<Record<string, number> | undefined | null>
+): Record<string, number> {
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+  const merged = new Map<string, number>();
+  for (const mapObj of maps) {
+    if (!mapObj || typeof mapObj !== 'object' || Array.isArray(mapObj)) continue;
+    for (const [k, rawTs] of Object.entries(mapObj)) {
+      if (!k || typeof rawTs !== 'number' || !Number.isFinite(rawTs) || rawTs < cutoff) continue;
+      const prevTs = merged.get(k) || 0;
+      if (rawTs > prevTs) merged.set(k, rawTs);
+    }
+  }
+  const entries = Array.from(merged.entries()).sort((a, b) => a[1] - b[1]);
+  const capped = entries.length > MAX_TOMBSTONES ? entries.slice(-MAX_TOMBSTONES) : entries;
+  return Object.fromEntries(capped);
+}
+
+function entriesToTombstoneMap(entries: TombstoneEntry[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+  for (const e of entries) {
+    if (!e?.section || !e?.key || typeof e.deletedAt !== 'number' || e.deletedAt < cutoff) continue;
+    const composite = `${e.section}::${e.key}`;
+    if (!out[composite] || e.deletedAt > out[composite]) {
+      out[composite] = e.deletedAt;
+    }
+  }
+  return out;
+}
+
+function tombstoneMapToEntries(map: Record<string, number>): TombstoneEntry[] {
+  const cutoff = Date.now() - TOMBSTONE_TTL_MS;
+  const entries: TombstoneEntry[] = [];
+  for (const [composite, deletedAt] of Object.entries(map)) {
+    if (typeof deletedAt !== 'number' || deletedAt < cutoff) continue;
+    const sepIdx = composite.indexOf('::');
+    if (sepIdx <= 0) continue;
+    const section = composite.slice(0, sepIdx);
+    const key = composite.slice(sepIdx + 2);
+    if (section && key) {
+      entries.push({ section, key, deletedAt });
+    }
+  }
+  return entries.sort((a, b) => a.deletedAt - b.deletedAt).slice(-MAX_TOMBSTONES);
+}
+
 const TOMBSTONE_ARRAY_SECTIONS: Array<{
   section: keyof StudyDatabase;
   getKey: (item: any) => string;
+  getSecondaryKeys?: (item: any) => string[];
 }> = [
   { section: 'questions', getKey: (x) => x?.id || '' },
-  { section: 'submittedSimulations', getKey: (x) => x?.id || '' },
+  {
+    section: 'submittedSimulations',
+    getKey: (x) => x?.id || '',
+    getSecondaryKeys: (x) => {
+      const keys: string[] = [];
+      const f1 = normalizeTombstoneName(x?.arquivo);
+      const f2 = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.arquivo));
+      if (f1) keys.push(`file:${f1}`);
+      if (f2 && f2 !== f1) keys.push(`file:${f2}`);
+      return keys;
+    },
+  },
   { section: 'completedSimulations', getKey: (x) => x?.id || '' },
   { section: 'history', getKey: (x) => x?.id || '' },
   { section: 'studyTimeRecords', getKey: (x) => x?.quizId || '' },
   { section: 'annotations', getKey: (x) => x?.id || '' },
   { section: 'caseLaw', getKey: (x) => x?.id || '' },
-  { section: 'contests', getKey: (x) => x?.id || '' },
+  {
+    section: 'contests',
+    getKey: (x) => x?.id || '',
+    getSecondaryKeys: (x) => {
+      const keys: string[] = [];
+      const nameNorm = normalizeTombstoneName(x?.concurso);
+      const editalNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.edital_arquivo));
+      if (nameNorm) keys.push(`name:${nameNorm}`);
+      if (editalNorm) keys.push(`edital:${editalNorm}`);
+      return keys;
+    },
+  },
   { section: 'completedGoals', getKey: (x) => x?.id || '' },
   { section: 'incompleteGoals', getKey: (x) => x?.id || '' },
-  { section: 'proofFiles', getKey: (x) => x?.id || '' },
-  { section: 'essays', getKey: (x) => x?.id || '' },
+  {
+    section: 'proofFiles',
+    getKey: (x) => x?.id || '',
+    getSecondaryKeys: (x) => {
+      const keys: string[] = [];
+      if (x?.blobKey) keys.push(`blob:${x.blobKey}`);
+      const bankNorm = normalizeTombstoneName(x?.bank);
+      const nameNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.name));
+      if (bankNorm && nameNorm) keys.push(`path:${bankNorm}::${nameNorm}`);
+      if (nameNorm) keys.push(`file:${nameNorm}`);
+      const gabNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.gabarito_arquivo));
+      if (gabNorm) keys.push(`gab:${gabNorm}`);
+      return keys;
+    },
+  },
+  {
+    section: 'essays',
+    getKey: (x) => x?.id || '',
+    getSecondaryKeys: (x) => {
+      const keys: string[] = [];
+      if (x?.original_blobKey) keys.push(`blob:${x.original_blobKey}`);
+      const origNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.original_arquivo));
+      if (origNorm) keys.push(`file:${origNorm}`);
+      if (x?.corrigido_blobKey) keys.push(`blob:${x.corrigido_blobKey}`);
+      const corrNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(x?.corrigido_arquivo));
+      if (corrNorm) keys.push(`file:${corrNorm}`);
+      return keys;
+    },
+  },
   { section: 'criticalPoints', getKey: (x) => x?.id || '' },
   { section: 'savedIncidenceFilters', getKey: (x) => x?.id || '' },
 ];
@@ -1070,6 +1173,67 @@ const TOMBSTONE_RECORD_SECTIONS: Array<keyof StudyDatabase> = [
   'pdfFolders',
   'summaryFolders',
 ];
+
+function getRecordFolderTombstoneKeys(sec: keyof StudyDatabase, key: string, value: any): string[] {
+  const keys: string[] = [key];
+  const norm = normalizeTombstoneName(key);
+  if (norm) keys.push(`name:${norm}`);
+  if (sec === 'weeklySchedules' && value?.fileName) {
+    const fNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(value.fileName));
+    if (fNorm) keys.push(`file:${fNorm}`);
+  }
+  return keys;
+}
+
+function getNestedPdfTombstoneKeys(folder: string, file: PersonalPdfFile): string[] {
+  const keys: string[] = [];
+  if (file?.id) keys.push(`id:${folder}::${file.id}`);
+  if (file?.blobKey) keys.push(`blob:${file.blobKey}`);
+  const fNorm = normalizeTombstoneName(folder);
+  const nNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(file?.name));
+  if (fNorm && nNorm) keys.push(`path:${fNorm}::${nNorm}`);
+  return keys;
+}
+
+function getNestedSummaryTombstoneKeys(folder: string, file: SummaryFile): string[] {
+  const keys: string[] = [];
+  if (file?.id) keys.push(`id:${folder}::${file.id}`);
+  if (file?.blobKey) keys.push(`blob:${file.blobKey}`);
+  const fNorm = normalizeTombstoneName(folder);
+  const nNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(file?.name));
+  if (fNorm && nNorm) keys.push(`path:${fNorm}::${nNorm}`);
+  return keys;
+}
+
+function getNestedLawPdfTombstoneKeys(
+  folder: string,
+  pdf: { id?: string; name?: string; blobKey?: string },
+): string[] {
+  const keys: string[] = [];
+  if (pdf?.id) keys.push(`id:${folder}::${pdf.id}`);
+  if (pdf?.blobKey) keys.push(`blob:${pdf.blobKey}`);
+  const fNorm = normalizeTombstoneName(folder);
+  const nNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(pdf?.name));
+  if (fNorm && nNorm) keys.push(`path:${fNorm}::${nNorm}`);
+  return keys;
+}
+
+function getNestedLawItemTombstoneKeys(folder: string, item: { id?: string }): string[] {
+  return item?.id ? [`id:${folder}::${item.id}`] : [];
+}
+
+function getContestEditalPointTombstoneKeys(
+  contest: ContestItem,
+  pt: ContestEditalPoint,
+): string[] {
+  const keys: string[] = [];
+  if (contest?.id && pt?.id) keys.push(`id:${contest.id}::${pt.id}`);
+  const cNorm = normalizeTombstoneName(contest?.concurso);
+  const mNorm = normalizeTombstoneName(pt?.materia);
+  const tNorm = normalizeTombstoneName(pt?.titulo);
+  if (cNorm && (mNorm || tNorm)) keys.push(`sig:${cNorm}::${mNorm}::${tNorm}`);
+  return keys;
+}
 
 function getTombstoneStorageKey(scope: string): string {
   return `${TOMBSTONE_STORAGE_PREFIX}${scope || 'offline_guest'}`;
@@ -1099,31 +1263,34 @@ export function loadDeletedTombstones(scope: string): TombstoneEntry[] {
 export function recordDeletedTombstones(
   scope: string,
   entries: Array<{ section: string; key: string }>,
-): void {
-  if (!entries.length) return;
+  existingDbTombstones?: Record<string, number>,
+): Record<string, number> {
+  const baseMap = mergeTombstoneMaps(
+    entriesToTombstoneMap(loadDeletedTombstones(scope)),
+    existingDbTombstones,
+  );
+  if (!entries.length) return baseMap;
+
+  const now = Date.now();
+  const nextMap: Record<string, number> = { ...baseMap };
+  for (const e of entries) {
+    if (!e.section || !e.key) continue;
+    nextMap[`${e.section}::${e.key}`] = now;
+  }
+  const cappedMap = mergeTombstoneMaps(nextMap);
+
   try {
-    if (typeof window === 'undefined' || !window.localStorage) return;
-    const now = Date.now();
-    const existing = loadDeletedTombstones(scope);
-    const map = new Map<string, TombstoneEntry>();
-    for (const item of existing) {
-      map.set(`${item.section}::${item.key}`, item);
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(
+        getTombstoneStorageKey(scope),
+        JSON.stringify(tombstoneMapToEntries(cappedMap)),
+      );
     }
-    for (const e of entries) {
-      if (!e.section || !e.key) continue;
-      map.set(`${e.section}::${e.key}`, {
-        section: e.section,
-        key: e.key,
-        deletedAt: now,
-      });
-    }
-    window.localStorage.setItem(
-      getTombstoneStorageKey(scope),
-      JSON.stringify(Array.from(map.values()).slice(-1000)),
-    );
   } catch {
     // ignore storage errors
   }
+
+  return cappedMap;
 }
 
 export function clearDeletedTombstones(scope: string): void {
@@ -1135,28 +1302,174 @@ export function clearDeletedTombstones(scope: string): void {
   }
 }
 
+function getScheduleTopicTombstoneKeys(day: WeekdayName, topic: ScheduleTopic): string[] {
+  if (!topic) return [];
+  const keys: string[] = [];
+  if (topic.id) {
+    keys.push(`id:${day}::${topic.id}`);
+    keys.push(`id:${topic.id}`);
+  }
+  const mat = normalizeGoalMatchPart(topic.materia);
+  const obs = normalizeGoalMatchPart(topic.observacoes);
+  if (mat || obs) {
+    keys.push(`sig:${day}::${mat}::${obs}`);
+  }
+  return keys;
+}
+
+function collectActiveTombstoneKeys(activeDb: StudyDatabase): Map<string, Set<string>> {
+  const activeKeysBySection = new Map<string, Set<string>>();
+  const addActive = (section: string, key: string) => {
+    if (!key) return;
+    let set = activeKeysBySection.get(section);
+    if (!set) {
+      set = new Set<string>();
+      activeKeysBySection.set(section, set);
+    }
+    set.add(key);
+  };
+
+  for (const cfg of TOMBSTONE_ARRAY_SECTIONS) {
+    const arr = (activeDb[cfg.section] as unknown as any[]) || [];
+    for (const item of arr) {
+      addActive(String(cfg.section), cfg.getKey(item));
+      for (const secKey of cfg.getSecondaryKeys?.(item) || []) {
+        addActive(String(cfg.section), secKey);
+      }
+    }
+  }
+
+  for (const sec of TOMBSTONE_RECORD_SECTIONS) {
+    const rec = (activeDb[sec] as Record<string, unknown> | undefined) || {};
+    for (const [k, v] of Object.entries(rec)) {
+      for (const rk of getRecordFolderTombstoneKeys(sec, k, v)) {
+        addActive(String(sec), rk);
+      }
+    }
+  }
+
+  for (const [folder, files] of Object.entries(activeDb.pdfFolders || {})) {
+    for (const f of files || []) {
+      for (const k of getNestedPdfTombstoneKeys(folder, f)) {
+        addActive('pdfFiles', k);
+      }
+      const fNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(f?.name));
+      if (fNorm) addActive('pdfDriveFiles', `file:${fNorm}`);
+    }
+  }
+
+  for (const [folder, files] of Object.entries(activeDb.summaryFolders || {})) {
+    for (const s of files || []) {
+      for (const k of getNestedSummaryTombstoneKeys(folder, s)) {
+        addActive('summaryFiles', k);
+      }
+      const sNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(s?.name));
+      if (sNorm) addActive('summaryDriveFiles', `file:${sNorm}`);
+    }
+  }
+
+  for (const [folder, data] of Object.entries(activeDb.laws || {})) {
+    for (const p of data?.pdfs || []) {
+      for (const k of getNestedLawPdfTombstoneKeys(folder, p)) {
+        addActive('lawPdfs', k);
+      }
+      const pNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(p?.name));
+      if (pNorm) addActive('lawDriveFiles', `file:${pNorm}`);
+    }
+    for (const it of data?.items || []) {
+      for (const k of getNestedLawItemTombstoneKeys(folder, it)) {
+        addActive('lawItems', k);
+      }
+    }
+  }
+
+  for (const c of activeDb.contests || []) {
+    for (const pt of c?.edital_pontos || []) {
+      for (const k of getContestEditalPointTombstoneKeys(c, pt)) {
+        addActive('contestEditalPoints', k);
+      }
+    }
+  }
+
+  for (const day of WEEKDAYS) {
+    for (const topic of activeDb.schedule?.[day] || []) {
+      for (const k of getScheduleTopicTombstoneKeys(day, topic)) {
+        addActive('scheduleTopics', k);
+      }
+    }
+  }
+
+  return activeKeysBySection;
+}
+
+export function pruneActiveTombstonesForDatabase(
+  scope: string,
+  activeDb: StudyDatabase,
+  dbTombstones?: Record<string, number>,
+): Record<string, number> | undefined {
+  const merged = mergeTombstoneMaps(
+    entriesToTombstoneMap(loadDeletedTombstones(scope)),
+    dbTombstones ?? activeDb.deletedTombstones,
+  );
+  if (Object.keys(merged).length === 0) return dbTombstones;
+
+  const activeKeysBySection = collectActiveTombstoneKeys(activeDb);
+  const pruned: Record<string, number> = {};
+  let changed = false;
+
+  for (const [composite, ts] of Object.entries(merged)) {
+    const sepIdx = composite.indexOf('::');
+    if (sepIdx <= 0) continue;
+    const section = composite.slice(0, sepIdx);
+    const key = composite.slice(sepIdx + 2);
+    const activeSet = activeKeysBySection.get(section);
+    if (activeSet && activeSet.has(key)) {
+      changed = true;
+      continue;
+    }
+    pruned[composite] = ts;
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(
+        getTombstoneStorageKey(scope),
+        JSON.stringify(tombstoneMapToEntries(pruned)),
+      );
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  return changed || Object.keys(pruned).length > 0 ? pruned : dbTombstones;
+}
+
 export function detectDeletedEntitiesBetweenDatabases(
   prevDb: StudyDatabase,
   nextDb: StudyDatabase,
 ): Array<{ section: string; key: string }> {
   const deleted: Array<{ section: string; key: string }> = [];
+
   for (const cfg of TOMBSTONE_ARRAY_SECTIONS) {
     const prevArr = (prevDb[cfg.section] as unknown as any[]) || [];
     const nextArr = (nextDb[cfg.section] as unknown as any[]) || [];
-    if (prevArr.length <= nextArr.length && nextArr.length > 0) {
-      const nextKeys = new Set(nextArr.map((item) => cfg.getKey(item)).filter(Boolean));
-      for (const item of prevArr) {
-        const k = cfg.getKey(item);
-        if (k && !nextKeys.has(k)) {
-          deleted.push({ section: String(cfg.section), key: k });
+    const nextPrimaryKeys = new Set(nextArr.map((item) => cfg.getKey(item)).filter(Boolean));
+    const nextAllKeys = new Set<string>(nextPrimaryKeys);
+    if (cfg.getSecondaryKeys) {
+      for (const item of nextArr) {
+        for (const sk of cfg.getSecondaryKeys(item)) {
+          nextAllKeys.add(sk);
         }
       }
-    } else if (prevArr.length > nextArr.length) {
-      const nextKeys = new Set(nextArr.map((item) => cfg.getKey(item)).filter(Boolean));
-      for (const item of prevArr) {
-        const k = cfg.getKey(item);
-        if (k && !nextKeys.has(k)) {
-          deleted.push({ section: String(cfg.section), key: k });
+    }
+    for (const item of prevArr) {
+      const k = cfg.getKey(item);
+      if (k && !nextPrimaryKeys.has(k)) {
+        deleted.push({ section: String(cfg.section), key: k });
+        for (const sk of cfg.getSecondaryKeys?.(item) || []) {
+          if (!nextAllKeys.has(sk)) {
+            deleted.push({ section: String(cfg.section), key: sk });
+          }
         }
       }
     }
@@ -1165,34 +1478,360 @@ export function detectDeletedEntitiesBetweenDatabases(
   for (const sec of TOMBSTONE_RECORD_SECTIONS) {
     const prevRec = (prevDb[sec] as Record<string, unknown> | undefined) || {};
     const nextRec = (nextDb[sec] as Record<string, unknown> | undefined) || {};
-    for (const k of Object.keys(prevRec)) {
+    const nextNorms = new Set(Object.keys(nextRec).map((k) => normalizeTombstoneName(k)));
+    for (const [k, v] of Object.entries(prevRec)) {
       if (!(k in nextRec)) {
         deleted.push({ section: String(sec), key: k });
+        const n = normalizeTombstoneName(k);
+        if (n && !nextNorms.has(n)) {
+          deleted.push({ section: String(sec), key: `name:${n}` });
+        }
+        if (sec === 'weeklySchedules' && (v as any)?.fileName) {
+          const fn = normalizeTombstoneName(stripDrivePrefixForTombstone((v as any).fileName));
+          if (fn) deleted.push({ section: 'weeklySchedules', key: `file:${fn}` });
+        }
       }
     }
   }
+
+  // Nested Personal PDFs
+  const nextPdfDriveNames = new Set<string>();
+  for (const files of Object.values(nextDb.pdfFolders || {})) {
+    for (const f of files || []) {
+      const n = normalizeTombstoneName(stripDrivePrefixForTombstone(f?.name));
+      if (n) nextPdfDriveNames.add(n);
+    }
+  }
+  for (const [folder, prevFiles] of Object.entries(prevDb.pdfFolders || {})) {
+    const folderStillExists = folder in (nextDb.pdfFolders || {});
+    const nextFiles = nextDb.pdfFolders?.[folder] || [];
+    const nextIds = new Set(nextFiles.map((f) => f.id).filter(Boolean));
+    for (const f of prevFiles || []) {
+      if (!f.id || !nextIds.has(f.id)) {
+        for (const tk of getNestedPdfTombstoneKeys(folder, f)) {
+          deleted.push({ section: 'pdfFiles', key: tk });
+        }
+        const fNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(f.name));
+        if (fNorm && (!folderStillExists || !nextPdfDriveNames.has(fNorm))) {
+          deleted.push({ section: 'pdfDriveFiles', key: `file:${fNorm}` });
+        }
+      }
+    }
+  }
+
+  // Nested Summaries
+  const nextSummaryDriveNames = new Set<string>();
+  for (const files of Object.values(nextDb.summaryFolders || {})) {
+    for (const s of files || []) {
+      const n = normalizeTombstoneName(stripDrivePrefixForTombstone(s?.name));
+      if (n) nextSummaryDriveNames.add(n);
+    }
+  }
+  for (const [folder, prevFiles] of Object.entries(prevDb.summaryFolders || {})) {
+    const folderStillExists = folder in (nextDb.summaryFolders || {});
+    const nextFiles = nextDb.summaryFolders?.[folder] || [];
+    const nextIds = new Set(nextFiles.map((s) => s.id).filter(Boolean));
+    for (const s of prevFiles || []) {
+      if (!s.id || !nextIds.has(s.id)) {
+        for (const tk of getNestedSummaryTombstoneKeys(folder, s)) {
+          deleted.push({ section: 'summaryFiles', key: tk });
+        }
+        const sNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(s.name));
+        if (sNorm && (!folderStillExists || !nextSummaryDriveNames.has(sNorm))) {
+          deleted.push({ section: 'summaryDriveFiles', key: `file:${sNorm}` });
+        }
+      }
+    }
+  }
+
+  // Nested Law PDFs & Law Items
+  const nextLawDriveNames = new Set<string>();
+  for (const data of Object.values(nextDb.laws || {})) {
+    for (const p of data?.pdfs || []) {
+      const n = normalizeTombstoneName(stripDrivePrefixForTombstone(p?.name));
+      if (n) nextLawDriveNames.add(n);
+    }
+  }
+  for (const [folder, prevData] of Object.entries(prevDb.laws || {})) {
+    const nextData = nextDb.laws?.[folder];
+    const nextPdfIds = new Set((nextData?.pdfs || []).map((p) => p.id).filter(Boolean));
+    for (const p of prevData?.pdfs || []) {
+      if (!p.id || !nextPdfIds.has(p.id)) {
+        for (const tk of getNestedLawPdfTombstoneKeys(folder, p)) {
+          deleted.push({ section: 'lawPdfs', key: tk });
+        }
+        const pNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(p.name));
+        if (pNorm && !nextLawDriveNames.has(pNorm)) {
+          deleted.push({ section: 'lawDriveFiles', key: `file:${pNorm}` });
+        }
+      }
+    }
+    const nextItemIds = new Set((nextData?.items || []).map((it) => it.id).filter(Boolean));
+    for (const it of prevData?.items || []) {
+      if (it?.id && !nextItemIds.has(it.id)) {
+        for (const tk of getNestedLawItemTombstoneKeys(folder, it)) {
+          deleted.push({ section: 'lawItems', key: tk });
+        }
+      }
+    }
+  }
+
+  // Nested Contest Edital Points (only if the point ID actually disappeared from a surviving contest)
+  const nextContestsById = new Map((nextDb.contests || []).map((c) => [c.id, c]));
+  for (const prevC of prevDb.contests || []) {
+    const nextC = nextContestsById.get(prevC.id);
+    if (!nextC) continue;
+    const nextPtIds = new Set((nextC.edital_pontos || []).map((p) => p.id).filter(Boolean));
+    for (const pt of prevC.edital_pontos || []) {
+      if (pt?.id && !nextPtIds.has(pt.id)) {
+        for (const tk of getContestEditalPointTombstoneKeys(prevC, pt)) {
+          deleted.push({ section: 'contestEditalPoints', key: tk });
+        }
+      }
+    }
+  }
+
+  // Track deleted schedule topics per day (only if topic.id was actually removed)
+  for (const day of WEEKDAYS) {
+    const prevTopics = prevDb.schedule?.[day] || [];
+    const nextTopics = nextDb.schedule?.[day] || [];
+    if (prevTopics.length === 0) continue;
+    const nextIds = new Set(nextTopics.map((t) => t.id).filter(Boolean));
+    for (const t of prevTopics) {
+      if (t.id && nextIds.has(t.id)) continue;
+      for (const k of getScheduleTopicTombstoneKeys(day, t)) {
+        deleted.push({ section: 'scheduleTopics', key: k });
+      }
+    }
+  }
+
   return deleted;
+}
+
+function buildDeletedTimestampMap(
+  mergedDb: StudyDatabase,
+  scope: string,
+): Map<string, Map<string, number>> {
+  const scopeTombstones = loadDeletedTombstones(scope);
+  const guestTombstones = scope !== 'offline_guest' ? loadDeletedTombstones('offline_guest') : [];
+  const mergedMap = mergeTombstoneMaps(
+    entriesToTombstoneMap(scopeTombstones),
+    entriesToTombstoneMap(guestTombstones),
+    mergedDb.deletedTombstones,
+  );
+  const deletedBySection = new Map<string, Map<string, number>>();
+  for (const [composite, ts] of Object.entries(mergedMap)) {
+    const sepIdx = composite.indexOf('::');
+    if (sepIdx <= 0) continue;
+    const section = composite.slice(0, sepIdx);
+    const key = composite.slice(sepIdx + 2);
+    let secMap = deletedBySection.get(section);
+    if (!secMap) {
+      secMap = new Map<string, number>();
+      deletedBySection.set(section, secMap);
+    }
+    secMap.set(key, ts);
+  }
+  return deletedBySection;
+}
+
+function buildDeletedSetMap(mergedDb: StudyDatabase, scope: string): Map<string, Set<string>> {
+  const tsMap = buildDeletedTimestampMap(mergedDb, scope);
+  const out = new Map<string, Set<string>>();
+  for (const [sec, map] of tsMap.entries()) {
+    out.set(sec, new Set(map.keys()));
+  }
+  return out;
+}
+
+export function findMatchingDriveFileTombstones(
+  df: { name?: string; id?: string; subfolderName?: string; folderPath?: string },
+  db: StudyDatabase,
+  scope: string,
+): { isTombstoned: boolean; matchedKeys: string[]; latestDeletedAtMs: number } {
+  const deletedBySection = buildDeletedTimestampMap(db, scope);
+  if (deletedBySection.size === 0) {
+    return { isTombstoned: false, matchedKeys: [], latestDeletedAtMs: 0 };
+  }
+
+  const matched = new Map<string, number>();
+  const addIfPresent = (sec: string, secMap: Map<string, number> | undefined, key: string) => {
+    if (!key || !secMap) return;
+    const ts = secMap.get(key);
+    if (typeof ts === 'number') {
+      const composite = `${sec}::${key}`;
+      matched.set(composite, Math.max(matched.get(composite) || 0, ts));
+    }
+  };
+
+  const dfName = String(df.name || '');
+  const normFull = normalizeTombstoneName(dfName);
+  const normStripped = normalizeTombstoneName(stripDrivePrefixForTombstone(dfName));
+  const driveBlobKey = df.id ? `blob:drive_${df.id}` : '';
+  const pathSegments = String(df.folderPath || '')
+    .split('/')
+    .map((s) => normalizeTombstoneName(s))
+    .filter(Boolean);
+
+  const pdfFolderDel = deletedBySection.get('pdfFolders');
+  const summaryFolderDel = deletedBySection.get('summaryFolders');
+  const lawsDel = deletedBySection.get('laws');
+  for (const seg of pathSegments) {
+    addIfPresent('pdfFolders', pdfFolderDel, `name:${seg}`);
+    addIfPresent('summaryFolders', summaryFolderDel, `name:${seg}`);
+    addIfPresent('laws', lawsDel, `name:${seg}`);
+  }
+
+  const checkNames = (sec: string) => {
+    const s = deletedBySection.get(sec);
+    if (!s || s.size === 0) return;
+    if (driveBlobKey) addIfPresent(sec, s, driveBlobKey);
+    if (normFull) addIfPresent(sec, s, `file:${normFull}`);
+    if (normStripped) addIfPresent(sec, s, `file:${normStripped}`);
+  };
+
+  checkNames('pdfFiles');
+  checkNames('pdfDriveFiles');
+  checkNames('summaryFiles');
+  checkNames('summaryDriveFiles');
+  checkNames('lawPdfs');
+  checkNames('lawDriveFiles');
+  checkNames('proofFiles');
+  checkNames('essays');
+  checkNames('submittedSimulations');
+
+  const proofGab = deletedBySection.get('proofFiles');
+  if (proofGab) {
+    if (normFull) addIfPresent('proofFiles', proofGab, `gab:${normFull}`);
+    if (normStripped) addIfPresent('proofFiles', proofGab, `gab:${normStripped}`);
+  }
+
+  const folderFileSectionNames = ['pdfFiles', 'summaryFiles', 'lawPdfs', 'proofFiles'] as const;
+  for (const sec of folderFileSectionNames) {
+    const s = deletedBySection.get(sec);
+    if (!s) continue;
+    for (const seg of pathSegments) {
+      if (normFull) addIfPresent(sec, s, `path:${seg}::${normFull}`);
+      if (normStripped) addIfPresent(sec, s, `path:${seg}::${normStripped}`);
+    }
+  }
+
+  const contestsDel = deletedBySection.get('contests');
+  if (contestsDel) {
+    if (normFull) {
+      addIfPresent('contests', contestsDel, `name:${normFull}`);
+      addIfPresent('contests', contestsDel, `edital:${normFull}`);
+    }
+    if (normStripped) {
+      addIfPresent('contests', contestsDel, `name:${normStripped}`);
+      addIfPresent('contests', contestsDel, `edital:${normStripped}`);
+    }
+  }
+
+  const weeklyDel = deletedBySection.get('weeklySchedules');
+  if (weeklyDel) {
+    if (normFull) addIfPresent('weeklySchedules', weeklyDel, `file:${normFull}`);
+    if (normStripped) addIfPresent('weeklySchedules', weeklyDel, `file:${normStripped}`);
+  }
+
+  let latestDeletedAtMs = 0;
+  for (const ts of matched.values()) {
+    if (ts > latestDeletedAtMs) latestDeletedAtMs = ts;
+  }
+
+  return {
+    isTombstoned: matched.size > 0,
+    matchedKeys: Array.from(matched.keys()),
+    latestDeletedAtMs,
+  };
+}
+
+export function removeDeletedTombstoneKeys(
+  scope: string,
+  keysToRemove: string[],
+  dbTombstones?: Record<string, number>,
+): Record<string, number> {
+  const removeSet = new Set(keysToRemove.filter(Boolean));
+  const scopesToUpdate = scope !== 'offline_guest' ? [scope, 'offline_guest'] : [scope];
+
+  for (const s of scopesToUpdate) {
+    try {
+      const existing = loadDeletedTombstones(s);
+      if (existing.length > 0 && removeSet.size > 0) {
+        const filtered = existing.filter((e) => !removeSet.has(`${e.section}::${e.key}`));
+        if (typeof window !== 'undefined' && window.localStorage) {
+          if (filtered.length > 0) {
+            window.localStorage.setItem(getTombstoneStorageKey(s), JSON.stringify(filtered));
+          } else {
+            window.localStorage.removeItem(getTombstoneStorageKey(s));
+          }
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+
+  const nextMap: Record<string, number> = { ...(dbTombstones || {}) };
+  for (const k of removeSet) {
+    delete nextMap[k];
+  }
+  return nextMap;
+}
+
+export function isDriveFileTombstoned(
+  df: { name?: string; id?: string; subfolderName?: string; folderPath?: string },
+  db: StudyDatabase,
+  scope: string,
+): boolean {
+  return findMatchingDriveFileTombstones(df, db, scope).isTombstoned;
+}
+
+export function isContestOrScheduleTombstoned(
+  kind: 'contest' | 'weeklySchedule',
+  identifier: { id?: string; name?: string; fileName?: string },
+  db: StudyDatabase,
+  scope: string,
+): boolean {
+  const deletedBySection = buildDeletedSetMap(db, scope);
+  if (kind === 'contest') {
+    const s = deletedBySection.get('contests');
+    if (!s || s.size === 0) return false;
+    if (identifier.id && s.has(identifier.id)) return true;
+    const nNorm = normalizeTombstoneName(identifier.name);
+    if (nNorm && s.has(`name:${nNorm}`)) return true;
+    const fNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(identifier.fileName));
+    if (fNorm && s.has(`edital:${fNorm}`)) return true;
+    return false;
+  }
+  const s = deletedBySection.get('weeklySchedules');
+  if (!s || s.size === 0) return false;
+  if (identifier.id && s.has(identifier.id)) return true;
+  const fNorm = normalizeTombstoneName(stripDrivePrefixForTombstone(identifier.fileName));
+  if (fNorm && s.has(`file:${fNorm}`)) return true;
+  return false;
 }
 
 export function applyTombstonesToMergedDatabase(
   mergedDb: StudyDatabase,
   scope: string,
 ): StudyDatabase {
-  const tombstones = loadDeletedTombstones(scope);
-  if (tombstones.length === 0) return mergedDb;
+  const unifiedTombstones = mergeTombstoneMaps(
+    entriesToTombstoneMap(loadDeletedTombstones(scope)),
+    scope !== 'offline_guest' ? entriesToTombstoneMap(loadDeletedTombstones('offline_guest')) : undefined,
+    mergedDb.deletedTombstones,
+  );
+  const hasAnyTombstone = Object.keys(unifiedTombstones).length > 0;
+  if (!hasAnyTombstone) return mergedDb;
 
-  const deletedBySection = new Map<string, Set<string>>();
-  for (const t of tombstones) {
-    let set = deletedBySection.get(t.section);
-    if (!set) {
-      set = new Set<string>();
-      deletedBySection.set(t.section, set);
-    }
-    set.add(t.key);
-  }
+  const deletedBySection = buildDeletedSetMap({ ...mergedDb, deletedTombstones: unifiedTombstones }, scope);
 
-  let changed = false;
-  const nextDb: StudyDatabase = { ...mergedDb };
+  let changed =
+    JSON.stringify(unifiedTombstones) !== JSON.stringify(mergedDb.deletedTombstones || {});
+  const nextDb: StudyDatabase = {
+    ...mergedDb,
+    deletedTombstones: unifiedTombstones,
+  };
 
   for (const cfg of TOMBSTONE_ARRAY_SECTIONS) {
     const secName = String(cfg.section);
@@ -1201,7 +1840,10 @@ export function applyTombstonesToMergedDatabase(
     const arr = (nextDb[cfg.section] as unknown as any[]) || [];
     const filtered = arr.filter((item) => {
       const k = cfg.getKey(item);
-      return !k || !delSet.has(k);
+      if (k && delSet.has(k)) return false;
+      const secKeys = cfg.getSecondaryKeys?.(item) || [];
+      if (secKeys.some((sk) => delSet.has(sk))) return false;
+      return true;
     });
     if (filtered.length !== arr.length) {
       (nextDb as any)[cfg.section] = filtered;
@@ -1215,8 +1857,9 @@ export function applyTombstonesToMergedDatabase(
     if (!delSet || delSet.size === 0) continue;
     const rec = { ...((nextDb[sec] as Record<string, unknown> | undefined) || {}) };
     let recChanged = false;
-    for (const k of delSet) {
-      if (k in rec) {
+    for (const k of Object.keys(rec)) {
+      const normK = normalizeTombstoneName(k);
+      if (delSet.has(k) || (normK && delSet.has(`name:${normK}`))) {
         delete rec[k];
         recChanged = true;
       }
@@ -1224,6 +1867,185 @@ export function applyTombstonesToMergedDatabase(
     if (recChanged) {
       (nextDb as any)[sec] = rec;
       changed = true;
+    }
+  }
+
+  // Filter nested PDFs in pdfFolders & clean orphaned pdfAnnotations
+  const delPdfFiles = deletedBySection.get('pdfFiles');
+  if (delPdfFiles && delPdfFiles.size > 0 && nextDb.pdfFolders) {
+    const nextFolders = { ...nextDb.pdfFolders };
+    let pdfFilesChanged = false;
+    const nextAnnotations = { ...(nextDb.pdfAnnotations || {}) };
+    let annChanged = false;
+    for (const [folder, list] of Object.entries(nextFolders)) {
+      const safeList = Array.isArray(list) ? list : [];
+      const filtered = safeList.filter((f) => {
+        const keys = getNestedPdfTombstoneKeys(folder, f);
+        const drop = keys.some((k) => delPdfFiles.has(k));
+        if (drop && f.blobKey && f.blobKey in nextAnnotations) {
+          delete nextAnnotations[f.blobKey];
+          annChanged = true;
+        }
+        return !drop;
+      });
+      if (filtered.length !== safeList.length) {
+        nextFolders[folder] = filtered;
+        pdfFilesChanged = true;
+      }
+    }
+    if (pdfFilesChanged) {
+      nextDb.pdfFolders = nextFolders;
+      changed = true;
+    }
+    if (annChanged) {
+      nextDb.pdfAnnotations = nextAnnotations;
+      changed = true;
+    }
+  }
+
+  // Filter nested summaryFiles
+  const delSummaryFiles = deletedBySection.get('summaryFiles');
+  if (delSummaryFiles && delSummaryFiles.size > 0 && nextDb.summaryFolders) {
+    const nextSummary = { ...nextDb.summaryFolders };
+    let sumChanged = false;
+    for (const [folder, list] of Object.entries(nextSummary)) {
+      const safeList = Array.isArray(list) ? list : [];
+      const filtered = safeList.filter(
+        (s) => !getNestedSummaryTombstoneKeys(folder, s).some((k) => delSummaryFiles.has(k)),
+      );
+      if (filtered.length !== safeList.length) {
+        nextSummary[folder] = filtered;
+        sumChanged = true;
+      }
+    }
+    if (sumChanged) {
+      nextDb.summaryFolders = nextSummary;
+      changed = true;
+    }
+  }
+
+  // Filter nested lawPdfs, lawItems, and drop orphaned metadata for deleted law folders
+  const delLaws = deletedBySection.get('laws');
+  const delLawPdfs = deletedBySection.get('lawPdfs');
+  const delLawItems = deletedBySection.get('lawItems');
+  if ((delLawPdfs?.size || 0) > 0 || (delLawItems?.size || 0) > 0) {
+    const nextLaws = { ...(nextDb.laws || {}) };
+    let lawsNestedChanged = false;
+    for (const [folder, folderData] of Object.entries(nextLaws)) {
+      const curPdfs = folderData?.pdfs || [];
+      const curItems = folderData?.items || [];
+      const filteredPdfs = delLawPdfs?.size
+        ? curPdfs.filter((p) => !getNestedLawPdfTombstoneKeys(folder, p).some((k) => delLawPdfs.has(k)))
+        : curPdfs;
+      const filteredItems = delLawItems?.size
+        ? curItems.filter((it) => !getNestedLawItemTombstoneKeys(folder, it).some((k) => delLawItems.has(k)))
+        : curItems;
+      if (filteredPdfs.length !== curPdfs.length || filteredItems.length !== curItems.length) {
+        nextLaws[folder] = {
+          ...folderData,
+          pdfs: filteredPdfs,
+          items: filteredItems,
+        };
+        lawsNestedChanged = true;
+      }
+    }
+    if (lawsNestedChanged) {
+      nextDb.laws = nextLaws;
+      changed = true;
+    }
+  }
+  if (delLaws && delLaws.size > 0) {
+    const cleanLawMetaRecord = <T>(rec: Record<string, T> | undefined): Record<string, T> | undefined => {
+      if (!rec) return rec;
+      const copy = { ...rec };
+      let dropped = false;
+      for (const k of Object.keys(copy)) {
+        const nk = normalizeTombstoneName(k);
+        if ((delLaws.has(k) || (nk && delLaws.has(`name:${nk}`))) && !(k in (nextDb.laws || {}))) {
+          delete copy[k];
+          dropped = true;
+        }
+      }
+      if (dropped) changed = true;
+      return dropped ? copy : rec;
+    };
+    nextDb.lawHighlights = cleanLawMetaRecord(nextDb.lawHighlights) || {};
+    nextDb.readLawItems = cleanLawMetaRecord(nextDb.readLawItems);
+    nextDb.lawReadDates = cleanLawMetaRecord(nextDb.lawReadDates);
+    nextDb.lawLastReadPosition = cleanLawMetaRecord(nextDb.lawLastReadPosition);
+  }
+
+  // Filter nested contestEditalPoints
+  const delEditalPts = deletedBySection.get('contestEditalPoints');
+  if (delEditalPts && delEditalPts.size > 0 && Array.isArray(nextDb.contests)) {
+    let ptsChanged = false;
+    const nextContests = nextDb.contests.map((c) => {
+      const pts = c.edital_pontos || [];
+      const filtered = pts.filter(
+        (pt) => !getContestEditalPointTombstoneKeys(c, pt).some((k) => delEditalPts.has(k)),
+      );
+      if (filtered.length !== pts.length) {
+        ptsChanged = true;
+        return { ...c, edital_pontos: filtered };
+      }
+      return c;
+    });
+    if (ptsChanged) {
+      nextDb.contests = nextContests;
+      changed = true;
+    }
+  }
+
+  // Filter deleted scheduleTopics from schedule and weeklySchedules
+  const delScheduleSet = deletedBySection.get('scheduleTopics');
+  if (delScheduleSet && delScheduleSet.size > 0) {
+    const isTopicTombstoned = (day: WeekdayName, topic: ScheduleTopic): boolean => {
+      const keys = getScheduleTopicTombstoneKeys(day, topic);
+      return keys.some((k) => delScheduleSet.has(k));
+    };
+
+    let scheduleChanged = false;
+    const nextSchedule: ScheduleMap = { ...(nextDb.schedule || {}) } as ScheduleMap;
+    for (const day of WEEKDAYS) {
+      const list = nextSchedule[day] || [];
+      const filtered = list.filter((t) => !isTopicTombstoned(day, t));
+      if (filtered.length !== list.length) {
+        nextSchedule[day] = filtered;
+        scheduleChanged = true;
+      }
+    }
+    if (scheduleChanged) {
+      nextDb.schedule = nextSchedule;
+      changed = true;
+    }
+
+    if (nextDb.weeklySchedules && typeof nextDb.weeklySchedules === 'object') {
+      let weeklyChanged = false;
+      const nextWeekly: Record<string, WeeklyScheduleFileRecord> = { ...nextDb.weeklySchedules };
+      for (const [wk, rec] of Object.entries(nextWeekly)) {
+        if (!rec?.schedule) continue;
+        let recScheduleChanged = false;
+        const updatedRecSchedule: ScheduleMap = { ...rec.schedule };
+        for (const day of WEEKDAYS) {
+          const list = updatedRecSchedule[day] || [];
+          const filtered = list.filter((t) => !isTopicTombstoned(day, t));
+          if (filtered.length !== list.length) {
+            updatedRecSchedule[day] = filtered;
+            recScheduleChanged = true;
+          }
+        }
+        if (recScheduleChanged) {
+          nextWeekly[wk] = {
+            ...rec,
+            schedule: updatedRecSchedule,
+          };
+          weeklyChanged = true;
+        }
+      }
+      if (weeklyChanged) {
+        nextDb.weeklySchedules = nextWeekly;
+        changed = true;
+      }
     }
   }
 

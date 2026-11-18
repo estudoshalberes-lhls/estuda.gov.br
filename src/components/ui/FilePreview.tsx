@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CloudDownload, Download, FileText, FolderSync, X } from 'lucide-react';
+import { CloudDownload, Download, FileText, X } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../../lib/fileStorage';
 import { visibleName } from '../../lib/parsers';
@@ -21,8 +21,6 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
 }) => {
   const {
     driveConnected,
-    localFolderConnected,
-    syncNowWithLocalStudyFolder,
     recoverFileFromDrive,
     toast,
   } = useStudy();
@@ -150,28 +148,6 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
             Conteúdo do arquivo não encontrado no cache deste navegador.
           </span>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            {localFolderConnected && (
-              <button
-                type="button"
-                onClick={async () => {
-                  setRecovering(true);
-                  try {
-                    await syncNowWithLocalStudyFolder();
-                    const blob = await getFileBlob(blobKey);
-                    if (blob) {
-                      await bindBlob(blob, () => true);
-                    }
-                  } finally {
-                    setRecovering(false);
-                  }
-                }}
-                disabled={recovering}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60"
-              >
-                <FolderSync className="w-3.5 h-3.5" />
-                {recovering ? 'Relendo pasta local…' : 'Recarregar da pasta local'}
-              </button>
-            )}
             {driveConnected && (
               <button
                 type="button"

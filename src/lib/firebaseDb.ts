@@ -17,8 +17,14 @@ import {
 import { auth, ensureFirebaseSessionAlive, firebaseApp, firebaseConfig } from './googleDrive';
 import { StudyDatabase } from '../types/study';
 
-export const db = firebaseConfig.firestoreDatabaseId
-  ? getFirestore(firebaseApp, firebaseConfig.firestoreDatabaseId)
+export const DEFAULT_FIRESTORE_DATABASE_ID =
+  'ai-studio-estudagovbr-caf99b2c-85a9-4971-83d6-5ebd5dcbae8f';
+
+const resolvedFirestoreDatabaseId =
+  String(firebaseConfig.firestoreDatabaseId || '').trim() || DEFAULT_FIRESTORE_DATABASE_ID;
+
+export const db = resolvedFirestoreDatabaseId
+  ? getFirestore(firebaseApp, resolvedFirestoreDatabaseId)
   : getFirestore(firebaseApp);
 
 export enum OperationType {
@@ -330,6 +336,7 @@ const RECORD_SECTIONS = [
   'pdfFolders',
   'pdfAnnotations',
   'summaryFolders',
+  'deletedTombstones',
 ] as const;
 
 const OBJECT_SECTIONS = ['schedule', 'scheduleDayDates', 'preferences'] as const;
@@ -1994,7 +2001,8 @@ export async function validateFirestoreAuthConnection(
 export function getFirestoreConfigDiagnostics() {
   const projectId = String(firebaseConfig?.projectId || '').trim();
   const authDomain = String(firebaseConfig?.authDomain || '').trim();
-  const firestoreDatabaseId = String(firebaseConfig?.firestoreDatabaseId || '').trim();
+  const firestoreDatabaseId =
+    String(firebaseConfig?.firestoreDatabaseId || '').trim() || DEFAULT_FIRESTORE_DATABASE_ID;
   const hasApiKey = Boolean(String(firebaseConfig?.apiKey || '').trim());
   const hasAppId = Boolean(String(firebaseConfig?.appId || '').trim());
   const issues: string[] = [];

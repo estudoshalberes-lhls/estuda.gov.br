@@ -50,7 +50,6 @@ export const HomePage: React.FC = () => {
     completeScheduleTopic,
     advanceErrorReview,
     googleUser,
-    localFolderName,
     toast,
   } = useStudy();
 
@@ -192,7 +191,7 @@ export const HomePage: React.FC = () => {
   const holderName =
     googleUser?.displayName ||
     googleUser?.email ||
-    (localFolderName ? `Titular (${localFolderName})` : 'Cidadão-Estudante Federal');
+    'Cidadão-Estudante Federal';
 
   const protocolNumber = `EST-2026-${String(
     db.questions.length * 13 + attempted * 7 + db.completedSimulations.length * 31 + 1042,

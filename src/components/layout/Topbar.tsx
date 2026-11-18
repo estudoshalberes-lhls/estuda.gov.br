@@ -3,7 +3,6 @@ import {
   Check,
   Cloud,
   CloudOff,
-  HardDrive,
   Home,
   Link2,
   Menu,
@@ -67,10 +66,6 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     connectGoogleDrive,
     disconnectGoogleDrive,
     authorizeDriveFolderViaPicker,
-    localFolderConnected,
-    localFolderWritable,
-    localFolderName,
-    isSyncingLocalFolder,
     firestoreConnectionMonitor,
     toast,
   } = useStudy();
@@ -544,25 +539,9 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
         )}
       </div>
 
-      {/* Ícones Minimalistas: Instalar PWA, Status Pasta Local, Status Drive, Google e Tela Inicial */}
+      {/* Ícones Minimalistas: Instalar PWA, Status Drive, Google e Tela Inicial */}
       <div className="flex items-center gap-1 sm:gap-1.5 h-9 sm:h-10 shrink-0">
         <PWAInstallButton variant="topbar" />
-        {localFolderConnected && (
-          <button
-            type="button"
-            onClick={() => setActivePage('Backup e Restauração')}
-            aria-label={`Pasta local conectada: ${localFolderName}`}
-            title={
-              localFolderWritable
-                ? `Pasta local ativa: "${localFolderName}" · Leitura e salvamento automático no computador`
-                : `Pasta local carregada: "${localFolderName}" · Salvando automaticamente no navegador`
-            }
-            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--good)]/45 bg-[var(--good)]/10 text-[var(--good)] text-[11px] font-bold hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap"
-          >
-            <HardDrive className={`w-3.5 h-3.5 shrink-0 ${isSyncingLocalFolder ? 'animate-pulse' : ''}`} />
-            <span className="hidden sm:inline max-w-[110px] truncate">{localFolderName}</span>
-          </button>
-        )}
 
         {driveConnected && drivePermissionNeedsPicker ? (
           <button

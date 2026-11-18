@@ -10,7 +10,6 @@ import {
   FileCode2,
   FileSpreadsheet,
   FileText,
-  HardDrive,
   Layers,
   Pencil,
   PlusCircle,
@@ -103,9 +102,6 @@ export const UtilitiesPage: React.FC = () => {
     driveConnected,
     driveTokenReady,
     activeDriveFolderName,
-    localFolderConnected,
-    localFolderWritable,
-    localFolderName,
     toast,
   } = useStudy();
   const [reprocessingFolder, setReprocessingFolder] = useState<string | null>(null);
@@ -530,11 +526,7 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
     setTxtLoading(true);
     try {
       const outName = await convertExamToStructuredTxt(txtPdf, txtKeyFile, txtKeyText);
-      toast(
-        localFolderConnected && localFolderWritable
-          ? `Arquivo estruturado "${outName}" salvo em Provas e Gabaritos da pasta local e baixado.`
-          : `Arquivo estruturado "${outName}" gerado e baixado.`,
-      );
+      toast(`Arquivo estruturado "${outName}" gerado e baixado.`);
       setTxtPdf(null);
       setTxtKeyFile(null);
       setTxtKeyText('');
@@ -590,20 +582,6 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
               ? '9 utilitários organizados em grade uniforme'
               : `Filtro ativo: ${category}`}
           </span>
-        </div>
-      )}
-
-      {localFolderConnected && (
-        <div className="mb-3.5 rounded-xl border border-[var(--good)]/30 bg-[var(--good)]/10 px-3.5 py-2 flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
-          <div className="flex items-center gap-2 min-w-0 text-[var(--text)]">
-            <HardDrive className="w-4 h-4 text-[var(--good)] shrink-0" />
-            <span className="truncate">
-              <strong>Pasta Local ativa ({localFolderName || 'Computador'}):</strong>{' '}
-              {localFolderWritable
-                ? 'todas as importações, conversões e edições são gravadas automaticamente nas subpastas locais.'
-                : 'modo leitura — exporte ou reabra com permissão de escrita em Backup para gravar direto no disco.'}
-            </span>
-          </div>
         </div>
       )}
 
@@ -968,17 +946,10 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                 </div>
               )}
 
-              {(driveConnected || localFolderConnected) && (
+              {driveConnected && (
                 <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--muted)] px-0.5">
                   <span className="truncate">
-                    {localFolderConnected && localFolderWritable ? (
-                      <>
-                        Pasta local: arquivos salvos em{' '}
-                        <strong className="text-[var(--text)]">
-                          {localFolderName || 'Pasta Local'} / Lei Seca
-                        </strong>
-                      </>
-                    ) : driveTokenReady ? (
+                    {driveTokenReady ? (
                       <>
                         Drive: arquivos originais salvos na íntegra em{' '}
                         <strong className="text-[var(--text)]">

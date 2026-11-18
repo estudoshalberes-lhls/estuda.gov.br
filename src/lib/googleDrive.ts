@@ -36,6 +36,7 @@ export const CLOUD_SYNC_FILENAME = 'central_estudos_sync_latest.json';
 const DRIVE_FOLDER_PREF_KEY = 'central_estudos_drive_folder_pref_v1';
 const KNOWN_DRIVE_ROOTS_KEY = 'central_estudos_known_drive_roots_v1';
 const DRIVE_TOKEN_CACHE_KEY = 'central_estudos_drive_token_v1';
+const DRIVE_SESSION_TOKEN_KEY = 'central_estudos_drive_session_token_v1';
 const LAST_GOOGLE_EMAIL_KEY = 'central_estudos_last_google_email_v1';
 const DRIVE_BLOCKED_FILES_KEY = 'central_estudos_drive_blocked_files_v1';
 const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
@@ -168,26 +169,58 @@ function persistDriveAccessToken(
   cachedAccessToken = token;
   cachedAccessTokenExpiresAt = expiresAt;
   lastSilentRefreshFailureAt = 0;
+  const uid = user?.uid || auth.currentUser?.uid || '';
   const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
   if (email) rememberLastGoogleEmail(email);
-  // Segurança: mantém o Access Token estritamente em memória (nunca persiste tokens OAuth brutos em localStorage)
+  // Segurança: nunca persiste tokens OAuth em localStorage permanente; mantém apenas em memória e sessionStorage da aba atual até expirar
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.setItem(
+        DRIVE_SESSION_TOKEN_KEY,
+        JSON.stringify({ token, expiresAt, uid }),
+      );
+    }
   } catch {
     // ignore storage errors
   }
   notifyDriveTokenListeners();
 }
 
-function restorePersistedDriveAccessToken(_user?: User | null): string | null {
+function restorePersistedDriveAccessToken(user?: User | null): string | null {
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
   } catch {
     // ignore storage errors
   }
-  return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)
-    ? cachedAccessToken
-    : null;
+  if (cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)) {
+    return cachedAccessToken;
+  }
+  try {
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      const raw = window.sessionStorage.getItem(DRIVE_SESSION_TOKEN_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw) as { token?: string; expiresAt?: number; uid?: string };
+        const activeUid = user?.uid || auth.currentUser?.uid || '';
+        const uidMatches = !parsed.uid || !activeUid || parsed.uid === activeUid;
+        if (
+          uidMatches &&
+          typeof parsed.token === 'string' &&
+          parsed.token.trim().length > 0 &&
+          typeof parsed.expiresAt === 'number' &&
+          Date.now() < parsed.expiresAt - 60_000
+        ) {
+          cachedAccessToken = parsed.token;
+          cachedAccessTokenExpiresAt = parsed.expiresAt;
+          return cachedAccessToken;
+        }
+        window.sessionStorage.removeItem(DRIVE_SESSION_TOKEN_KEY);
+      }
+    }
+  } catch {
+    // ignore sessionStorage errors
+  }
+  return null;
 }
 
 export interface DriveFolderPreference {
@@ -294,6 +327,9 @@ export function clearAccessTokenOnly(): void {
   cachedAccessTokenExpiresAt = 0;
   try {
     localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
+    if (typeof window !== 'undefined' && window.sessionStorage) {
+      window.sessionStorage.removeItem(DRIVE_SESSION_TOKEN_KEY);
+    }
   } catch {
     // ignore storage errors
   }
@@ -385,116 +421,22 @@ export async function ensureFirebaseSessionAlive(forceRefresh = false): Promise<
   return auth.currentUser;
 }
 
-export async function refreshDriveAccessTokenSilently(options?: {
+export async function refreshDriveAccessTokenSilently(_options?: {
   email?: string | null;
   force?: boolean;
 }): Promise<string | null> {
   if (typeof window === 'undefined') return null;
 
-  if (!options?.force) {
-    if (!cachedAccessToken) {
-      restorePersistedDriveAccessToken(auth.currentUser);
-    }
-    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(3 * 60 * 1000)) {
-      return cachedAccessToken;
-    }
-    if (
-      lastSilentRefreshFailureAt &&
-      Date.now() - lastSilentRefreshFailureAt < SILENT_REFRESH_FAILURE_COOLDOWN_MS
-    ) {
-      return cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt)
-        ? cachedAccessToken
-        : null;
-    }
-  } else if (
-    lastSilentRefreshFailureAt &&
-    Date.now() - lastSilentRefreshFailureAt < 15_000
-  ) {
-    return null;
+  // Never invoke google.accounts.oauth2.initTokenClient().requestAccessToken() automatically or in background,
+  // because GIS opens a popup directly from the current preview origin and triggers "Erro 400: origin_mismatch"
+  // on dynamic Cloud Run preview URLs, while also consuming the user gesture before Firebase signInWithPopup.
+  if (!cachedAccessToken) {
+    restorePersistedDriveAccessToken(auth.currentUser);
   }
-
-  if (inflightSilentRefreshPromise) {
-    return inflightSilentRefreshPromise;
+  if (cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt)) {
+    return cachedAccessToken;
   }
-
-  const clientId = GOOGLE_CLIENT_ID;
-  const loginHint = (options?.email || auth.currentUser?.email || readLastGoogleEmail() || '').trim();
-  if (!clientId || !loginHint) {
-    return null;
-  }
-
-  const task = (async (): Promise<string | null> => {
-    try {
-      await loadGoogleIdentityServices();
-      const win = window as any;
-      const initTokenClient = win.google?.accounts?.oauth2?.initTokenClient;
-      if (!initTokenClient) return null;
-
-      return await new Promise<string | null>((resolve) => {
-        let settled = false;
-        const finish = (token: string | null) => {
-          if (settled) return;
-          settled = true;
-          window.clearTimeout(timeoutId);
-          resolve(token);
-        };
-
-        const timeoutId = window.setTimeout(() => {
-          lastSilentRefreshFailureAt = Date.now();
-          finish(null);
-        }, 9000);
-
-        try {
-          const tokenClient = initTokenClient({
-            client_id: clientId,
-            scope: DRIVE_SCOPES.join(' '),
-            hint: loginHint,
-            prompt: '',
-            callback: (resp: any) => {
-              if (resp?.access_token) {
-                const ttlSeconds = Number(resp.expires_in) || 3500;
-                const safeTtlMs = Math.max(5 * 60 * 1000, (ttlSeconds - 120) * 1000);
-                persistDriveAccessToken(resp.access_token, Date.now() + safeTtlMs, {
-                  uid: auth.currentUser?.uid,
-                  email: loginHint,
-                });
-                finish(resp.access_token);
-              } else {
-                lastSilentRefreshFailureAt = Date.now();
-                finish(null);
-              }
-            },
-            error_callback: (err: any) => {
-              const errType = err?.type || err?.message || String(err || '');
-              if (!errType.includes('popup_failed_to_open')) {
-                console.debug('[Google Drive OAuth] Renovação silenciosa adiada:', errType);
-              }
-              lastSilentRefreshFailureAt = Date.now();
-              finish(null);
-            },
-          });
-
-          tokenClient.requestAccessToken({
-            prompt: '',
-            hint: loginHint,
-          });
-        } catch {
-          lastSilentRefreshFailureAt = Date.now();
-          finish(null);
-        }
-      });
-    } catch {
-      lastSilentRefreshFailureAt = Date.now();
-      return null;
-    }
-  })();
-
-  inflightSilentRefreshPromise = task;
-  try {
-    return await task;
-  } finally {
-    inflightSilentRefreshPromise = null;
-  }
+  return null;
 }
 
 export interface DriveFileInfo {
@@ -706,6 +648,18 @@ async function throwDriveResponseError(res: Response, context: string): Promise<
     throw new Error('TOKEN_EXPIRED: Sua sessão do Google Drive expirou. Reconecte sua conta Google.');
   }
   const err = await res.text();
+  const errLower = err.toLowerCase();
+  if (
+    res.status === 403 &&
+    (err.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+      err.includes('insufficientPermissions') ||
+      errLower.includes('insufficient authentication scopes'))
+  ) {
+    clearAccessTokenOnly();
+    throw new Error(
+      'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+    );
+  }
   if (
     res.status === 403 &&
     (err.includes('insufficientFilePermissions') ||
@@ -794,16 +748,20 @@ export const googleSignIn = async (options?: {
   const provider = new GoogleAuthProvider();
   DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
   provider.setCustomParameters({
-    prompt: options?.forceAccountPicker ? 'select_account' : hint ? 'consent' : 'select_account',
+    prompt: options?.forceAccountPicker ? 'select_account consent' : hint ? 'consent' : 'select_account consent',
     ...(hint ? { login_hint: hint } : {}),
   });
 
   try {
     isSigningIn = true;
-    await setPersistence(auth, browserLocalPersistence).catch(() => {});
+    // Call signInWithPopup synchronously on the first tick of the user click gesture
+    // (browserLocalPersistence is already configured at module initialization)
     const result = await signInWithPopup(auth, provider);
     const credential = GoogleAuthProvider.credentialFromResult(result);
-    const accessToken = credential?.accessToken || '';
+    const accessToken =
+      credential?.accessToken ||
+      String((result as any)?._tokenResponse?.oauthAccessToken || '').trim() ||
+      '';
 
     rememberLastGoogleEmail(result.user.email);
     if (accessToken) {
@@ -915,6 +873,19 @@ async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphRes
         if (!res.ok) {
           if (res.status === 401) {
             await throwDriveResponseError(res, 'Sessão expirada ao listar pastas do Google Drive');
+          }
+          if (res.status === 403) {
+            const errText = await res.clone().text().catch(() => '');
+            if (
+              errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+              errText.includes('insufficientPermissions') ||
+              errText.toLowerCase().includes('insufficient authentication scopes')
+            ) {
+              clearAccessTokenOnly();
+              throw new Error(
+                'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+              );
+            }
           }
           // Non-fatal fallback: try loading only study folder root + immediate subfolders below
           console.warn('Listagem global de pastas no Drive falhou com status', res.status);
@@ -1068,6 +1039,19 @@ export async function getDriveFolderMetadata(
   if (res.status === 401) {
     await throwDriveResponseError(res, 'Sessão expirada ao consultar pasta do Drive');
   }
+  if (res.status === 403) {
+    const errText = await res.clone().text().catch(() => '');
+    if (
+      errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+      errText.includes('insufficientPermissions') ||
+      errText.toLowerCase().includes('insufficient authentication scopes')
+    ) {
+      clearAccessTokenOnly();
+      throw new Error(
+        'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+      );
+    }
+  }
   if (!res.ok) return null;
 
   const data = (await res.json()) as {
@@ -1114,6 +1098,17 @@ export async function verifyDriveFolderWritable(folderId: string, token?: string
     await throwDriveResponseError(res, 'Sessão expirada ao testar permissão da pasta');
   }
   if (res.status === 403) {
+    const errText = await res.clone().text().catch(() => '');
+    if (
+      errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+      errText.includes('insufficientPermissions') ||
+      errText.toLowerCase().includes('insufficient authentication scopes')
+    ) {
+      clearAccessTokenOnly();
+      throw new Error(
+        'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+      );
+    }
     return false;
   }
   if (!res.ok) {
@@ -1460,6 +1455,7 @@ export async function uploadFileToDrive(
   filename: string,
   token?: string,
   subfolderName?: string | string[],
+  options?: { existingFileId?: string },
 ): Promise<DriveFileInfo> {
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -1473,11 +1469,31 @@ export async function uploadFileToDrive(
     targetFolderId = await getOrCreateStudySubFolder(parentFolder.id, subfolderName, activeToken);
   }
 
-  const metadata = {
+  let existingFileId = options?.existingFileId ? options.existingFileId.replace(/^drive_/, '').trim() : '';
+  if (!existingFileId) {
+    try {
+      const escapedName = filename.replace(/'/g, "\\'");
+      const searchRes = await fetchDriveFilesList(activeToken, {
+        q: `'${targetFolderId}' in parents and name = '${escapedName}' and trashed = false`,
+        fields: 'files(id,name,modifiedTime)',
+        pageSize: 5,
+      });
+      if (searchRes.ok) {
+        const searchData = await searchRes.json();
+        existingFileId = searchData.files?.[0]?.id || '';
+      }
+    } catch {
+      // fallback to POST if lookup fails
+    }
+  }
+
+  const metadata: Record<string, any> = {
     name: filename,
-    parents: [targetFolderId],
     description: `Arquivo sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
   };
+  if (!existingFileId) {
+    metadata.parents = [targetFolderId];
+  }
 
   const boundary = '-------314159265358979323846';
   const delimiter = `\r\n--${boundary}\r\n`;
@@ -1502,10 +1518,14 @@ export async function uploadFileToDrive(
   fullPayload.set(new Uint8Array(buffer), part1.length + part2.length);
   fullPayload.set(part3, part1.length + part2.length + buffer.byteLength);
 
+  const uploadUrl = existingFileId
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents';
+
   const { res } = await authorizedDriveFetch(
-    'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents',
+    uploadUrl,
     (t) => ({
-      method: 'POST',
+      method: existingFileId ? 'PATCH' : 'POST',
       headers: {
         Authorization: `Bearer ${t}`,
         'Content-Type': `multipart/related; boundary=${boundary}`,
@@ -2405,24 +2425,428 @@ export async function downloadDriveFileBlob(
 }
 
 /**
- * Deletes a file from Google Drive.
+ * Trashes (or permanently deletes as fallback) a file or folder in Google Drive.
+ * Returns true if removed/already absent, false if auth/network failed.
  */
-export async function deleteFileFromDrive(fileId: string, token?: string): Promise<void> {
+export async function deleteFileFromDrive(fileId: string, token?: string): Promise<boolean> {
+  const cleanId = String(fileId || '').replace(/^drive_/, '').trim();
+  if (!cleanId) return true;
   const activeToken = token || (await getAccessToken());
-  if (!activeToken) return;
+  if (!activeToken) return false;
 
-  const { res } = await authorizedDriveFetch(
-    `https://www.googleapis.com/drive/v3/files/${fileId}`,
-    (t) => ({
-      method: 'DELETE',
-      headers: { Authorization: `Bearer ${t}` },
-    }),
-    activeToken,
+  try {
+    // Prefer moving to Trash via PATCH so shared/restricted files still disappear cleanly
+    const { res } = await authorizedDriveFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?supportsAllDrives=true`,
+      (t) => ({
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${t}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ trashed: true }),
+      }),
+      activeToken,
+    );
+
+    if (res.ok || res.status === 404) {
+      return true;
+    }
+
+    if (res.status === 401) {
+      clearAccessTokenOnly();
+      return false;
+    }
+
+    if (res.status === 403) {
+      const errText = await res.clone().text().catch(() => '');
+      if (
+        errText.includes('ACCESS_TOKEN_SCOPE_INSUFFICIENT') ||
+        errText.includes('insufficientPermissions') ||
+        errText.toLowerCase().includes('insufficient authentication scopes')
+      ) {
+        clearAccessTokenOnly();
+        return false;
+      }
+    }
+
+    // Fallback: direct DELETE
+    const { res: delRes } = await authorizedDriveFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(cleanId)}?supportsAllDrives=true`,
+      (t) => ({
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${t}` },
+      }),
+      activeToken,
+    );
+
+    if (delRes.ok || delRes.status === 404) {
+      return true;
+    }
+    if (delRes.status === 401) {
+      clearAccessTokenOnly();
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export interface DriveDeleteTarget {
+  fileIds?: string[];
+  names?: string[];
+  subfolderHints?: string[];
+  folderNames?: string[];
+  queuedAt?: number;
+}
+
+const PENDING_DRIVE_DELETES_PREFIX = 'ce_pending_drive_deletes_v1_';
+
+function getPendingDriveDeletesKey(scope: string): string {
+  return `${PENDING_DRIVE_DELETES_PREFIX}${scope || 'offline_guest'}`;
+}
+
+function normalizeDriveMatchName(val?: string): string {
+  return String(val || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/_/g, ' ')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+function stripDriveMatchPrefix(val?: string): string {
+  return String(val || '')
+    .replace(/^(LEI|PROVA|GABARITO|RESUMO|DISCURSIVA|CORRECAO|CRONOGRAMA|DATAS\s*E\s*LOCAIS|EDITAL)\s*-\s*/i, '')
+    .trim();
+}
+
+export function getPendingDriveDeletes(scope: string): DriveDeleteTarget[] {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return [];
+    const raw = window.localStorage.getItem(getPendingDriveDeletesKey(scope));
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as DriveDeleteTarget[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearPendingDriveDeletes(scope: string): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    window.localStorage.removeItem(getPendingDriveDeletesKey(scope));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function removePendingDriveDeletesForDriveFile(
+  scope: string,
+  df: { id?: string; name?: string },
+): void {
+  const scopesToClean = scope !== 'offline_guest' ? [scope, 'offline_guest'] : [scope];
+  const targetId = String(df.id || '').replace(/^drive_/, '').trim();
+  const targetFull = normalizeDriveMatchName(df.name);
+  const targetStripped = normalizeDriveMatchName(stripDriveMatchPrefix(df.name));
+
+  for (const s of scopesToClean) {
+    try {
+      const list = getPendingDriveDeletes(s);
+      if (!list.length) continue;
+      const updated = list
+        .map((entry) => {
+          const nextIds = (entry.fileIds || []).filter(
+            (id) => String(id || '').replace(/^drive_/, '').trim() !== targetId,
+          );
+          const nextNames = (entry.names || []).filter((n) => {
+            const nf = normalizeDriveMatchName(n);
+            const ns = normalizeDriveMatchName(stripDriveMatchPrefix(n));
+            return nf !== targetFull && ns !== targetStripped && nf !== targetStripped && ns !== targetFull;
+          });
+          return {
+            ...entry,
+            ...(entry.fileIds ? { fileIds: nextIds } : {}),
+            ...(entry.names ? { names: nextNames } : {}),
+          };
+        })
+        .filter(
+          (entry) =>
+            Boolean(entry.fileIds?.length) ||
+            Boolean(entry.names?.length) ||
+            Boolean(entry.folderNames?.length),
+        );
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (updated.length > 0) {
+          window.localStorage.setItem(getPendingDriveDeletesKey(s), JSON.stringify(updated));
+        } else {
+          window.localStorage.removeItem(getPendingDriveDeletesKey(s));
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+}
+
+export function queuePendingDriveDeletes(scope: string, target: DriveDeleteTarget): void {
+  const hasContent =
+    Boolean(target.fileIds?.length) ||
+    Boolean(target.names?.length) ||
+    Boolean(target.folderNames?.length);
+  if (!hasContent) return;
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    const existing = getPendingDriveDeletes(scope);
+    const cleaned: DriveDeleteTarget = {
+      ...(target.fileIds?.length
+        ? {
+            fileIds: Array.from(
+              new Set(target.fileIds.map((id) => String(id || '').replace(/^drive_/, '').trim()).filter(Boolean)),
+            ),
+          }
+        : {}),
+      ...(target.names?.length
+        ? { names: Array.from(new Set(target.names.map((n) => String(n || '').trim()).filter(Boolean))) }
+        : {}),
+      ...(target.subfolderHints?.length
+        ? {
+            subfolderHints: Array.from(
+              new Set(target.subfolderHints.map((s) => String(s || '').trim()).filter(Boolean)),
+            ),
+          }
+        : {}),
+      ...(target.folderNames?.length
+        ? {
+            folderNames: Array.from(
+              new Set(target.folderNames.map((f) => String(f || '').trim()).filter(Boolean)),
+            ),
+          }
+        : {}),
+      queuedAt: typeof target.queuedAt === 'number' && target.queuedAt > 0 ? target.queuedAt : Date.now(),
+    };
+    const next = [...existing, cleaned].slice(-200);
+    window.localStorage.setItem(getPendingDriveDeletesKey(scope), JSON.stringify(next));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function matchesDriveFileSubfolderHints(df: DriveFileInfo, hints: string[]): boolean {
+  if (!hints.length) return true;
+  const pathSegments = String(df.folderPath || '')
+    .split('/')
+    .map((s) => normalizeDriveMatchName(s))
+    .filter(Boolean);
+  const subNorm = normalizeDriveMatchName(df.subfolderName);
+  const normHints = hints.map((h) => normalizeDriveMatchName(h)).filter(Boolean);
+  if (!normHints.length) return true;
+
+  // If only category + specific subfolder are provided (e.g. ['PDFs Pessoais', 'Apostilas Base']),
+  // require the specific subfolder if present inside another sibling folder, while still allowing legacy flat files directly in category/root
+  if (normHints.length >= 2) {
+    const [categoryHint, ...specificHints] = normHints;
+    if (specificHints.some((sh) => pathSegments.includes(sh))) {
+      return true;
+    }
+    const lastSeg = pathSegments[pathSegments.length - 1] || '';
+    const isDirectInCategoryOrRoot =
+      lastSeg === categoryHint ||
+      lastSeg === 'meu drive (raiz)' ||
+      (!subNorm && pathSegments.length === 0);
+    return isDirectInCategoryOrRoot;
+  }
+
+  return normHints.some((nh) => subNorm === nh || pathSegments.includes(nh));
+}
+
+export async function deleteStudyFilesFromDrive(
+  target: DriveDeleteTarget,
+  token?: string,
+  prefetchedFiles?: DriveFileInfo[],
+): Promise<{ deletedCount: number; deletedIds: string[]; deletedNames: string[]; failed: boolean }> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    return { deletedCount: 0, deletedIds: [], deletedNames: [], failed: true };
+  }
+
+  const directIds = new Set(
+    (target.fileIds || [])
+      .map((id) => String(id || '').replace(/^drive_/, '').trim())
+      .filter(Boolean),
+  );
+  const nameKeys = new Set<string>();
+  for (const rawName of target.names || []) {
+    const norm = normalizeDriveMatchName(rawName);
+    const stripped = normalizeDriveMatchName(stripDriveMatchPrefix(rawName));
+    if (norm) nameKeys.add(norm);
+    if (stripped) nameKeys.add(stripped);
+  }
+  const subfolderHints = (target.subfolderHints || []).filter(Boolean);
+  const folderNameKeys = new Set(
+    (target.folderNames || []).map((f) => normalizeDriveMatchName(f)).filter(Boolean),
   );
 
-  if (!res.ok && res.status === 401) {
-    clearAccessTokenOnly();
+  const idsToDelete = new Set<string>(directIds);
+  const idToLabel = new Map<string, string>();
+  let filesList: DriveFileInfo[] = prefetchedFiles || [];
+
+  if ((nameKeys.size > 0 || folderNameKeys.size > 0) && filesList.length === 0) {
+    try {
+      filesList = await listAllStudyFilesInDrive(activeToken);
+    } catch (err: any) {
+      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+        return { deletedCount: 0, deletedIds: [], deletedNames: [], failed: true };
+      }
+      filesList = [];
+    }
   }
+
+  for (const df of filesList) {
+    if (!df?.id) continue;
+    if (directIds.has(df.id)) {
+      idsToDelete.add(df.id);
+      if (df.name) idToLabel.set(df.id, df.name);
+      continue;
+    }
+    if (folderNameKeys.size > 0 && df.isInStudyFolder !== false) {
+      const segs = String(df.folderPath || '')
+        .split('/')
+        .map((s) => normalizeDriveMatchName(s))
+        .filter(Boolean);
+      if (segs.some((s) => folderNameKeys.has(s))) {
+        idsToDelete.add(df.id);
+        if (df.name) idToLabel.set(df.id, df.name);
+        continue;
+      }
+    }
+    if (nameKeys.size > 0) {
+      const dfNorm = normalizeDriveMatchName(df.name);
+      const dfStripped = normalizeDriveMatchName(stripDriveMatchPrefix(df.name));
+      if (nameKeys.has(dfNorm) || (dfStripped && nameKeys.has(dfStripped))) {
+        if (matchesDriveFileSubfolderHints(df, subfolderHints)) {
+          idsToDelete.add(df.id);
+          if (df.name) idToLabel.set(df.id, df.name);
+        }
+      }
+    }
+  }
+
+  // Also trash matching study subfolders themselves when deleting a whole folder
+  if (folderNameKeys.size > 0) {
+    try {
+      const graph = await fetchDriveFolderGraph(activeToken);
+      for (const folderId of graph.studyDescendantIds) {
+        if (graph.studyRootIds.has(folderId)) continue;
+        const folderObj = graph.foldersById.get(folderId);
+        if (!folderObj) continue;
+        const normFolder = normalizeDriveMatchName(folderObj.name);
+        if (folderNameKeys.has(normFolder)) {
+          idsToDelete.add(folderId);
+          idToLabel.set(folderId, `Pasta: ${folderObj.name}`);
+        }
+      }
+    } catch {
+      // non-fatal if folder graph fails
+    }
+  }
+
+  const deletedIds: string[] = [];
+  const deletedNamesSet = new Set<string>();
+  let failed = false;
+  for (const id of idsToDelete) {
+    const ok = await deleteFileFromDrive(id, activeToken);
+    if (ok) {
+      deletedIds.push(id);
+      const matchedLabel = idToLabel.get(id);
+      if (matchedLabel) deletedNamesSet.add(matchedLabel);
+    } else {
+      failed = true;
+    }
+  }
+
+  if (deletedIds.length > 0 && deletedNamesSet.size === 0) {
+    (target.names || []).forEach((n) => {
+      if (n?.trim()) deletedNamesSet.add(n.trim());
+    });
+    (target.folderNames || []).forEach((f) => {
+      if (f?.trim()) deletedNamesSet.add(`Pasta: ${f.trim()}`);
+    });
+  }
+
+  return {
+    deletedCount: deletedIds.length,
+    deletedIds,
+    deletedNames: Array.from(deletedNamesSet),
+    failed,
+  };
+}
+
+export async function flushPendingDriveDeletes(
+  scope: string,
+  token?: string,
+  prefetchedFiles?: DriveFileInfo[],
+): Promise<{ deletedIds: string[]; deletedNames: string[]; remainingCount: number }> {
+  const scopeQueue = getPendingDriveDeletes(scope);
+  const guestQueue = scope !== 'offline_guest' ? getPendingDriveDeletes('offline_guest') : [];
+  const combined = [...scopeQueue, ...guestQueue];
+  if (combined.length === 0) {
+    return { deletedIds: [], deletedNames: [], remainingCount: 0 };
+  }
+
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    return { deletedIds: [], deletedNames: [], remainingCount: combined.length };
+  }
+
+  let filesList = prefetchedFiles;
+  if (!filesList) {
+    try {
+      filesList = await listAllStudyFilesInDrive(activeToken);
+    } catch (err: any) {
+      if (String(err?.message || '').includes('TOKEN_EXPIRED')) {
+        return { deletedIds: [], deletedNames: [], remainingCount: combined.length };
+      }
+      filesList = [];
+    }
+  }
+
+  const deletedSet = new Set<string>();
+  const deletedNamesSet = new Set<string>();
+  const remaining: DriveDeleteTarget[] = [];
+
+  for (const item of combined) {
+    const res = await deleteStudyFilesFromDrive(item, activeToken, filesList);
+    res.deletedIds.forEach((id) => deletedSet.add(id));
+    res.deletedNames.forEach((name) => deletedNamesSet.add(name));
+    if (res.failed) {
+      remaining.push(item);
+    }
+  }
+
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      if (scope !== 'offline_guest') {
+        clearPendingDriveDeletes('offline_guest');
+      }
+      if (remaining.length > 0) {
+        window.localStorage.setItem(getPendingDriveDeletesKey(scope), JSON.stringify(remaining.slice(-200)));
+      } else {
+        clearPendingDriveDeletes(scope);
+      }
+    }
+  } catch {
+    // ignore storage errors
+  }
+
+  return {
+    deletedIds: Array.from(deletedSet),
+    deletedNames: Array.from(deletedNamesSet),
+    remainingCount: remaining.length,
+  };
 }
 
 export interface DrivePickerPickedItem {

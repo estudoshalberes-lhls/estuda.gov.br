@@ -178,11 +178,16 @@ export const SchedulePage: React.FC = () => {
 
   useEffect(() => {
     setDraft((prev) => {
-      if (dirtyDaysRef.current.size === 0) return hydrateScheduleWithDrafts(db.schedule);
+      if (dirtyDaysRef.current.size === 0) {
+        const next = hydrateScheduleWithDrafts(db.schedule);
+        draftRef.current = next;
+        return next;
+      }
       const merged = hydrateScheduleWithDrafts(db.schedule);
       dirtyDaysRef.current.forEach((d) => {
         merged[d] = prev[d] || merged[d];
       });
+      draftRef.current = merged;
       return merged;
     });
   }, [db.schedule]);
@@ -199,6 +204,27 @@ export const SchedulePage: React.FC = () => {
       saveScheduleDay(day, topicsToSave, true);
       clearDayTopicDrafts(topicsToSave);
     }
+  };
+
+  const handleDeleteScheduleTopic = (day: WeekdayName, idx: number) => {
+    const existingTimer = saveTimersRef.current[day];
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+      delete saveTimersRef.current[day];
+    }
+    dirtyDaysRef.current.delete(day);
+
+    const currentDayTopics = [...(draftRef.current[day] || db.schedule[day] || [])];
+    const [removed] = currentDayTopics.splice(idx, 1);
+    if (removed?.id) {
+      clearFieldDraft(`schedule_topic_${removed.id}`);
+    }
+    clearDayTopicDrafts(currentDayTopics);
+
+    const nextDraft = { ...draftRef.current, [day]: currentDayTopics };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    saveScheduleDay(day, currentDayTopics, true);
   };
 
   useEffect(() => {
@@ -1058,10 +1084,7 @@ export const SchedulePage: React.FC = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    flushDaySave(day);
-                                    deleteScheduleTopic(day, idx);
-                                  }}
+                                  onClick={() => handleDeleteScheduleTopic(day, idx)}
                                   aria-label="Remover tópico"
                                   className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--bad)] hover:border-[var(--bad)] transition-colors"
                                 >

@@ -10,10 +10,8 @@ import {
   Download,
   FileJson,
   Folder,
-  FolderOpen,
   FolderSearch,
   FolderSync,
-  HardDrive,
   Lock,
   RefreshCcw,
   Share2,
@@ -25,13 +23,9 @@ import {
 import { useStudy } from '../context/StudyContext';
 import { encryptBackupJson } from '../lib/cryptoBackup';
 import { CLOUD_SYNC_FILENAME, DriveFileInfo, DriveFolderSummary } from '../lib/googleDrive';
-import {
-  CANONICAL_LOCAL_SUBFOLDERS,
-  getLocalCategoryList,
-  LocalBackupFileInfo,
-} from '../lib/localFolderSync';
 import { formatUploadSize } from '../lib/parsers';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
+import { SyncActivityLogPanel } from '../components/backup/SyncActivityLogPanel';
 
 export const BackupPage: React.FC = () => {
   const {
@@ -77,28 +71,9 @@ export const BackupPage: React.FC = () => {
     restoreCloudBackup,
     deleteCloudBackup,
     pruneOldCloudBackups,
-    localFolderConnected,
-    localFolderWritable,
-    localFolderName,
-    localFolderSummary,
-    savedLocalFolderMeta,
-    hasSavedLocalFolderHandle,
-    lastLocalFolderSyncAt,
-    lastLocalIncrementalBackupAt,
-    isSyncingLocalFolder,
-    connectLocalStudyFolder,
-    reconnectLocalStudyFolder,
-    importLocalStudyFolderFromFiles,
-    syncNowWithLocalStudyFolder,
-    disconnectLocalStudyFolder,
-    saveLocalIncrementalBackupNow,
-    listLocalBackups,
-    restoreLocalBackup,
-    deleteLocalBackup,
   } = useStudy();
 
   const fileRef = useRef<HTMLInputElement | null>(null);
-  const localFolderInputRef = useRef<HTMLInputElement | null>(null);
   const mobileQuickFilesInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
@@ -106,9 +81,6 @@ export const BackupPage: React.FC = () => {
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [importPassphrase, setImportPassphrase] = useState('');
   const [cloudBackups, setCloudBackups] = useState<DriveFileInfo[]>([]);
-  const [localBackups, setLocalBackups] = useState<LocalBackupFileInfo[]>([]);
-  const [loadingLocalBackups, setLoadingLocalBackups] = useState(false);
-  const [restoringLocalId, setRestoringLocalId] = useState<string | null>(null);
   const [driveFolders, setDriveFolders] = useState<DriveFolderSummary[]>([]);
   const [loadingCloudList, setLoadingCloudList] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
@@ -122,24 +94,6 @@ export const BackupPage: React.FC = () => {
     status: string;
     totalRecords: number;
   } | null>(null);
-
-  const refreshLocalList = useCallback(async () => {
-    if (!localFolderConnected) {
-      setLocalBackups([]);
-      return;
-    }
-    setLoadingLocalBackups(true);
-    try {
-      const items = await listLocalBackups();
-      setLocalBackups(items);
-    } finally {
-      setLoadingLocalBackups(false);
-    }
-  }, [listLocalBackups, localFolderConnected]);
-
-  useEffect(() => {
-    void refreshLocalList();
-  }, [refreshLocalList, lastLocalIncrementalBackupAt, lastLocalFolderSyncAt]);
 
   const refreshCloudList = useCallback(async () => {
     if (!driveConnected || !driveTokenReady) {
@@ -268,8 +222,8 @@ export const BackupPage: React.FC = () => {
       for (const jf of jsonFiles) {
         await importBackupJson(jf);
       }
-      if (otherFiles.length > 0) {
-        await importLocalStudyFolderFromFiles(files);
+      if (jsonFiles.length === 0 && otherFiles.length > 0) {
+        toast('Selecione um backup .json ou importe PDFs diretamente no módulo desejado.', true);
       }
     } catch (err) {
       toast((err as Error).message || 'Falha ao importar arquivos selecionados.', true);
@@ -400,7 +354,7 @@ export const BackupPage: React.FC = () => {
       <PageHeader
         eyebrow="GUARDA PERMANENTE · BACKUP"
         title="Sincronização em nuvem e cópias de segurança"
-        description="Restaure todo o seu dossiê diretamente da sua conta Google Drive ou pasta local e emita snapshots de segurança em JSON."
+        description="Restaure todo o seu dossiê diretamente da sua conta Firebase / Google Drive e emita snapshots de segurança em JSON."
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
@@ -431,26 +385,10 @@ export const BackupPage: React.FC = () => {
       </div>
 
       <input
-        ref={localFolderInputRef}
-        type="file"
-        multiple
-        onChange={async (e) => {
-          const files = e.target.files;
-          if (!files || files.length === 0) return;
-          await importLocalStudyFolderFromFiles(files);
-          if (localFolderInputRef.current) {
-            localFolderInputRef.current.value = '';
-          }
-        }}
-        className="hidden"
-        {...({ webkitdirectory: '', directory: '' } as any)}
-      />
-
-      <input
         ref={mobileQuickFilesInputRef}
         type="file"
         multiple
-        accept=".json,.pdf,.txt,.md,.doc,.docx,application/json,application/pdf,text/plain"
+        accept=".json,application/json"
         onChange={(e) => void handleMobileQuickFilesImport(e)}
         className="hidden"
       />
@@ -656,305 +594,17 @@ export const BackupPage: React.FC = () => {
             <button
               type="button"
               onClick={() => mobileQuickFilesInputRef.current?.click()}
-              disabled={importing || isSyncingLocalFolder}
+              disabled={importing}
               className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
             >
               <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <span>{importing ? 'Importando…' : 'Importar Backup (.json) ou PDFs do Celular'}</span>
+              <span>{importing ? 'Importando…' : 'Importar Backup (.json) do Celular'}</span>
             </button>
           </div>
         </div>
       </Panel>
 
-      <Panel
-        title="Pasta Local do Computador (Leitura e Salvamento 100% Local)"
-        subtitle="Vincule uma pasta do seu computador para identificar automaticamente todas as pastas e arquivos usados pelo site e gravar todas as alterações localmente sem depender de login externo."
-        className="mb-4"
-      >
-        <div className="flex flex-col gap-3.5">
-          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)]">
-            <div className="flex items-start sm:items-center gap-3 min-w-0">
-              <span className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--accent)]/40 bg-[var(--panel-raised)] text-[var(--accent)] shrink-0">
-                <HardDrive className="w-5 h-5" aria-hidden="true" />
-              </span>
-              <div className="min-w-0 flex-1">
-                <strong className="block text-[13px] font-bold text-[var(--text)] break-words sm:truncate">
-                  {localFolderConnected
-                    ? `Pasta local ativa: ${localFolderName}`
-                    : savedLocalFolderMeta
-                    ? `Última pasta local lida: ${savedLocalFolderMeta.rootFolderName}`
-                    : 'Nenhuma pasta local selecionada'}
-                </strong>
-                <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed">
-                  {localFolderConnected
-                    ? localFolderWritable
-                      ? lastLocalIncrementalBackupAt
-                        ? `Backup incremental automático a cada 10 min ativo · Último incremental: ${new Date(lastLocalIncrementalBackupAt).toLocaleString('pt-BR')}${lastLocalFolderSyncAt ? ` · Último salvamento: ${new Date(lastLocalFolderSyncAt).toLocaleString('pt-BR')}` : ''}`
-                        : lastLocalFolderSyncAt
-                        ? `Leitura e escrita direta no disco ativas · Backup incremental a cada 10 min · Último salvamento: ${new Date(lastLocalFolderSyncAt).toLocaleString('pt-BR')}`
-                        : 'Leitura e escrita direta no disco ativas · Backup incremental automático a cada 10 min'
-                      : 'Arquivos importados da pasta local · Alterações salvas automaticamente no banco local do navegador'
-                    : 'Selecione sua pasta de estudos no computador para identificar, editar e gerar backups incrementais a cada 10 min localmente'}
-                </span>
-              </div>
-            </div>
 
-            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
-              {!localFolderConnected && (hasSavedLocalFolderHandle || savedLocalFolderMeta) && (
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const ok = await reconnectLocalStudyFolder();
-                    if (!ok) {
-                      const pickRes = await connectLocalStudyFolder();
-                      if (pickRes.needsInputFallback) {
-                        localFolderInputRef.current?.click();
-                      }
-                    }
-                  }}
-                  disabled={isSyncingLocalFolder}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-                >
-                  <FolderSync className={`w-3.5 h-3.5 shrink-0 ${isSyncingLocalFolder ? 'animate-spin' : ''}`} />
-                  <span>Reconectar &ldquo;{savedLocalFolderMeta?.rootFolderName || 'Pasta Local'}&rdquo;</span>
-                </button>
-              )}
-
-              <button
-                type="button"
-                onClick={async () => {
-                  const res = await connectLocalStudyFolder();
-                  if (res.needsInputFallback) {
-                    localFolderInputRef.current?.click();
-                  }
-                }}
-                disabled={isSyncingLocalFolder}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-              >
-                <FolderOpen className="w-3.5 h-3.5 shrink-0" />
-                <span>{localFolderConnected ? 'Trocar Pasta Local' : 'Selecionar Pasta Local'}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => localFolderInputRef.current?.click()}
-                disabled={isSyncingLocalFolder}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap"
-              >
-                <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                <span>Importar pasta (seletor do navegador)</span>
-              </button>
-
-              {localFolderConnected && (
-                <>
-                  {localFolderWritable && (
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ok = await saveLocalIncrementalBackupNow();
-                        if (ok) await refreshLocalList();
-                      }}
-                      disabled={isSyncingLocalFolder}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12px] font-bold hover:opacity-90 disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-                    >
-                      <Clock className="w-3.5 h-3.5 shrink-0" />
-                      <span>Salvar backup incremental local agora</span>
-                    </button>
-                  )}
-
-                  <button
-                    type="button"
-                    onClick={() => void syncNowWithLocalStudyFolder()}
-                    disabled={isSyncingLocalFolder}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-                  >
-                    <FolderSync className={`w-3.5 h-3.5 text-[var(--accent)] shrink-0 ${isSyncingLocalFolder ? 'animate-spin' : ''}`} />
-                    <span>{isSyncingLocalFolder ? 'Sincronizando pasta…' : 'Reler e salvar tudo na Pasta Local'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => void disconnectLocalStudyFolder()}
-                    disabled={isSyncingLocalFolder}
-                    className="w-full sm:w-auto px-3 py-2 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 transition-colors text-center whitespace-normal sm:whitespace-nowrap"
-                  >
-                    Desvincular pasta
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {(localFolderSummary || savedLocalFolderMeta) ? (
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
-                <div className="min-w-0">
-                  <strong className="text-[12.5px] font-bold text-[var(--text)] break-words">
-                    Inventário de pastas e arquivos identificados pelo site em &ldquo;{(localFolderSummary || savedLocalFolderMeta)?.rootFolderName}&rdquo;
-                  </strong>
-                  <span className="block text-[11px] text-[var(--muted)]">
-                    Total reconhecido: {(localFolderSummary || savedLocalFolderMeta)?.totalFiles || 0} arquivo(s) e {(localFolderSummary || savedLocalFolderMeta)?.totalFolders || 0} subpasta(s)
-                  </span>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2.5">
-                {getLocalCategoryList(localFolderSummary || savedLocalFolderMeta)
-                  .filter((cat) => cat.key !== 'others' || cat.fileCount > 0)
-                  .map((cat) => (
-                    <div
-                      key={cat.key}
-                      className="rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] p-2.5 flex flex-col justify-between gap-1 min-w-0"
-                    >
-                      <div className="flex items-center justify-between gap-1.5 min-w-0">
-                        <span className="text-[11.5px] font-bold text-[var(--text)] truncate">
-                          {cat.label}
-                        </span>
-                        <span className="font-mono-num text-[12px] font-extrabold text-[var(--accent)] shrink-0">
-                          {cat.fileCount}
-                        </span>
-                      </div>
-                      <div className="text-[10.5px] text-[var(--muted)] truncate">
-                        {cat.fileCount > 0
-                          ? `${cat.fileCount} arquivo(s) identificado(s)`
-                          : 'Pasta pronta para uso'}
-                      </div>
-                    </div>
-                  ))}
-              </div>
-            </div>
-          ) : (
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3 text-[11.5px] text-[var(--muted)]">
-              <strong className="text-[var(--text)]">Estrutura de pastas reconhecida e criada automaticamente na pasta local:</strong>{' '}
-              {CANONICAL_LOCAL_SUBFOLDERS.join(' · ')}.
-            </div>
-          )}
-
-          {localFolderConnected && (
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <div className="min-w-0 flex-1">
-                  <strong className="text-[12px] font-bold text-[var(--text)]">
-                    Backups disponíveis na Pasta Local ({localBackups.length})
-                  </strong>
-                  <span className="block text-[11px] text-[var(--muted)]">
-                    Pasta: {localFolderName} / Backups · A cada 10 minutos, apenas as alterações são gravadas em um novo arquivo incremental (cópias antigas nunca são sobrescritas)
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => void refreshLocalList()}
-                  disabled={loadingLocalBackups}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-50 whitespace-nowrap"
-                >
-                  <RefreshCcw className={`w-3 h-3 ${loadingLocalBackups ? 'animate-spin' : ''}`} />
-                  Atualizar lista local
-                </button>
-              </div>
-
-              {loadingLocalBackups ? (
-                <p className="m-0 text-[12px] text-[var(--muted)] py-2">
-                  Carregando backups da pasta local…
-                </p>
-              ) : localBackups.length === 0 ? (
-                <p className="m-0 text-[12px] text-[var(--muted)] py-2">
-                  Nenhum arquivo JSON listado ainda em {localFolderName}/Backups.{' '}
-                  {localFolderWritable
-                    ? 'Clique em "Salvar backup incremental local agora" ou aguarde o ciclo automático de 10 minutos.'
-                    : 'Use "Selecionar Pasta Local" para permitir leitura e gravação incremental direta em disco.'}
-                </p>
-              ) : (
-                <div className="flex flex-col gap-2 max-h-[240px] overflow-y-auto">
-                  {localBackups.map((item) => (
-                    <div
-                      key={item.id}
-                      className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] px-3 py-2 min-w-0"
-                    >
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <strong className="text-[12.5px] font-bold text-[var(--text)] break-all sm:truncate">
-                            {item.isCanonicalSync ? 'Espelho Local Automático (Mais recente)' : item.name}
-                          </strong>
-                          {item.isCanonicalSync ? (
-                            <span className="px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-extrabold uppercase">
-                              Principal
-                            </span>
-                          ) : item.isIncremental ? (
-                            <span className="px-1.5 py-0.5 rounded bg-[var(--good)]/15 text-[var(--good)] text-[10px] font-extrabold uppercase">
-                              Incremental
-                            </span>
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded bg-[var(--panel-soft)] border border-[var(--line)] text-[var(--muted)] text-[10px] font-extrabold uppercase">
-                              Base
-                            </span>
-                          )}
-                        </div>
-                        <span className="block text-[11px] text-[var(--muted)] break-words">
-                          {item.subfolder ? `${item.subfolder} · ` : 'Raiz · '}
-                          Modificado em {new Date(item.modifiedTime).toLocaleString('pt-BR')} ·{' '}
-                          {formatUploadSize(item.size)}
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            const ok = await requestConfirm({
-                              title: item.isIncremental
-                                ? 'Aplicar backup incremental local'
-                                : 'Restaurar backup local',
-                              description: item.isIncremental
-                                ? `O arquivo "${item.name}" é incremental e irá atualizar/mesclar apenas os itens alterados sem apagar os demais dados atuais. Continuar?`
-                                : `Substituir os dados atuais pelo backup "${item.name}" salvo na pasta local?`,
-                              confirmLabel: item.isIncremental
-                                ? 'Aplicar alterações incrementais'
-                                : 'Restaurar este backup',
-                              danger: !item.isIncremental,
-                            });
-                            if (!ok) return;
-                            setRestoringLocalId(item.id);
-                            try {
-                              await restoreLocalBackup(item);
-                            } finally {
-                              setRestoringLocalId(null);
-                            }
-                          }}
-                          disabled={isSyncingLocalFolder || restoringLocalId === item.id}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)] text-[11.5px] font-bold hover:bg-[var(--accent)] hover:text-white disabled:opacity-50 transition-colors whitespace-nowrap"
-                        >
-                          <Download className="w-3.5 h-3.5" />
-                          {restoringLocalId === item.id ? 'Restaurando…' : 'Restaurar'}
-                        </button>
-                        {localFolderWritable && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              const ok = await requestConfirm({
-                                title: 'Excluir backup da pasta local',
-                                description: `Excluir permanentemente "${item.name}" da sua pasta local do computador?`,
-                                confirmLabel: 'Excluir',
-                                danger: true,
-                              });
-                              if (!ok) return;
-                              const removed = await deleteLocalBackup(item);
-                              if (removed) await refreshLocalList();
-                            }}
-                            disabled={isSyncingLocalFolder}
-                            aria-label={`Excluir ${item.name}`}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 text-[11.5px] font-bold transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </Panel>
 
       <Panel
         title="Integração com Google Drive e Sincronização em Nuvem"
@@ -986,7 +636,7 @@ export const BackupPage: React.FC = () => {
                       ? lastCloudSyncAt
                         ? `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
                         : `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Renovação automática ativada`
-                      : `Conta e Supabase conectados (${googleUser?.email || 'Google'}), mas o navegador bloqueou a renovação silenciosa do Drive — toque em Reconectar Drive`
+                      : `Conta e Firebase conectados (${googleUser?.email || 'Google'}), mas a sessão OAuth do Google Drive expirou — clique em "Reconectar conta Google" para reautorizar`
                     : 'Nenhuma conta Google vinculada no momento. Conecte para ativar backups automáticos na nuvem'}
                 </span>
               </div>
@@ -998,10 +648,10 @@ export const BackupPage: React.FC = () => {
                   type="button"
                   onClick={() => void connectGoogleDrive()}
                   disabled={isSyncingDrive}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
                 >
                   <Cloud className="w-3.5 h-3.5 shrink-0" />
-                  <span>{driveConnected ? 'Reconectar Drive' : 'Conectar Google Drive'}</span>
+                  <span>{driveConnected ? 'Reconectar conta Google' : 'Conectar conta Google'}</span>
                 </button>
               )}
               {driveConnected && driveTokenReady && (
@@ -1298,7 +948,7 @@ export const BackupPage: React.FC = () => {
                 {drivePermissionNeedsPicker
                   ? 'seus dados já estão salvos neste navegador. Ative a pasta sincronizada do Google Drive para enviar suas alterações.'
                   : driveConnected && !driveTokenReady
-                  ? 'seus dados já estão seguros no Supabase e no navegador, mas o navegador impediu a renovação automática do Drive. Toque em Reconectar para enviar os arquivos.'
+                  ? 'seus dados já estão seguros no Firebase Firestore e no navegador, mas a sessão OAuth do Google Drive precisa ser confirmada. Toque em Reconectar para enviar os arquivos.'
                   : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta Google.'}
               </span>
               {drivePermissionNeedsPicker ? (
@@ -1461,6 +1111,8 @@ export const BackupPage: React.FC = () => {
         </div>
       </Panel>
 
+      <SyncActivityLogPanel />
+
       <Panel
         title="O que é feito em cada tipo de backup"
         subtitle="Entenda exatamente quais dados e arquivos são salvos ou restaurados em cada rotina automática e manual."
@@ -1476,18 +1128,6 @@ export const BackupPage: React.FC = () => {
               Quando há alteração real nos dados (validada por hash de conteúdo), aplica apenas as mudanças sobre o espelho{' '}
               <strong className="text-[var(--text)] break-all">central_estudos_sync_latest.json</strong> na pasta{' '}
               <strong className="text-[var(--text)]">Backups</strong>. Sem alterações, nada é reenviado.
-            </p>
-          </article>
-
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <Clock className="w-4 h-4 text-[var(--good)] shrink-0" />
-              Backup incremental local automático (10 min)
-            </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              A cada <strong className="text-[var(--text)]">10 minutos</strong>, com a Pasta Local vinculada, verifica mudanças desde o último backup local. Se houver alterações, grava{' '}
-              <strong className="text-[var(--text)] break-all">Backups/backup_incremental_central_estudos_…json</strong> e atualiza o espelho{' '}
-              <strong className="text-[var(--text)] break-all">central_estudos_sync_latest.json</strong> diretamente no disco, preservando cópias anteriores.
             </p>
           </article>
 
@@ -1539,7 +1179,7 @@ export const BackupPage: React.FC = () => {
               Exportar / Restaurar JSON local
             </div>
             <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Gera uma cópia offline em <strong className="text-[var(--text)]">.json</strong> ou importa tanto snapshots completos quanto arquivos incrementais baixados da Pasta Local ou do Drive (mesclando apenas o que foi alterado).
+              Gera uma cópia offline em <strong className="text-[var(--text)]">.json</strong> ou importa tanto snapshots completos quanto arquivos incrementais baixados do Drive (mesclando apenas o que foi alterado).
             </p>
           </article>
         </div>
@@ -1547,7 +1187,7 @@ export const BackupPage: React.FC = () => {
         <div className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3 text-[11.5px] text-[var(--muted)] leading-relaxed flex items-start gap-2.5">
           <Database className="w-4 h-4 text-[var(--accent)] shrink-0 mt-0.5" />
           <div className="min-w-0">
-            <strong className="text-[var(--text)]">Escopo coberto pelo diff incremental (10 min Local / 30 min Nuvem):</strong>{' '}
+            <strong className="text-[var(--text)]">Escopo coberto pelo diff incremental (Nuvem · 30 min):</strong>{' '}
             questões, simulados enviados e realizados, histórico de acertos/erros, tempo de estudo, Caderno de Erros (com revisões), Súmulas e Jurisprudência, Pontos Críticos, Concursos (Datas &amp; Locais),{' '}
             <strong className="text-[var(--text)]">Editais e pontos marcados</strong>, Cronograma semanal, Metas concluídas e não concluídas, pastas de Lei Seca e Matriz de Incidência (dispositivos, graus, dicas, grifos e{' '}
             <strong className="text-[var(--text)]">datas de leitura por lei e por artigo</strong>), metadados/correções de documentos (PDFs, Resumos, Provas, Discursivas), frases motivacionais e preferências. Apenas seções e itens efetivamente alterados são gravados em cada backup incremental.

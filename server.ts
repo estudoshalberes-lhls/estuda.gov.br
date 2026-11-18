@@ -104,7 +104,7 @@ async function startServer() {
   const app = express();
   const port = Number(process.env.PORT) || 3000;
 
-  app.use(express.json({ limit: '15mb' }));
+  app.use(express.json({ limit: '50mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({
@@ -321,7 +321,11 @@ async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+        watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);

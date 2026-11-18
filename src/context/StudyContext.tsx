@@ -20,7 +20,6 @@ import {
   ensurePersistentBrowserStorage,
   getAllFileBlobs,
   getFileBlob,
-  loadLocalDirectoryHandle,
   loadScopedDatabaseJson,
   loadScopedSyncMeta,
   saveFileBlob,
@@ -30,29 +29,6 @@ import {
   triggerBlobDownload,
   setStorageUserScope,
 } from '../lib/fileStorage';
-import {
-  CANONICAL_LOCAL_SUBFOLDERS,
-  deleteDirectoryFromLocalDirectory,
-  deleteFileFromLocalDirectory,
-  deleteLocalBackupFile,
-  ensureLocalStudySubfolders,
-  extractLatestBackupFromLocalFiles,
-  forgetSavedLocalDirectory,
-  listLocalFolderBackups,
-  loadSavedLocalFolderMeta,
-  LocalBackupFileInfo,
-  LocalDiskFileEntry,
-  LocalFolderScanSummary,
-  pickLocalStudyDirectory,
-  readLocalBackupFile,
-  reconnectSavedLocalDirectory,
-  saveLocalFolderBackupFile,
-  saveLocalFolderSyncSnapshot,
-  scanDirectoryHandle,
-  scanFileListFromInput,
-  toDriveCompatibleEntries,
-  writeFileToLocalDirectory,
-} from '../lib/localFolderSync';
 import type { User } from 'firebase/auth';
 import {
   CLOUD_SYNC_FILENAME,
@@ -87,6 +63,13 @@ import {
   downloadLatestCloudSync,
   downloadDriveFileBlob,
   deleteFileFromDrive,
+  deleteStudyFilesFromDrive,
+  flushPendingDriveDeletes,
+  getPendingDriveDeletes,
+  queuePendingDriveDeletes,
+  clearPendingDriveDeletes,
+  removePendingDriveDeletesForDriveFile,
+  DriveDeleteTarget,
   getPreferredStudyFolder,
   setPreferredStudyFolder,
   getKnownStudyDriveFolderNames,
@@ -145,10 +128,21 @@ import {
   clearDeletedTombstones,
   computeDatabaseContentHash,
   detectDeletedEntitiesBetweenDatabases,
+  isContestOrScheduleTombstoned,
+  isDriveFileTombstoned,
   isIncrementalBackupPayload,
+  mergeTombstoneMaps,
+  pruneActiveTombstonesForDatabase,
   reconcileCompletedAndArchivedItems,
   recordDeletedTombstones,
+  removeDeletedTombstoneKeys,
 } from '../lib/incrementalBackup';
+import {
+  DeletedDriveConflict,
+  TimestampSyncComparisonReport,
+  compareLocalAndDriveFileTimestamps,
+  isDriveTimestampNewerThanLocal,
+} from '../lib/driveTimestampSync';
 import {
   decryptBackupEnvelope,
   encryptBackupJson,
@@ -180,6 +174,15 @@ import {
   getFirestoreQuotaCooldownStatus,
   getFirestoreDailyUsageEstimate,
 } from '../lib/firebaseDb';
+import {
+  NewSyncActivityLogInput,
+  SyncActivityLogEntry,
+  SyncAffectedFile,
+  appendSyncActivityLog,
+  clearSyncActivityLogsForScope,
+  loadSyncActivityLogs,
+  subscribeSyncActivityLogs,
+} from '../lib/syncActivityLog';
 import {
   ActiveTimerLink,
   AppPreferences,
@@ -991,26 +994,16 @@ interface StudyContextValue {
   restoreCloudBackup: (fileId: string) => Promise<boolean>;
   deleteCloudBackup: (fileId: string) => Promise<boolean>;
   pruneOldCloudBackups: (maxKeep?: number) => Promise<number>;
-
-  // Local Folder (Computer Directory) integration
-  localFolderConnected: boolean;
-  localFolderWritable: boolean;
-  localFolderName: string | null;
-  localFolderSummary: LocalFolderScanSummary | null;
-  savedLocalFolderMeta: LocalFolderScanSummary | null;
-  hasSavedLocalFolderHandle: boolean;
-  lastLocalFolderSyncAt: string | null;
-  lastLocalIncrementalBackupAt: string | null;
-  isSyncingLocalFolder: boolean;
-  connectLocalStudyFolder: () => Promise<{ ok: boolean; needsInputFallback?: boolean; aborted?: boolean }>;
-  reconnectLocalStudyFolder: () => Promise<boolean>;
-  importLocalStudyFolderFromFiles: (files: FileList | File[]) => Promise<boolean>;
-  syncNowWithLocalStudyFolder: () => Promise<boolean>;
-  disconnectLocalStudyFolder: (forgetSaved?: boolean) => Promise<void>;
-  saveLocalIncrementalBackupNow: () => Promise<boolean>;
-  listLocalBackups: () => Promise<LocalBackupFileInfo[]>;
-  restoreLocalBackup: (backup: LocalBackupFileInfo) => Promise<boolean>;
-  deleteLocalBackup: (backup: LocalBackupFileInfo) => Promise<boolean>;
+  syncActivityLogs: SyncActivityLogEntry[];
+  clearSyncActivityLogs: () => void;
+  driveSyncConflicts: DeletedDriveConflict[];
+  resolvingDriveConflictId: string | null;
+  resolveDriveConflictRemoveCloud: (conflictId: string) => Promise<boolean>;
+  resolveDriveConflictRestoreLocal: (conflictId: string) => Promise<boolean>;
+  resolveAllDriveConflictsRemoveCloud: () => Promise<void>;
+  resolveAllDriveConflictsRestoreLocal: () => Promise<void>;
+  dismissDriveSyncConflicts: () => void;
+  checkDriveTimestampConflictsNow: () => Promise<DeletedDriveConflict[]>;
 }
 
 const StudyContext = createContext<StudyContextValue | null>(null);
@@ -1322,22 +1315,29 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
 
   // Coalesce any duplicate law folder keys (e.g. "Direito Constitucional" vs "Direito_Constitucional")
   // and ensure valid items/pdfs arrays while purging misclassified Cronograma / Edital / Datas e Locais files
-  const rawLaws = dataObj.laws && typeof dataObj.laws === 'object' ? dataObj.laws : seed.laws || {};
+  const rawLaws =
+    dataObj.laws !== undefined
+      ? dataObj.laws && typeof dataObj.laws === 'object'
+        ? dataObj.laws
+        : {}
+      : seed.laws || {};
   const normalizedLaws: Record<string, LawFolderData> = {};
-  const normalizedLawHighlights = normalizeArrayRecordMap<LawHighlight>(
-    seed.lawHighlights,
-    dataObj.lawHighlights as Record<string, unknown> | undefined,
-  );
-  const normalizedReadLawItems = normalizeArrayRecordMap<string>(
-    seed.readLawItems,
-    dataObj.readLawItems as Record<string, unknown> | undefined,
-  );
-  const normalizedLawLastReadPosition: Record<string, string> = {
-    ...(seed.lawLastReadPosition || {}),
-    ...(dataObj.lawLastReadPosition && typeof dataObj.lawLastReadPosition === 'object'
-      ? dataObj.lawLastReadPosition
-      : {}),
-  };
+  const normalizedLawHighlights =
+    dataObj.lawHighlights !== undefined
+      ? normalizeArrayRecordMap<LawHighlight>(dataObj.lawHighlights as Record<string, unknown>)
+      : normalizeArrayRecordMap<LawHighlight>(seed.lawHighlights);
+  const normalizedReadLawItems =
+    dataObj.readLawItems !== undefined
+      ? normalizeArrayRecordMap<string>(dataObj.readLawItems as Record<string, unknown>)
+      : normalizeArrayRecordMap<string>(seed.readLawItems);
+  const normalizedLawLastReadPosition: Record<string, string> =
+    dataObj.lawLastReadPosition !== undefined
+      ? {
+          ...(dataObj.lawLastReadPosition && typeof dataObj.lawLastReadPosition === 'object'
+            ? dataObj.lawLastReadPosition
+            : {}),
+        }
+      : { ...(seed.lawLastReadPosition || {}) };
 
   const dropLawFolderMetadata = (folderKey: string) => {
     delete normalizedLawHighlights[folderKey];
@@ -1568,13 +1568,16 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       correcoes: toArraySafe(pf.correcoes),
     }));
 
-  const rawSchedule =
-    dataObj.schedule && typeof dataObj.schedule === 'object' ? dataObj.schedule : {};
-  const normalizedSchedule = { ...seed.schedule } as ScheduleMap;
+  const hasProvidedSchedule =
+    dataObj.schedule !== undefined && dataObj.schedule !== null && typeof dataObj.schedule === 'object';
+  const rawSchedule = hasProvidedSchedule ? dataObj.schedule : {};
+  const normalizedSchedule = (hasProvidedSchedule ? {} : { ...seed.schedule }) as ScheduleMap;
   WEEKDAYS.forEach((day) => {
     const dayVal = (rawSchedule as Record<string, unknown>)[day];
     if (dayVal !== undefined) {
       normalizedSchedule[day] = toArraySafe<ScheduleTopic>(dayVal);
+    } else if (hasProvidedSchedule) {
+      normalizedSchedule[day] = [];
     } else {
       normalizedSchedule[day] = toArraySafe<ScheduleTopic>(normalizedSchedule[day]);
     }
@@ -1605,10 +1608,10 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     };
   });
 
-  const normalizedPdfFolders = normalizeArrayRecordMap<PersonalPdfFile>(
-    seed.pdfFolders,
-    dataObj.pdfFolders as Record<string, unknown> | undefined,
-  );
+  const normalizedPdfFolders =
+    dataObj.pdfFolders !== undefined
+      ? normalizeArrayRecordMap<PersonalPdfFile>(dataObj.pdfFolders as Record<string, unknown>)
+      : normalizeArrayRecordMap<PersonalPdfFile>(seed.pdfFolders);
   const rawPdfAnnotations =
     dataObj.pdfAnnotations && typeof dataObj.pdfAnnotations === 'object' && !Array.isArray(dataObj.pdfAnnotations)
       ? (dataObj.pdfAnnotations as Record<string, any>)
@@ -1623,10 +1626,15 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       ...(typeof val.lastBakedAt === 'string' ? { lastBakedAt: val.lastBakedAt } : {}),
     };
   });
-  const normalizedSummaryFolders = normalizeArrayRecordMap<SummaryFile>(
-    seed.summaryFolders,
-    dataObj.summaryFolders as Record<string, unknown> | undefined,
-  );
+  const normalizedSummaryFolders =
+    dataObj.summaryFolders !== undefined
+      ? normalizeArrayRecordMap<SummaryFile>(dataObj.summaryFolders as Record<string, unknown>)
+      : normalizeArrayRecordMap<SummaryFile>(seed.summaryFolders);
+
+  const normalizedTombstones =
+    dataObj.deletedTombstones && typeof dataObj.deletedTombstones === 'object'
+      ? mergeTombstoneMaps(dataObj.deletedTombstones as Record<string, number>)
+      : undefined;
 
   return {
     ...seed,
@@ -1673,13 +1681,18 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         : {}),
     },
     schedule: normalizedSchedule,
-    scheduleDayDates: {
-      ...(seed.scheduleDayDates || {}),
-      ...(dataObj.scheduleDayDates && typeof dataObj.scheduleDayDates === 'object'
-        ? dataObj.scheduleDayDates
-        : {}),
-    },
+    scheduleDayDates:
+      dataObj.scheduleDayDates !== undefined
+        ? {
+            ...(dataObj.scheduleDayDates && typeof dataObj.scheduleDayDates === 'object'
+              ? dataObj.scheduleDayDates
+              : {}),
+          }
+        : { ...(seed.scheduleDayDates || {}) },
     weeklySchedules: normalizedWeeklySchedules,
+    ...(normalizedTombstones && Object.keys(normalizedTombstones).length > 0
+      ? { deletedTombstones: normalizedTombstones }
+      : {}),
   };
 }
 
@@ -1687,7 +1700,7 @@ function loadStoredDatabase(scope: string): StudyDatabase {
   const tryParseRaw = (raw: string | null): StudyDatabase | null => {
     if (!raw) return null;
     try {
-      return normalizeAndMergeDatabase(JSON.parse(raw));
+      return applyTombstonesToMergedDatabase(normalizeAndMergeDatabase(JSON.parse(raw)), scope);
     } catch {
       return null;
     }
@@ -1760,104 +1773,42 @@ async function syncMissingReferencedBlobsToDrive(
   targetDb: StudyDatabase,
   driveFiles: DriveFileInfo[],
   token: string,
-): Promise<{ uploadedCount: number; uploadedFiles: DriveFileInfo[] }> {
-  const toDriveSeg = (raw: string) => visibleName(raw).replace(/[\\/]+/g, ' - ').trim();
-  const blobMeta = new Map<
-    string,
-    { filename: string; altNames?: string[]; subfolder?: string | string[] }
-  >();
+  scope = 'offline_guest',
+): Promise<{ uploadedCount: number; updatedCount: number; uploadedFiles: DriveFileInfo[] }> {
+  const report = compareLocalAndDriveFileTimestamps(targetDb, driveFiles, scope);
+  const candidatesToPush = [...report.localOnly, ...report.localNewer];
+  if (candidatesToPush.length === 0) {
+    return { uploadedCount: 0, updatedCount: 0, uploadedFiles: [] };
+  }
 
-  const knownBackupRoots = [
-    getPreferredStudyFolder().name,
-    ...getKnownStudyDriveFolderNames(),
-  ];
-
-  Object.entries(targetDb.pdfFolders || {}).forEach(([folderKey, list]) => {
-    if (isReservedBackupFolderName(folderKey, knownBackupRoots, list)) return;
-    list.forEach((f) =>
-      blobMeta.set(f.blobKey, {
-        filename: f.name,
-        subfolder: ['PDFs Pessoais', toDriveSeg(folderKey)].filter(Boolean),
-      }),
-    );
-  });
-  Object.entries(targetDb.summaryFolders || {}).forEach(([folderKey, list]) =>
-    list.forEach((s) =>
-      blobMeta.set(s.blobKey, {
-        filename: s.name,
-        altNames: [`RESUMO - ${s.name}`],
-        subfolder: ['Resumos e Mapas', toDriveSeg(folderKey)].filter(Boolean),
-      }),
-    ),
-  );
-  Object.entries(targetDb.laws || {}).forEach(([folderKey, folderObj]) =>
-    (folderObj.pdfs || []).forEach((p) =>
-      blobMeta.set(p.blobKey, {
-        filename: p.name,
-        altNames: [`LEI - ${p.name}`],
-        subfolder: ['Lei Seca', toDriveSeg(folderKey)].filter(Boolean),
-      }),
-    ),
-  );
-  (targetDb.proofFiles || []).forEach((pf) =>
-    blobMeta.set(pf.blobKey, {
-      filename: pf.name,
-      altNames: [`PROVA - ${pf.name}`],
-      subfolder:
-        pf.bank && pf.bank !== 'Geral'
-          ? ['Provas e Gabaritos', toDriveSeg(pf.bank)]
-          : 'Provas e Gabaritos',
-    }),
-  );
-  (targetDb.essays || []).forEach((e) => {
-    blobMeta.set(e.original_blobKey, {
-      filename: `DISCURSIVA - ${e.original_arquivo}`,
-      altNames: [e.original_arquivo],
-      subfolder: 'Discursivas',
-    });
-    if (e.corrigido_blobKey && e.corrigido_arquivo) {
-      blobMeta.set(e.corrigido_blobKey, {
-        filename: `CORRECAO - ${e.corrigido_arquivo}`,
-        altNames: [e.corrigido_arquivo],
-        subfolder: 'Discursivas',
-      });
-    }
-  });
-
-  if (blobMeta.size === 0) return { uploadedCount: 0, uploadedFiles: [] };
-
-  const existingNamesLower = new Set(driveFiles.map((f) => normalizeFileLookup(f.name)));
-  const existingStrippedLower = new Set(
-    driveFiles.map((f) => normalizeFileLookup(stripDrivePrefix(f.name))),
-  );
   const allBlobs = await getAllFileBlobs();
+  const blobByKey = new Map(allBlobs.map((item) => [item.key, item.blob]));
   let uploadedCount = 0;
+  let updatedCount = 0;
   const uploadedFiles: DriveFileInfo[] = [];
 
-  for (const item of allBlobs) {
-    const mapped = blobMeta.get(item.key);
-    if (!mapped) continue;
-    const candidates = [mapped.filename, ...(mapped.altNames || [])];
-    const alreadyExists = candidates.some((c) => {
-      const norm = normalizeFileLookup(c);
-      const stripped = normalizeFileLookup(stripDrivePrefix(c));
-      return existingNamesLower.has(norm) || existingStrippedLower.has(stripped);
-    });
-    if (alreadyExists) continue;
+  for (const item of candidatesToPush) {
+    const blob = blobByKey.get(item.blobKey);
+    if (!blob) continue;
 
     try {
-      const uploaded = await uploadFileToDrive(item.blob, mapped.filename, token, mapped.subfolder);
-      existingNamesLower.add(normalizeFileLookup(mapped.filename));
-      existingStrippedLower.add(normalizeFileLookup(stripDrivePrefix(mapped.filename)));
+      const uploaded = await uploadFileToDrive(
+        blob,
+        item.name,
+        token,
+        item.subfolder,
+        item.driveFile ? { existingFileId: item.driveFile.id } : undefined,
+      );
       uploadedFiles.push(uploaded);
       uploadedCount += 1;
+      if (item.status === 'local-newer') updatedCount += 1;
     } catch (err: any) {
       if (String(err?.message || '').includes('TOKEN_EXPIRED')) throw err;
-      console.warn(`[Login Sync Drive] Falha ao enviar ${mapped.filename} para o Drive:`, err);
+      console.warn(`[Login Sync Drive] Falha ao enviar ${item.name} para o Drive:`, err);
     }
   }
 
-  return { uploadedCount, uploadedFiles };
+  return { uploadedCount, updatedCount, uploadedFiles };
 }
 
 function resolveLawFolderKey(
@@ -1888,7 +1839,6 @@ async function restoreFilesAndOrphansFromDriveList(
     skipTargetDbBlobs?: boolean;
     lazyBinaryBlobs?: boolean;
     knownSyncedFileIds?: Set<string>;
-    localFileMap?: Map<string, File>;
   },
 ): Promise<{
   updatedDb: StudyDatabase;
@@ -1896,6 +1846,8 @@ async function restoreFilesAndOrphansFromDriveList(
   orphansImported: number;
   healedLawsCount: number;
   permissionBlockedCount: number;
+  skippedTombstonesCount: number;
+  fileEvents: SyncAffectedFile[];
 }> {
   if (!driveFiles.length) {
     return {
@@ -1904,6 +1856,8 @@ async function restoreFilesAndOrphansFromDriveList(
       orphansImported: 0,
       healedLawsCount: 0,
       permissionBlockedCount: 0,
+      skippedTombstonesCount: 0,
+      fileEvents: [],
     };
   }
 
@@ -1936,6 +1890,17 @@ async function restoreFilesAndOrphansFromDriveList(
   const knownFileNames = new Set<string>();
   let filesRestored = 0;
   let permissionBlockedCount = 0;
+  let skippedTombstonesCount = 0;
+  const fileEvents: SyncAffectedFile[] = [];
+  const seenSkippedIds = new Set<string>();
+  const pushFileEvent = (ev: SyncAffectedFile) => {
+    if (ev.action === 'skipped-tombstone' && ev.driveFileId) {
+      if (seenSkippedIds.has(ev.driveFileId)) return;
+      seenSkippedIds.add(ev.driveFileId);
+      skippedTombstonesCount += 1;
+    }
+    fileEvents.push(ev);
+  };
 
   const knownBackupRoots = [
     getPreferredStudyFolder().name,
@@ -1989,7 +1954,13 @@ async function restoreFilesAndOrphansFromDriveList(
     onProgress?.(Math.min(processedSteps, estimatedTotal), estimatedTotal, label);
   };
 
-  const tryRestoreBlob = async (blobKey: string | undefined, candidates: string[], mimeHint?: string) => {
+  const refreshedBlobTimestamps = new Map<string, string>();
+  const tryRestoreBlob = async (
+    blobKey: string | undefined,
+    candidates: string[],
+    mimeHint?: string,
+    localTimestampIso?: string,
+  ) => {
     candidates.forEach((c) => {
       if (c) {
         knownFileNames.add(normalizeFileLookup(c));
@@ -2009,15 +1980,20 @@ async function restoreFilesAndOrphansFromDriveList(
     }
     if (match) matchedDriveFileIds.add(match.id);
 
+    const driveTimestampIso = match ? match.modifiedTime || match.createdTime : undefined;
+    const driveIsNewer = Boolean(
+      match && localTimestampIso && isDriveTimestampNewerThanLocal(localTimestampIso, driveTimestampIso),
+    );
+    const existing = await getFileBlob(blobKey, scope);
+    const hasExistingBlob = Boolean(existing && existing.size > 0);
+
     // When lazyBinaryBlobs or skipTargetDbBlobs is enabled (e.g. instant login hydration),
-    // we register the file in knownFileNames/matchedDriveFileIds and skip downloading the binary blob.
-    // The PDF/file binary will be downloaded on-demand via recoverFileFromDrive only when the user opens it.
-    if (skipBlobDownload) {
+    // skip uncached binaries, but still refresh blobs already cached locally if Drive has a newer timestamp.
+    if (skipBlobDownload && (!driveIsNewer || !hasExistingBlob)) {
       return;
     }
 
-    const existing = await getFileBlob(blobKey, scope);
-    if (existing && existing.size > 0) {
+    if (hasExistingBlob && !driveIsNewer) {
       emitProgress(candidates[0] || 'Arquivo local verificado');
       return;
     }
@@ -2027,29 +2003,52 @@ async function restoreFilesAndOrphansFromDriveList(
         permissionBlockedCount += 1;
         return;
       }
-      emitProgress(`Carregando ${stripDrivePrefix(match.name) || match.name}`);
+      emitProgress(
+        driveIsNewer
+          ? `Atualizando ${stripDrivePrefix(match.name) || match.name} (versão mais recente no Drive)`
+          : `Carregando ${stripDrivePrefix(match.name) || match.name}`,
+      );
       try {
-        const localFile = options?.localFileMap?.get(match.id);
-        const blob =
-          localFile ||
-          (token ? await downloadDriveFileBlob(match.id, token, mimeHint || match.mimeType) : null);
+        const blob = token ? await downloadDriveFileBlob(match.id, token, mimeHint || match.mimeType) : null;
         if (!blob) return;
         await saveFileBlob(blobKey, blob, scope);
         filesRestored += 1;
+        if (driveIsNewer) {
+          refreshedBlobTimestamps.set(blobKey, driveTimestampIso || new Date().toISOString());
+        }
+        pushFileEvent({
+          name: stripDrivePrefix(match.name) || match.name,
+          action: 'restored',
+          module: match.subfolderName || undefined,
+          driveFileId: match.id,
+          detail: driveIsNewer ? 'Atualizado do Drive (versão mais recente)' : undefined,
+        });
       } catch (err: any) {
         const msg = String(err?.message || '');
         if (msg.includes('TOKEN_EXPIRED')) throw err;
         if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        pushFileEvent({
+          name: stripDrivePrefix(match.name) || match.name,
+          action: 'failed',
+          module: match.subfolderName || undefined,
+          driveFileId: match.id,
+          detail: msg || 'Falha ao baixar arquivo do Drive',
+        });
         console.warn(`Falha ao carregar ${match.name}:`, err);
       }
     }
   };
 
-  // Always index known files from targetDb (and download blobs only if skipBlobDownload is false)
+  // Always index known files from targetDb (and download blobs when missing or newer in Drive)
   // 1. PDFs Pessoais
   for (const files of Object.values(targetDb.pdfFolders || {})) {
     for (const f of files) {
-      await tryRestoreBlob(f.blobKey, [f.name, f.blobKey, `${f.blobKey}.pdf`], 'application/pdf');
+      const annIso = f.blobKey ? targetDb.pdfAnnotations?.[f.blobKey]?.updatedAt : undefined;
+      const localIso =
+        annIso && (!f.updatedAt || Date.parse(annIso) > Date.parse(f.updatedAt))
+          ? annIso
+          : f.updatedAt || f.createdAt;
+      await tryRestoreBlob(f.blobKey, [f.name, f.blobKey, `${f.blobKey}.pdf`], 'application/pdf', localIso);
     }
   }
 
@@ -2060,6 +2059,7 @@ async function restoreFilesAndOrphansFromDriveList(
         s.blobKey,
         [`RESUMO - ${s.name}`, s.name, s.blobKey, `${s.blobKey}.pdf`],
         s.mimeType,
+        s.updatedAt || s.createdAt,
       );
     }
   }
@@ -2076,6 +2076,7 @@ async function restoreFilesAndOrphansFromDriveList(
         pdf.blobKey,
         [`LEI - ${pdf.name}`, pdf.name, pdf.blobKey, `${pdf.blobKey}.pdf`],
         hint,
+        pdf.updatedAt || pdf.createdAt,
       );
     }
   }
@@ -2091,6 +2092,7 @@ async function restoreFilesAndOrphansFromDriveList(
       pf.blobKey,
       [`PROVA - ${pf.name}`, pf.name, pf.blobKey, `${pf.blobKey}.pdf`],
       proofMimeHint,
+      pf.updatedAt || pf.createdAt,
     );
     if (pf.gabarito_arquivo) {
       knownFileNames.add(normalizeFileLookup(`GABARITO - ${pf.gabarito_arquivo}`));
@@ -2105,18 +2107,69 @@ async function restoreFilesAndOrphansFromDriveList(
       e.original_blobKey,
       [`DISCURSIVA - ${e.original_arquivo}`, e.original_arquivo, e.original_blobKey, `${e.original_blobKey}.pdf`],
       e.original_mime,
+      e.updatedAt || e.created_at || e.data,
     );
     if (e.corrigido_blobKey && e.corrigido_arquivo) {
       await tryRestoreBlob(
         e.corrigido_blobKey,
         [`CORRECAO - ${e.corrigido_arquivo}`, e.corrigido_arquivo, e.corrigido_blobKey, `${e.corrigido_blobKey}.pdf`],
         e.corrigido_mime,
+        e.updatedAt || e.corrigida_em || e.created_at,
       );
     }
   }
 
   // 6. Recover orphaned/unlinked study files in Drive folders
   let nextDb: StudyDatabase = targetDb;
+  if (refreshedBlobTimestamps.size > 0) {
+    nextDb = {
+      ...nextDb,
+      pdfFolders: Object.fromEntries(
+        Object.entries(nextDb.pdfFolders || {}).map(([fk, list]) => [
+          fk,
+          (list || []).map((f) =>
+            refreshedBlobTimestamps.has(f.blobKey)
+              ? { ...f, updatedAt: refreshedBlobTimestamps.get(f.blobKey) }
+              : f,
+          ),
+        ]),
+      ),
+      summaryFolders: Object.fromEntries(
+        Object.entries(nextDb.summaryFolders || {}).map(([fk, list]) => [
+          fk,
+          (list || []).map((s) =>
+            refreshedBlobTimestamps.has(s.blobKey)
+              ? { ...s, updatedAt: refreshedBlobTimestamps.get(s.blobKey) }
+              : s,
+          ),
+        ]),
+      ),
+      laws: Object.fromEntries(
+        Object.entries(nextDb.laws || {}).map(([fk, folderObj]) => [
+          fk,
+          {
+            ...folderObj,
+            pdfs: (folderObj.pdfs || []).map((p) =>
+              refreshedBlobTimestamps.has(p.blobKey)
+                ? { ...p, updatedAt: refreshedBlobTimestamps.get(p.blobKey) }
+                : p,
+            ),
+          },
+        ]),
+      ),
+      proofFiles: (nextDb.proofFiles || []).map((pf) =>
+        refreshedBlobTimestamps.has(pf.blobKey)
+          ? { ...pf, updatedAt: refreshedBlobTimestamps.get(pf.blobKey) }
+          : pf,
+      ),
+      essays: (nextDb.essays || []).map((e) => {
+        const ts =
+          refreshedBlobTimestamps.get(e.original_blobKey) ||
+          (e.corrigido_blobKey ? refreshedBlobTimestamps.get(e.corrigido_blobKey) : undefined);
+        return ts ? { ...e, updatedAt: ts } : e;
+      }),
+    };
+  }
   let orphansImported = 0;
 
   const hasStudyPrefix = (name: string) =>
@@ -2166,9 +2219,7 @@ async function restoreFilesAndOrphansFromDriveList(
     const gdf = gabaritoFileByStem.get(stem);
     if (!gdf) return null;
     try {
-      const localFile = options?.localFileMap?.get(gdf.id);
-      const gBlob =
-        localFile || (token ? await downloadDriveFileBlob(gdf.id, token, gdf.mimeType) : null);
+      const gBlob = token ? await downloadDriveFileBlob(gdf.id, token, gdf.mimeType) : null;
       if (!gBlob) return null;
       const gText = await readStudyBlobText(gBlob, gdf.name, gdf.mimeType);
       let answers: Record<number, string> = {};
@@ -2214,8 +2265,25 @@ async function restoreFilesAndOrphansFromDriveList(
     if (!isSupportedRestorableStudyFile(df)) return false;
     if (isGabaritoFilename(df.name)) return false;
     if (options?.lazyBinaryBlobs && dbAlreadyHydrated && knownSyncedIds?.has(df.id)) return false;
+    if (isDriveFileTombstoned(df, nextDb, scope)) {
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'skipped-tombstone',
+        module: df.subfolderName || undefined,
+        driveFileId: df.id,
+        detail: 'Bloqueado pelo registro de exclusão',
+      });
+      return false;
+    }
     if (isDriveFilePermissionBlocked(df.id)) {
       permissionBlockedCount += 1;
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'failed',
+        module: df.subfolderName || undefined,
+        driveFileId: df.id,
+        detail: 'Sem permissão do Seletor do Drive',
+      });
       return false;
     }
 
@@ -2270,12 +2338,10 @@ async function restoreFilesAndOrphansFromDriveList(
         let blob: Blob | null = null;
         if (!options?.lazyBinaryBlobs || needsBlobForParsing) {
           emitProgress(`Importando ${cleanName}`);
-          const localFile = options?.localFileMap?.get(df.id);
-          blob =
-            localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
+          blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
           if (!blob) continue;
         }
-        const blobKey = options?.localFileMap ? `local_${uid(14)}` : `drive_${df.id}`;
+        const blobKey = `drive_${df.id}`;
         if (blob) {
           await saveFileBlob(blobKey, blob, scope);
         }
@@ -2339,7 +2405,7 @@ async function restoreFilesAndOrphansFromDriveList(
           ) {
             existingSimFileKeys.add(normalizeFileLookup(cleanName));
             existingSimFileKeys.add(normalizeFileLookup(df.name));
-            const simSubject = visibleName(bankName === 'Pasta Local' || bankName === 'Recuperadas do Drive' ? displayBaseName(cleanName) : bankName) || displayBaseName(cleanName) || 'Geral';
+            const simSubject = visibleName(bankName === 'Recuperadas do Drive' ? displayBaseName(cleanName) : bankName) || displayBaseName(cleanName) || 'Geral';
             nextSubmittedSims.unshift({
               id: uid(32),
               titulo: displayBaseName(cleanName),
@@ -2404,13 +2470,17 @@ async function restoreFilesAndOrphansFromDriveList(
             pdfs: updatedPdfs,
           };
           orphansImported += 1;
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: 'Lei Seca',
+            driveFileId: df.id,
+          });
         } else if (isProof) {
           const bankName =
             extractNestedFolderName(df, 'Provas e Gabaritos') ||
-            (options?.localFileMap ? 'Pasta Local' : 'Recuperadas do Drive');
-          const sourceLabel = options?.localFileMap
-            ? `Arquivo importado da pasta local (${df.folderPath || 'Pasta Local'}).`
-            : `Arquivo restaurado do Google Drive (${df.folderPath || 'Drive'}).`;
+            'Recuperadas do Drive';
+          const sourceLabel = `Arquivo restaurado do Google Drive (${df.folderPath || 'Drive'}).`;
 
           if (isTxtOrMd && blob) {
             const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
@@ -2440,6 +2510,12 @@ async function restoreFilesAndOrphansFromDriveList(
             });
           }
           orphansImported += 1;
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: 'Provas e Gabaritos',
+            driveFileId: df.id,
+          });
         } else if (isSummary) {
           const folderName =
             extractNestedFolderName(df, 'Resumos e Mapas') || 'Recuperados do Drive';
@@ -2456,6 +2532,12 @@ async function restoreFilesAndOrphansFromDriveList(
             },
           ];
           orphansImported += 1;
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: 'Resumos e Mapas',
+            driveFileId: df.id,
+          });
         } else if (isEssay) {
           nextEssays.unshift({
             id: uid(10),
@@ -2466,11 +2548,15 @@ async function restoreFilesAndOrphansFromDriveList(
             original_blobKey: blobKey,
             original_mime: blob?.type || df.mimeType || 'application/pdf',
             corrigido_arquivo: '',
-            feedback: options?.localFileMap
-              ? 'Recuperada automaticamente da pasta local.'
-              : 'Recuperada automaticamente do Google Drive.',
+            feedback: 'Recuperada automaticamente do Google Drive.',
           });
           orphansImported += 1;
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: 'Discursivas',
+            driveFileId: df.id,
+          });
         } else if (isTxtOrMd && forced === 'auto' && blob) {
           // Inspect text files outside canonical folders before misfiling into Personal PDFs
           const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
@@ -2489,12 +2575,16 @@ async function restoreFilesAndOrphansFromDriveList(
           if (detectedQuestions.length > 0) {
             await registerTxtProofAndSim(
               txt,
-              options?.localFileMap ? 'Pasta Local' : 'Recuperadas do Drive',
-              options?.localFileMap
-                ? `Prova .txt importada da pasta local (${df.folderPath || 'Pasta Local'}).`
-                : `Prova .txt restaurada do Drive (${df.folderPath || 'Drive'}).`,
+              'Recuperadas do Drive',
+              `Prova .txt restaurada do Drive (${df.folderPath || 'Drive'}).`,
             );
             orphansImported += 1;
+            pushFileEvent({
+              name: cleanName,
+              action: 'imported-orphan',
+              module: 'Provas e Gabaritos',
+              driveFileId: df.id,
+            });
           } else if (splitLawDevices(txt).length >= 2) {
             const detectedLaw = parseLawTextToItems(cleanName, txt);
             if (detectedLaw.length >= 2) {
@@ -2513,6 +2603,12 @@ async function restoreFilesAndOrphansFromDriveList(
                 ],
               };
               orphansImported += 1;
+              pushFileEvent({
+                name: cleanName,
+                action: 'imported-orphan',
+                module: 'Lei Seca',
+                driveFileId: df.id,
+              });
             }
           }
         } else {
@@ -2537,11 +2633,24 @@ async function restoreFilesAndOrphansFromDriveList(
             { id: uid(10), name: cleanName, size: sizeNum, blobKey, createdAt: nowIso },
           ];
           orphansImported += 1;
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: 'PDFs Pessoais',
+            driveFileId: df.id,
+          });
         }
       } catch (err: any) {
         const msg = String(err?.message || '');
         if (msg.includes('TOKEN_EXPIRED')) throw err;
         if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        pushFileEvent({
+          name: stripDrivePrefix(df.name) || df.name,
+          action: 'failed',
+          module: df.subfolderName || undefined,
+          driveFileId: df.id,
+          detail: msg || 'Erro ao importar arquivo do Drive',
+        });
         console.warn(`Falha ao recuperar arquivo "${df.name}" do Drive:`, err);
       }
     }
@@ -2624,6 +2733,16 @@ async function restoreFilesAndOrphansFromDriveList(
     if (!lower.endsWith('.txt')) return false;
     const matchesSchedule = df.subfolderName === 'Cronogramas' || /^CRONOGRAMA\s*-\s*/i.test(df.name);
     if (!matchesSchedule) return false;
+    if (!onlyFileIdSet?.has(df.id) && isDriveFileTombstoned(df, nextDb, scope)) {
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'skipped-tombstone',
+        module: 'Cronogramas',
+        driveFileId: df.id,
+        detail: 'Cronograma ignorado pelo registro de exclusão',
+      });
+      return false;
+    }
     if (!onlyFileIdSet?.has(df.id) && isDriveFilePermissionBlocked(df.id)) {
       permissionBlockedCount += 1;
       return false;
@@ -2640,19 +2759,32 @@ async function restoreFilesAndOrphansFromDriveList(
 
     for (const df of scheduleTxtDriveFiles) {
       try {
-        const localFile = options?.localFileMap?.get(df.id);
-        const blob =
-          localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
+        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
         if (!blob) continue;
         const text = await readStudyBlobText(blob, df.name);
         const parsedWeek = parseScheduleWeekText(text, df.name);
+        if (
+          !onlyFileIdSet?.has(df.id) &&
+          isContestOrScheduleTombstoned(
+            'weeklySchedule',
+            { id: parsedWeek.weekKey, fileName: df.name },
+            nextDb,
+            scope,
+          )
+        ) {
+          pushFileEvent({
+            name: stripDrivePrefix(df.name) || df.name,
+            action: 'skipped-tombstone',
+            module: 'Cronogramas',
+            driveFileId: df.id,
+            detail: 'Semana excluída ignorada',
+          });
+          continue;
+        }
         const blobKey = `schedule_week_${parsedWeek.weekKey}`;
         await saveFileBlob(blobKey, blob, scope);
         const fileMs = Date.parse(df.modifiedTime || df.createdTime || '') || Date.now();
         const existingWeek = nextWeeklySchedules[parsedWeek.weekKey];
-        const existingTopicsCount = existingWeek
-          ? WEEKDAYS.reduce((s, d) => s + (existingWeek.schedule?.[d]?.length || 0), 0)
-          : 0;
         const parsedTopicsCount = WEEKDAYS.reduce(
           (s, d) => s + (parsedWeek.schedule?.[d]?.length || 0),
           0,
@@ -2675,14 +2807,17 @@ async function restoreFilesAndOrphansFromDriveList(
     const currentScheduleHasCustom = WEEKDAYS.some((d) =>
       (nextDb.schedule?.[d] || []).some((t) => !/^sch-[1-8]$/.test(t.id || '')),
     );
+    const dbIsUntouchedSeed = isUntouchedSeedDatabase(nextDb);
     const activeWeekKey = resolveActiveScheduleWeekKey(nextDb.scheduleDayDates, nextDb.schedule);
     const matchingActiveWeek = nextWeeklySchedules[activeWeekKey] || latestRecoveredWeek;
 
+    // Only hydrate active schedule from .txt file if the database is still an untouched seed;
+    // never overwrite an existing database's schedule when the user intentionally deleted topics!
     nextDb = reconcileCompletedAndArchivedItems(
       {
         ...nextDb,
         weeklySchedules: nextWeeklySchedules,
-        ...(!currentScheduleHasCustom && matchingActiveWeek
+        ...(dbIsUntouchedSeed && !currentScheduleHasCustom && matchingActiveWeek
           ? {
               schedule: matchingActiveWeek.schedule,
               scheduleDayDates: matchingActiveWeek.scheduleDayDates,
@@ -2691,6 +2826,7 @@ async function restoreFilesAndOrphansFromDriveList(
       },
       nextDb,
     );
+    nextDb = applyTombstonesToMergedDatabase(nextDb, scope);
   }
 
   const contestAndEditalTxtFiles = driveFiles.filter((df) => {
@@ -2702,6 +2838,16 @@ async function restoreFilesAndOrphansFromDriveList(
       df.subfolderName === 'Editais' ||
       /^(?:DATAS\s*E\s*LOCAIS|EDITAL)\s*-\s*/i.test(df.name);
     if (!matchesContest) return false;
+    if (!onlyFileIdSet?.has(df.id) && isDriveFileTombstoned(df, nextDb, scope)) {
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'skipped-tombstone',
+        module: df.subfolderName || 'Editais',
+        driveFileId: df.id,
+        detail: 'Edital/concurso ignorado pelo registro de exclusão',
+      });
+      return false;
+    }
     if (!onlyFileIdSet?.has(df.id) && isDriveFilePermissionBlocked(df.id)) {
       permissionBlockedCount += 1;
       return false;
@@ -2715,13 +2861,29 @@ async function restoreFilesAndOrphansFromDriveList(
 
     for (const df of contestAndEditalTxtFiles) {
       try {
-        const localFile = options?.localFileMap?.get(df.id);
-        const blob =
-          localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
+        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
         if (!blob) continue;
         const text = await readStudyBlobText(blob, df.name);
         const parsedContests = parseContestOrEditalTxt(text, df.name);
         for (const pc of parsedContests) {
+          if (
+            !onlyFileIdSet?.has(df.id) &&
+            isContestOrScheduleTombstoned(
+              'contest',
+              { id: pc.id, name: pc.concurso, fileName: df.name },
+              nextDb,
+              scope,
+            )
+          ) {
+            pushFileEvent({
+              name: pc.concurso || stripDrivePrefix(df.name) || df.name,
+              action: 'skipped-tombstone',
+              module: 'Editais',
+              driveFileId: df.id,
+              detail: 'Concurso excluído ignorado',
+            });
+            continue;
+          }
           const matchIdx = mergedContests.findIndex(
             (existing) =>
               (pc.id && existing.id === pc.id) ||
@@ -2730,6 +2892,12 @@ async function restoreFilesAndOrphansFromDriveList(
           if (matchIdx === -1) {
             mergedContests.push(pc);
             contestsChanged = true;
+            pushFileEvent({
+              name: stripDrivePrefix(df.name) || pc.concurso,
+              action: 'imported-orphan',
+              module: 'Editais',
+              driveFileId: df.id,
+            });
           } else {
             const cur = mergedContests[matchIdx];
             const curPoints = cur.edital_pontos || [];
@@ -2809,6 +2977,16 @@ async function restoreFilesAndOrphansFromDriveList(
       /^PROVA\s*-\s*/i.test(df.name) ||
       lower.includes('_estruturada.');
     if (!matchesQ) return false;
+    if (!onlyFileIdSet?.has(df.id) && isDriveFileTombstoned(df, nextDb, scope)) {
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'skipped-tombstone',
+        module: df.subfolderName || 'Questões',
+        driveFileId: df.id,
+        detail: 'Arquivo de questões/prova ignorado pelo registro de exclusão',
+      });
+      return false;
+    }
     if (!onlyFileIdSet?.has(df.id) && isDriveFilePermissionBlocked(df.id)) {
       permissionBlockedCount += 1;
       return false;
@@ -2840,9 +3018,7 @@ async function restoreFilesAndOrphansFromDriveList(
           cleanName.toLowerCase().includes('_estruturada.');
         const isFromSimFolder = normalizeSearch(df.folderPath || '').includes('simulados');
 
-        const localFile = options?.localFileMap?.get(df.id);
-        const blob =
-          localFile || (token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null);
+        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
         if (!blob) continue;
         const text = await readStudyBlobText(blob, df.name);
         if (
@@ -2899,6 +3075,14 @@ async function restoreFilesAndOrphansFromDriveList(
             }
           }
         }
+        if (questionsAdded || simsAdded) {
+          pushFileEvent({
+            name: cleanName,
+            action: 'imported-orphan',
+            module: isProofFolderFile ? 'Provas e Gabaritos' : 'Questões',
+            driveFileId: df.id,
+          });
+        }
       } catch (err: any) {
         if (String(err?.message || '').includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
       }
@@ -2913,7 +3097,17 @@ async function restoreFilesAndOrphansFromDriveList(
     }
   }
 
-  return { updatedDb: nextDb, filesRestored, orphansImported, healedLawsCount, permissionBlockedCount };
+  nextDb = applyTombstonesToMergedDatabase(nextDb, scope);
+
+  return {
+    updatedDb: nextDb,
+    filesRestored,
+    orphansImported,
+    healedLawsCount,
+    permissionBlockedCount,
+    skippedTombstonesCount,
+    fileEvents,
+  };
 }
 
 function loadTimer(scope: string): TimerStored {
@@ -2997,6 +3191,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   } | null>(null);
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [syncActivityLogs, setSyncActivityLogs] = useState<SyncActivityLogEntry[]>(() =>
+    loadSyncActivityLogs(initialScope),
+  );
+  const [driveSyncConflicts, setDriveSyncConflicts] = useState<DeletedDriveConflict[]>([]);
+  const [resolvingDriveConflictId, setResolvingDriveConflictId] = useState<string | null>(null);
+  const dismissedConflictIdsRef = useRef<Set<string>>(new Set());
 
   // Firebase Firestore cloud DB state
   const [isSyncingFirebase, setIsSyncingFirebase] = useState<boolean>(false);
@@ -3023,6 +3223,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const firebaseHydratedUidRef = useRef<string | null>(null);
   const lastUserEditMsRef = useRef<number>(0);
   const lastLocalWriteMsRef = useRef<number>(0);
+  const lastDeletionMsRef = useRef<number>(0);
+  const loggedStartupMissingTokenScopeRef = useRef<string | null>(null);
   const lastFirestoreAutoWriteAtRef = useRef<number>(0);
   const lastServerWorkspaceHashRef = useRef<string>('');
   const activeFirebaseOpsRef = useRef<number>(0);
@@ -3033,6 +3235,149 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   googleUserRef.current = googleUser;
   const activeTimerTopicRef = useRef<ActiveTimerLink | null>(activeTimerTopic);
   activeTimerTopicRef.current = activeTimerTopic;
+
+  useEffect(() => {
+    return subscribeSyncActivityLogs((changedScope, nextLogs) => {
+      if (changedScope === activeScopeRef.current) {
+        setSyncActivityLogs(nextLogs);
+      }
+    });
+  }, []);
+
+  const recordSyncActivity = useCallback(
+    (input: NewSyncActivityLogInput, explicitScope?: string) => {
+      const targetScope = explicitScope || activeScopeRef.current || 'offline_guest';
+      appendSyncActivityLog(targetScope, input);
+    },
+    [],
+  );
+
+  const clearSyncActivityLogs = useCallback(() => {
+    clearSyncActivityLogsForScope(activeScopeRef.current || 'offline_guest');
+  }, []);
+
+  const runDriveTimestampComparison = useCallback(
+    (
+      targetDb: StudyDatabase,
+      driveFiles: DriveFileInfo[],
+      scope: string,
+      options?: { onlyFolderId?: string; includeDismissed?: boolean; sourceLabel?: string },
+    ): TimestampSyncComparisonReport => {
+      const report = compareLocalAndDriveFileTimestamps(targetDb, driveFiles, scope, {
+        onlyFolderId: options?.onlyFolderId,
+      });
+
+      if (!options?.onlyFolderId) {
+        const activeIds = new Set(driveFiles.map((df) => df.id));
+        const activeNames = new Set(driveFiles.map((df) => normalizeFileLookup(df.name)));
+        const activeStripped = new Set(driveFiles.map((df) => normalizeFileLookup(stripDrivePrefix(df.name))));
+        const pendingAll = [
+          ...getPendingDriveDeletes(scope),
+          ...(scope !== 'offline_guest' ? getPendingDriveDeletes('offline_guest') : []),
+        ];
+        if (pendingAll.length > 0 && report.deletedConflicts.length === 0) {
+          const anyStillInDrive = pendingAll.some((pd) => {
+            if (pd.fileIds?.some((id) => activeIds.has(String(id).replace(/^drive_/, '')))) return true;
+            if (
+              pd.names?.some((n) => {
+                const nf = normalizeFileLookup(n);
+                const ns = normalizeFileLookup(stripDrivePrefix(n));
+                return activeNames.has(nf) || activeStripped.has(ns);
+              })
+            ) {
+              return true;
+            }
+            if (pd.folderNames?.length) {
+              const fk = new Set(pd.folderNames.map((f) => normalizeSearch(visibleName(f))));
+              return driveFiles.some((df) =>
+                String(df.folderPath || '')
+                  .split('/')
+                  .some((seg) => fk.has(normalizeSearch(visibleName(seg)))),
+              );
+            }
+            return false;
+          });
+          if (!anyStillInDrive) {
+            clearPendingDriveDeletes(scope);
+            if (scope !== 'offline_guest') clearPendingDriveDeletes('offline_guest');
+          }
+        }
+      }
+
+      if (options?.includeDismissed) {
+        dismissedConflictIdsRef.current.clear();
+      }
+      const visibleConflicts = options?.includeDismissed
+        ? report.deletedConflicts
+        : report.deletedConflicts.filter((c) => !dismissedConflictIdsRef.current.has(c.id));
+
+      setDriveSyncConflicts(visibleConflicts);
+
+      if (
+        report.localNewer.length > 0 ||
+        report.driveNewer.length > 0 ||
+        report.deletedConflicts.length > 0
+      ) {
+        recordSyncActivity(
+          {
+            category: 'drive-sync',
+            operation: options?.sourceLabel || 'Comparação de timestamps (Local × Drive)',
+            status: report.deletedConflicts.length > 0 ? 'warning' : 'success',
+            message: [
+              report.deletedConflicts.length > 0
+                ? `${report.deletedConflicts.length} arquivo(s) excluído(s) localmente encontrado(s) no Google Drive (aguardando decisão)`
+                : null,
+              report.localNewer.length > 0
+                ? `${report.localNewer.length} arquivo(s) local(is) mais recente(s)`
+                : null,
+              report.driveNewer.length > 0
+                ? `${report.driveNewer.length} arquivo(s) no Drive mais recente(s)`
+                : null,
+            ]
+              .filter(Boolean)
+              .join(' · '),
+            affectedFiles: [
+              ...report.deletedConflicts.map((c) => ({
+                name: c.displayName,
+                action: 'skipped-tombstone' as const,
+                module: c.moduleLabel,
+                driveFileId: c.driveFile.id,
+                detail:
+                  c.newerSide === 'drive'
+                    ? 'Drive mais recente que a exclusão local'
+                    : c.newerSide === 'local-delete'
+                      ? 'Exclusão local mais recente que o Drive'
+                      : 'Conflito: excluído localmente e presente no Drive',
+              })),
+              ...report.localNewer.map((item) => ({
+                name: item.name,
+                action: 'uploaded' as const,
+                module: item.moduleLabel,
+                driveFileId: item.driveFile?.id,
+                detail: 'Versão local mais recente',
+              })),
+              ...report.driveNewer.map((item) => ({
+                name: item.name,
+                action: 'restored' as const,
+                module: item.moduleLabel,
+                driveFileId: item.driveFile?.id,
+                detail: 'Versão do Drive mais recente',
+              })),
+            ],
+            stats: {
+              skippedTombstones: report.deletedConflicts.length,
+              uploaded: report.localNewer.length,
+              restored: report.driveNewer.length,
+            },
+          },
+          scope,
+        );
+      }
+
+      return report;
+    },
+    [recordSyncActivity],
+  );
 
   const registerLocalWriteShield = useCallback((uid?: string | null): number => {
     const now = Date.now();
@@ -3080,37 +3425,137 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return () => window.clearTimeout(watchdogId);
   }, [isSyncingFirebase]);
 
-  // Local Folder (Computer Directory) state
-  const [localFolderConnected, setLocalFolderConnected] = useState<boolean>(false);
-  const [localFolderWritable, setLocalFolderWritable] = useState<boolean>(false);
-  const [localFolderName, setLocalFolderName] = useState<string | null>(null);
-  const [localFolderSummary, setLocalFolderSummary] = useState<LocalFolderScanSummary | null>(null);
-  const [savedLocalFolderMeta, setSavedLocalFolderMetaState] = useState<LocalFolderScanSummary | null>(
-    () => loadSavedLocalFolderMeta(),
-  );
-  const [hasSavedLocalFolderHandle, setHasSavedLocalFolderHandle] = useState<boolean>(false);
-  const [lastLocalFolderSyncAt, setLastLocalFolderSyncAt] = useState<string | null>(null);
-  const [lastLocalIncrementalBackupAt, setLastLocalIncrementalBackupAt] = useState<string | null>(null);
-  const [isSyncingLocalFolder, setIsSyncingLocalFolder] = useState<boolean>(false);
-  const localFolderHandleRef = useRef<FileSystemDirectoryHandle | null>(null);
-  const localFolderWritableRef = useRef<boolean>(false);
-  const localFolderSyncTimerRef = useRef<number | null>(null);
-  const pendingLocalFolderWriteRef = useRef<number>(0);
-  const localAutoBackupInFlightRef = useRef<boolean>(false);
-  const lastLocalAutoBackupAtRef = useRef<number>(Date.now());
-  const lastLocalBackupDbRef = useRef<StudyDatabase | null>(null);
-  const lastLocalBackupHashRef = useRef<string | null>(null);
-  const lastLocalBackupIsoRef = useRef<string | null>(null);
-  const autoReconnectedLocalRef = useRef<boolean>(false);
-
   const dbRef = useRef<StudyDatabase>(db);
+  const pendingCloudSyncRef = useRef<boolean>(
+    initialScope !== 'offline_guest' && hasPersistedPendingSync(loadSyncMeta(initialScope)),
+  );
+  const driveConnectedRef = useRef<boolean>(driveConnected);
+  const deleteOrQueueDriveFiles = useCallback(
+    (target: DriveDeleteTarget) => {
+      const scope = activeScopeRef.current || 'offline_guest';
+      queuePendingDriveDeletes(scope, target);
+      const targetLabels = [
+        ...(target.names || []),
+        ...(target.folderNames || []).map((f) => `Pasta: ${f}`),
+        ...(target.fileIds || []).filter((id) => !(target.names || []).length).map((id) => `ID ${id}`),
+      ].filter(Boolean);
+
+      if (scope === 'offline_guest' || !driveConnectedRef.current) {
+        if (targetLabels.length > 0) {
+          recordSyncActivity(
+            {
+              category: 'drive-delete',
+              operation: 'Exclusão registrada localmente',
+              status: 'warning',
+              message:
+                'Item excluído localmente. A remoção na pasta do Google Drive ficou na fila aguardando conexão com a conta Google.',
+              affectedFiles: targetLabels.map((name) => ({
+                name,
+                action: 'queued-delete' as const,
+                detail: 'Aguardando login com o Google Drive',
+              })),
+              stats: { queuedDeletes: targetLabels.length },
+            },
+            scope,
+          );
+        }
+        return;
+      }
+
+      void (async () => {
+        const token = await getAccessToken();
+        if (!token) {
+          if (targetLabels.length > 0) {
+            recordSyncActivity(
+              {
+                category: 'drive-delete',
+                operation: 'Exclusão no Drive aguardando sessão OAuth',
+                status: 'warning',
+                errorCode: 'oauth/drive-token-expired',
+                message:
+                  'A exclusão foi salva localmente e no Firestore, mas a sessão OAuth do Google Drive não está ativa neste navegador. Reconecte para enviar à lixeira do Drive.',
+                affectedFiles: targetLabels.map((name) => ({
+                  name,
+                  action: 'queued-delete' as const,
+                  detail: 'Aguardando reautorização OAuth do Drive',
+                })),
+                stats: { queuedDeletes: targetLabels.length },
+              },
+              scope,
+            );
+          }
+          return;
+        }
+        const { deletedIds, deletedNames, remainingCount } = await flushPendingDriveDeletes(scope, token);
+        if (deletedIds.length > 0) {
+          removeFileIdsFromCacheMeta(scope, deletedIds);
+          const labels = deletedNames.length > 0 ? deletedNames : targetLabels;
+          recordSyncActivity(
+            {
+              category: 'drive-delete',
+              operation: 'Exclusão enviada à lixeira do Google Drive',
+              status: remainingCount > 0 ? 'warning' : 'success',
+              message:
+                remainingCount > 0
+                  ? `${deletedIds.length} arquivo(s) movido(s) para a lixeira do Drive; ${remainingCount} item(ns) ainda na fila.`
+                  : `${deletedIds.length} arquivo(s) movido(s) para a lixeira do Google Drive para não retornarem.`,
+              affectedFiles: labels.map((name) => ({
+                name,
+                action: 'trashed' as const,
+              })),
+              stats: { trashed: deletedIds.length, queuedDeletes: remainingCount },
+            },
+            scope,
+          );
+        } else if (remainingCount > 0 && targetLabels.length > 0) {
+          recordSyncActivity(
+            {
+              category: 'drive-delete',
+              operation: 'Falha ao excluir arquivo no Google Drive',
+              status: 'error',
+              message:
+                'Não foi possível mover os itens selecionados para a lixeira do Google Drive agora; permaneceram na fila de exclusão.',
+              affectedFiles: targetLabels.map((name) => ({
+                name,
+                action: 'failed' as const,
+                detail: 'Mantido na fila de exclusão',
+              })),
+              stats: { queuedDeletes: remainingCount },
+            },
+            scope,
+          );
+        }
+      })();
+    },
+    [recordSyncActivity],
+  );
+
   const setDb = useCallback((updater: React.SetStateAction<StudyDatabase>) => {
     const prev = dbRef.current;
-    const next = typeof updater === 'function' ? updater(prev) : updater;
-    if (activeScopeRef.current === 'offline_guest' && !isRestoringRef.current && next !== prev) {
-      const deleted = detectDeletedEntitiesBetweenDatabases(prev, next);
+    const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+    let next = rawNext;
+    if (!isRestoringRef.current && rawNext !== prev) {
+      const currentScope = activeScopeRef.current || 'offline_guest';
+      const pruned = pruneActiveTombstonesForDatabase(
+        currentScope,
+        rawNext,
+        rawNext.deletedTombstones,
+      );
+      if (currentScope !== 'offline_guest') {
+        pruneActiveTombstonesForDatabase('offline_guest', rawNext);
+      }
+      const deleted = detectDeletedEntitiesBetweenDatabases(prev, rawNext);
       if (deleted.length > 0) {
-        recordDeletedTombstones('offline_guest', deleted);
+        const updatedTombstones = recordDeletedTombstones(
+          currentScope,
+          deleted,
+          pruned ?? rawNext.deletedTombstones,
+        );
+        next = { ...rawNext, deletedTombstones: updatedTombstones };
+        lastDeletionMsRef.current = Date.now();
+        pendingCloudSyncRef.current = true;
+      } else if (pruned !== rawNext.deletedTombstones) {
+        next = { ...rawNext, deletedTombstones: pruned };
       }
     }
     dbRef.current = next;
@@ -3119,7 +3564,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const timerStateRef = useRef<TimerStored>(timerState);
   const quizRef = useRef<QuizSession | null>(quiz);
   const activeDriveFolderNameRef = useRef<string>(activeDriveFolderName);
-  const driveConnectedRef = useRef<boolean>(driveConnected);
   const skipPersistDbRef = useRef<StudyDatabase | null>(db);
   const lastPersistedDbRef = useRef<StudyDatabase>(db);
   const lastPersistedDbHashRef = useRef<string>(computeDatabaseContentHash(db));
@@ -3134,9 +3578,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const syncedScopeOnceRef = useRef<string | null>(null);
   const activeHydratePromiseRef = useRef<Promise<void> | null>(null);
   const activeCloudSyncPromiseRef = useRef<Promise<void> | null>(null);
-  const pendingCloudSyncRef = useRef<boolean>(
-    initialScope !== 'offline_guest' && hasPersistedPendingSync(loadSyncMeta(initialScope)),
-  );
   const cloudSaveInFlightRef = useRef<boolean>(false);
   const lastAutoBackupAtRef = useRef<number>(Date.now());
   const pendingGuestDbRef = useRef<{ db: StudyDatabase; updatedAtMs: number } | null>(null);
@@ -3149,7 +3590,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   quizRef.current = quiz;
   activeDriveFolderNameRef.current = activeDriveFolderName;
   driveConnectedRef.current = driveConnected;
-  localFolderWritableRef.current = localFolderWritable;
 
   const lastSyncedFirestoreHashRef = useRef<string>(
     loadSyncMeta(initialScope).lastFirestoreContentHash || '',
@@ -3216,38 +3656,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     return baseline.timerSig !== timerSig;
   }, []);
 
-  // Check if a previously saved FileSystemDirectoryHandle exists in IndexedDB
-  useEffect(() => {
-    void loadLocalDirectoryHandle().then((h) => {
-      if (h) {
-        setHasSavedLocalFolderHandle(true);
-        setSavedLocalFolderMetaState((prev) =>
-          prev || {
-            rootFolderName: h.name || 'Pasta Local',
-            totalFiles: 0,
-            totalFolders: CANONICAL_LOCAL_SUBFOLDERS.length,
-            writable: true,
-            categories: {
-              backups: 0,
-              pdfs: 0,
-              laws: 0,
-              proofs: 0,
-              summaries: 0,
-              essays: 0,
-              schedules: 0,
-              editais: 0,
-              contests: 0,
-              questions: 0,
-              others: 0,
-            },
-            folderNames: [...CANONICAL_LOCAL_SUBFOLDERS],
-            scannedAt: new Date().toISOString(),
-          },
-        );
-      }
-    });
-  }, []);
-
   // Seed sample PDFs, request persistent browser storage, and hydrate DB & sync metadata from IndexedDB if authoritative or newer than localStorage cache
   useEffect(() => {
     void ensureSeededBlobs();
@@ -3288,7 +3696,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
       if (shouldPreferIdbSnapshot(scope, idbSnap, hadLocalLs)) {
         try {
-          const parsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+          const parsed = applyTombstonesToMergedDatabase(
+            normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+            scope,
+          );
           isRestoringRef.current = true;
           skipPersistDbRef.current = parsed;
           lastPersistedDbRef.current = parsed;
@@ -3342,39 +3753,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setHasPendingCloudChanges(true);
     }
 
-    // Automatically mirror every database change to the connected Local Folder on disk
-    if (localFolderHandleRef.current && localFolderWritableRef.current) {
-      if (localFolderSyncTimerRef.current) {
-        window.clearTimeout(localFolderSyncTimerRef.current);
-      }
-      localFolderSyncTimerRef.current = window.setTimeout(() => {
-        localFolderSyncTimerRef.current = null;
-        const handle = localFolderHandleRef.current;
-        if (!handle || !localFolderWritableRef.current) return;
-        const curDb = dbRef.current;
-        const syncIso = new Date().toISOString();
-        const payload = {
-          version: 2,
-          app: 'Central de Estudos',
-          updatedAt: syncIso,
-          contentHash: computeDatabaseContentHash(curDb),
-          data: curDb,
-        };
-        pendingLocalFolderWriteRef.current += 1;
-        void saveLocalFolderSyncSnapshot(handle, payload)
-          .then((ok) => {
-            if (ok) {
-              setLastLocalFolderSyncAt(syncIso);
-            }
-          })
-          .finally(() => {
-            pendingLocalFolderWriteRef.current = Math.max(
-              0,
-              pendingLocalFolderWriteRef.current - 1,
-            );
-          });
-      }, 450);
-    }
+    const hasDriveWorkPending = (targetScope: string, targetHash: string) =>
+      getPendingDriveDeletes(targetScope).length > 0 ||
+      (targetScope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0) ||
+      (driveConnectedRef.current && lastCloudHashRef.current !== targetHash);
 
     // Automatically persist every database change incrementally to Firebase Firestore when authenticated, online, and dirty
     const activeUser = auth.currentUser;
@@ -3394,7 +3776,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           window.clearTimeout(firebaseSyncTimerRef.current);
           firebaseSyncTimerRef.current = null;
         }
-        if (!driveConnectedRef.current || lastCloudHashRef.current === curHash) {
+        if (!hasDriveWorkPending(scope, curHash)) {
           pendingCloudSyncRef.current = false;
           setHasPendingCloudChanges(false);
           saveSyncMeta(scope, { hasPendingCloudSync: false });
@@ -3441,7 +3823,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             !isFirestoreDatabaseDirty(currentUser.uid, latestScope, latestHash) ||
             latestHash === latestMeta.lastCloudContentHash
           ) {
-            if (!driveConnectedRef.current || lastCloudHashRef.current === latestHash) {
+            if (!hasDriveWorkPending(latestScope, latestHash)) {
               pendingCloudSyncRef.current = false;
               setHasPendingCloudChanges(false);
               saveSyncMeta(latestScope, { hasPendingCloudSync: false });
@@ -3511,18 +3893,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 totalChunks: res.totalChunks,
                 updatedAt: res.updatedAt,
               });
+              const keepPendingForDrive = hasDriveWorkPending(latestScope, latestHash);
               setFirebaseLastError(null);
               setLastFirebaseSyncAt(res.updatedAt);
               setFirebaseChunkCount(res.totalChunks);
-              setLastCloudSyncAt(res.updatedAt);
-              pendingCloudSyncRef.current = false;
-              setHasPendingCloudChanges(false);
+              if (!keepPendingForDrive) {
+                setLastCloudSyncAt(res.updatedAt);
+                pendingCloudSyncRef.current = false;
+                setHasPendingCloudChanges(false);
+              }
               markFirestoreBaselineSynced(
                 currentUser.uid,
                 latestScope,
                 latestHash,
                 latestTimerSig,
                 res.updatedAt,
+                keepPendingForDrive ? { keepPendingCloudSync: true } : undefined,
               );
             } catch (err) {
               console.log('[StudyProvider][autoSync] Erro capturado na comunicação com Firestore após retentativas:', {
@@ -3540,15 +3926,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           })();
         }, delayMs);
       };
-      // Camada 2 (Firebase Firestore): debounce de 3000ms com espaçamento mínimo adaptativo para proteger a cota gratuita
+      // Camada 2 (Firebase Firestore): debounce rápido para exclusões (1200ms) ou padrão 3000ms com espaçamento adaptativo
+      const isRecentDeletion = Date.now() - lastDeletionMsRef.current < 15_000;
       const dailyUsage = getFirestoreDailyUsageEstimate();
       const minWriteInterval =
         dailyUsage.writes >= FIRESTORE_HIGH_USAGE_WRITE_THRESHOLD
           ? FIRESTORE_HIGH_USAGE_WRITE_INTERVAL_MS
           : FIRESTORE_MIN_WRITE_INTERVAL_MS;
       const elapsedSinceLastAutoWrite = Date.now() - lastFirestoreAutoWriteAtRef.current;
-      const scheduledDelayMs =
-        lastFirestoreAutoWriteAtRef.current > 0 && elapsedSinceLastAutoWrite < minWriteInterval
+      const scheduledDelayMs = isRecentDeletion
+        ? 1200
+        : lastFirestoreAutoWriteAtRef.current > 0 && elapsedSinceLastAutoWrite < minWriteInterval
           ? Math.max(FIRESTORE_SYNC_DEBOUNCE_MS, minWriteInterval - elapsedSinceLastAutoWrite)
           : FIRESTORE_SYNC_DEBOUNCE_MS;
       scheduleIncrementalFirebaseSave(scheduledDelayMs);
@@ -3771,6 +4159,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
 
       setFirebaseLastError(parsed);
+      recordSyncActivity({
+        category: 'firebase-sync',
+        operation: options?.phaseLabel || `Falha Firebase (${phase})`,
+        status: 'error',
+        errorCode: parsed.code || undefined,
+        message: parsed.userMessage,
+      });
 
       if (parsed.category === 'auth' && currentUser) {
         void ensureFirebaseSessionAlive(true);
@@ -3794,7 +4189,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       return parsed;
     },
-    [toast],
+    [recordSyncActivity, toast],
   );
 
   const reportFirebaseErrorRef = useRef(reportFirebaseSyncError);
@@ -3823,7 +4218,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         firestoreTimerSig?: string;
       },
     ) => {
-      const sanitizedDb = normalizeAndMergeDatabase(nextDb);
+      const sanitizedDb = applyTombstonesToMergedDatabase(
+        normalizeAndMergeDatabase(nextDb),
+        scope,
+      );
       const nextHash = computeDatabaseContentHash(sanitizedDb);
       const curTimerSig = computeTimerSyncSignature({
         elapsed: timerStateRef.current.elapsed,
@@ -3839,15 +4237,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setFirebaseChunkCount(decomposeDatabaseToFirestoreChunks(sanitizedDb).length);
       const serialized = JSON.stringify(sanitizedDb);
       const ts = cloudTimestamp || new Date().toISOString();
+      const hasDrivePending =
+        getPendingDriveDeletes(scope).length > 0 ||
+        (scope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0) ||
+        (driveConnectedRef.current &&
+          Boolean(lastCloudHashRef.current) &&
+          lastCloudHashRef.current !== nextHash);
       persistLocalDatabaseForScope(scope, serialized, ts, {
         lastCloudSyncAt: ts,
         lastLocalEditAt: ts,
-        hasPendingCloudSync: false,
+        hasPendingCloudSync: hasDrivePending,
       });
       setLastCloudSyncAt(ts);
       setLastFirebaseSyncAt(ts);
-      pendingCloudSyncRef.current = false;
-      setHasPendingCloudChanges(false);
+      pendingCloudSyncRef.current = hasDrivePending;
+      setHasPendingCloudChanges(hasDrivePending);
 
       const currentUser = auth.currentUser;
       if (options?.sourceIsFirestore && currentUser?.uid) {
@@ -3857,6 +4261,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           nextHash,
           options.firestoreTimerSig ?? curTimerSig,
           ts,
+          hasDrivePending ? { keepPendingCloudSync: true } : undefined,
         );
         return;
       }
@@ -4035,7 +4440,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           uid: currentUser.uid,
           scope: preCheckScope,
         });
-        if (!driveConnectedRef.current || lastCloudHashRef.current === preCheckHash) {
+        if (
+          getPendingDriveDeletes(preCheckScope).length === 0 &&
+          (!driveConnectedRef.current || lastCloudHashRef.current === preCheckHash)
+        ) {
           pendingCloudSyncRef.current = false;
           setHasPendingCloudChanges(false);
           saveSyncMeta(preCheckScope, { hasPendingCloudSync: false });
@@ -4084,19 +4492,38 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         registerLocalWriteShield(currentUser.uid);
         lastFirestoreAutoWriteAtRef.current = Date.now();
         lastServerWorkspaceHashRef.current = curHash;
+        const keepPendingForDrive =
+          getPendingDriveDeletes(curScope).length > 0 ||
+          (curScope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0) ||
+          (driveConnectedRef.current && lastCloudHashRef.current !== curHash);
         setFirebaseLastError(null);
         setLastFirebaseSyncAt(result.updatedAt);
         setFirebaseChunkCount(result.totalChunks);
-        setLastCloudSyncAt(result.updatedAt);
-        pendingCloudSyncRef.current = false;
-        setHasPendingCloudChanges(false);
+        if (!keepPendingForDrive) {
+          setLastCloudSyncAt(result.updatedAt);
+          pendingCloudSyncRef.current = false;
+          setHasPendingCloudChanges(false);
+        }
         markFirestoreBaselineSynced(
           currentUser.uid,
           curScope,
           curHash,
           curTimerSig,
           result.updatedAt,
+          keepPendingForDrive ? { keepPendingCloudSync: true } : undefined,
         );
+        recordSyncActivity({
+          category: 'firebase-sync',
+          operation: options?.forceFullWrite
+            ? 'Gravação completa no Firebase Firestore'
+            : 'Sincronização manual com Firebase Firestore',
+          status: 'success',
+          message:
+            result.writtenChunks > 0
+              ? `${result.writtenChunks} de ${result.totalChunks} partição(ões) gravada(s) no Firestore.`
+              : `Firestore verificado (${result.totalChunks} partições sem alterações pendentes).`,
+          stats: { chunks: result.totalChunks },
+        });
         if (!options?.silent) {
           toast(
             result.writtenChunks > 0
@@ -4127,6 +4554,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       isFirestoreDatabaseDirty,
       isFirestoreTimerDirty,
       markFirestoreBaselineSynced,
+      recordSyncActivity,
       reportFirebaseSyncError,
       toast,
     ],
@@ -4195,6 +4623,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
       setFirebaseLastError(null);
       setFirebaseChunkCount(loaded.sectionCount);
+      recordSyncActivity({
+        category: 'firebase-restore',
+        operation: 'Restauração manual do Firebase Firestore',
+        status: 'success',
+        message: `Banco de dados recarregado do Firestore (${loaded.sectionCount} partições).`,
+        stats: { chunks: loaded.sectionCount },
+      });
       toast(`Banco de dados restaurado do Firebase Firestore (${loaded.sectionCount} partições carregadas)!`);
       return true;
     } catch (err) {
@@ -4206,7 +4641,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } finally {
       endFirebaseSyncOp();
     }
-  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, reportFirebaseSyncError, syncNowWithFirebase, toast]);
+  }, [applyRestoredDatabaseForScope, beginFirebaseSyncOp, endFirebaseSyncOp, recordSyncActivity, reportFirebaseSyncError, syncNowWithFirebase, toast]);
 
   // Automatic Firebase Firestore Hydration, Migration & Real-Time Listener on Auth
   const googleUid = googleUser?.uid || null;
@@ -4265,10 +4700,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ]);
           if (cancelled) return;
 
-          let localDb = dbRef.current;
+          let localDb = applyTombstonesToMergedDatabase(dbRef.current, scope);
           if (idbSnap?.raw && shouldPreferIdbSnapshot(scope, idbSnap, true)) {
             try {
-              localDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+              localDb = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+                scope,
+              );
             } catch {
               // ignore
             }
@@ -4327,7 +4765,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             (Boolean(guestPending) || candidateGuestMs > lastMergedGuestMs + 500 || isUntouchedSeedDatabase(localDb))
           ) {
             if (isUntouchedSeedDatabase(localDb)) {
-              localDb = candidateGuestDb;
+              localDb = applyTombstonesToMergedDatabase(candidateGuestDb, 'offline_guest');
             } else {
               const prevAccountLocalDb = localDb;
               const guestDelta = buildIncrementalDatabaseBackup(createInitialDatabase(), candidateGuestDb, {
@@ -4350,13 +4788,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   ),
                 };
                 localDb = applyIncrementalDeltaToDatabase(localDb, additiveGuestEnvelope, { additiveMerge: true });
-                localDb = applyTombstonesToMergedDatabase(localDb, 'offline_guest');
                 localDb = reconcileCompletedAndArchivedItems(
                   localDb,
                   candidateGuestDb,
                   prevAccountLocalDb,
                 );
               }
+              localDb = applyTombstonesToMergedDatabase(
+                {
+                  ...localDb,
+                  deletedTombstones: mergeTombstoneMaps(
+                    localDb.deletedTombstones,
+                    candidateGuestDb.deletedTombstones,
+                  ),
+                },
+                'offline_guest',
+              );
             }
             rescuedGuestEdits = true;
             clearDeletedTombstones('offline_guest');
@@ -4379,7 +4826,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           if (loadedFirestore) {
             lastServerWorkspaceHashRef.current = loadedFirestore.contentHash || '';
             const rawRemoteDb = loadedFirestore.db as StudyDatabase;
-            const remoteNormalized = normalizeAndMergeDatabase(rawRemoteDb);
+            const remoteNormalized = applyTombstonesToMergedDatabase(
+              normalizeAndMergeDatabase(rawRemoteDb),
+              scope,
+            );
             const remoteUntouched = isUntouchedSeedDatabase(remoteNormalized);
             const remoteMs = Date.parse(loadedFirestore.updatedAt || '') || 0;
             const remoteHash = computeDatabaseContentHash(remoteNormalized);
@@ -4493,7 +4943,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               let mergedDb = delta.hasChanges
                 ? applyIncrementalDeltaToDatabase(remoteNormalized, additiveEnvelope, { additiveMerge: true })
                 : localDb;
-              if (!rescuedGuestEdits && !localUntouched && (userEditedDuringHydrate || localEditMs > remoteMs + 1500)) {
+              if (!localUntouched && (rescuedGuestEdits || userEditedDuringHydrate || localMeta.hasPendingCloudSync || localEditMs > remoteMs + 1500)) {
                 mergedDb = {
                   ...mergedDb,
                   schedule: localDb.schedule,
@@ -4501,6 +4951,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   weeklySchedules: localDb.weeklySchedules,
                 };
               }
+              mergedDb = {
+                ...mergedDb,
+                deletedTombstones: mergeTombstoneMaps(
+                  remoteNormalized.deletedTombstones,
+                  localDb.deletedTombstones,
+                ),
+              };
+              mergedDb = applyTombstonesToMergedDatabase(mergedDb, scope);
               mergedDb = reconcileCompletedAndArchivedItems(mergedDb, localDb, remoteNormalized);
               const mergedHash = computeDatabaseContentHash(mergedDb);
 
@@ -4606,7 +5064,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
 
           if (rescuedGuestEdits && !cancelled) {
-            toast('Dados salvos na pasta local/modo offline foram mesclados e preservados na sua conta Google!');
+            toast('Dados salvos no navegador em modo offline foram mesclados e preservados na sua conta Google!');
           }
 
           firebaseHydratedUidRef.current = googleUid;
@@ -4636,7 +5094,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           firebaseSyncTimerRef.current !== null ||
           pendingCloudSyncRef.current ||
           nowMs - lastLocalWriteMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
-          nowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS
+          nowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
+          nowMs - lastDeletionMsRef.current < 15_000
         ) {
           return;
         }
@@ -4666,11 +5125,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 firebaseSyncTimerRef.current !== null ||
                 pendingCloudSyncRef.current ||
                 applyNowMs - lastLocalWriteMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
-                applyNowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS
+                applyNowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
+                applyNowMs - lastDeletionMsRef.current < 15_000
               ) {
                 return;
               }
-              const normalized = normalizeAndMergeDatabase(reloaded.db);
+              const normalized = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(reloaded.db),
+                scope,
+              );
               if (isUntouchedSeedDatabase(normalized) && !isUntouchedSeedDatabase(dbRef.current)) {
                 return;
               }
@@ -4682,6 +5145,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               });
               setFirebaseLastError(null);
               setFirebaseChunkCount(reloaded.sectionCount);
+              recordSyncActivity({
+                category: 'firebase-restore',
+                operation: 'Atualização em tempo real do Firebase Firestore',
+                status: 'success',
+                message: `Alterações de outro dispositivo aplicadas (${reloaded.sectionCount} partições; marcadores de exclusão mantidos).`,
+                stats: { chunks: reloaded.sectionCount },
+              });
             })
             .catch((err) => {
               reportFirebaseSyncError('realtime-reload', err);
@@ -4707,6 +5177,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     googleEmail,
     googleUid,
     markFirestoreBaselineSynced,
+    recordSyncActivity,
     registerLocalWriteShield,
     reportFirebaseSyncError,
     toast,
@@ -4746,6 +5217,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const skipSubfolderEnsure = preSyncMeta.lastSubfoldersSyncedFolderId === folder.id;
 
           const folderWritable = await verifyDriveFolderWritable(folder.id, token).catch(() => false);
+          const hasQueuedDriveDeletesPre =
+            getPendingDriveDeletes(scope).length > 0 ||
+            (scope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0);
+          const flushedPreDeletedCount = 0;
+          const flushedPreDeletedNames: string[] = [];
 
           // Fetch Drive file/backup metadata and Firebase Firestore state in parallel
           const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta, firestoreLoaded] = await Promise.all([
@@ -4761,11 +5237,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             user.uid ? loadDatabaseFromFirestore(user.uid, user.email).catch(() => null) : Promise.resolve(null),
           ]);
 
-          let currentDb = dbRef.current;
+          let currentDb = applyTombstonesToMergedDatabase(dbRef.current, scope);
           let hasLocalAny = hadLocalDbBeforeLoad || Boolean(idbSnap?.byteLength);
           if (idbSnap?.raw && shouldPreferIdbSnapshot(scope, idbSnap, hadLocalDbBeforeLoad)) {
             try {
-              currentDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+              currentDb = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+                scope,
+              );
               hasLocalAny = true;
             } catch {
               // ignore malformed idb snapshot
@@ -4780,11 +5259,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           );
           let firestoreNormalizedHash = '';
           if (firestoreLoaded?.db) {
-            const firestoreNormalized = normalizeAndMergeDatabase(firestoreLoaded.db);
+            const firestoreNormalized = applyTombstonesToMergedDatabase(
+              normalizeAndMergeDatabase(firestoreLoaded.db),
+              scope,
+            );
             firestoreNormalizedHash = computeDatabaseContentHash(firestoreNormalized);
             if (!isUntouchedSeedDatabase(firestoreNormalized)) {
               if (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500) {
-                currentDb = firestoreNormalized;
+                currentDb = {
+                  ...firestoreNormalized,
+                  deletedTombstones: mergeTombstoneMaps(
+                    firestoreNormalized.deletedTombstones,
+                    currentDb.deletedTombstones,
+                  ),
+                };
+                currentDb = applyTombstonesToMergedDatabase(currentDb, scope);
                 hasLocalAny = true;
               }
             }
@@ -4834,7 +5323,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             (Boolean(guestPending) || candidateGuestMs > lastMergedGuestMs + 500 || isUntouchedSeedDatabase(currentDb))
           ) {
             if (!hasLocalAny || isUntouchedSeedDatabase(currentDb)) {
-              currentDb = candidateGuestDb;
+              currentDb = applyTombstonesToMergedDatabase(candidateGuestDb, 'offline_guest');
             } else {
               const prevAccountDbBeforeGuest = currentDb;
               const guestDelta = buildIncrementalDatabaseBackup(createInitialDatabase(), candidateGuestDb, {
@@ -4857,13 +5346,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   ),
                 };
                 currentDb = applyIncrementalDeltaToDatabase(currentDb, additiveGuestEnvelope, { additiveMerge: true });
-                currentDb = applyTombstonesToMergedDatabase(currentDb, 'offline_guest');
                 currentDb = reconcileCompletedAndArchivedItems(
                   currentDb,
                   candidateGuestDb,
                   prevAccountDbBeforeGuest,
                 );
               }
+              currentDb = applyTombstonesToMergedDatabase(
+                {
+                  ...currentDb,
+                  deletedTombstones: mergeTombstoneMaps(
+                    currentDb.deletedTombstones,
+                    candidateGuestDb.deletedTombstones,
+                  ),
+                },
+                'offline_guest',
+              );
             }
             hasLocalAny = true;
             rescuedGuestEdits = true;
@@ -4929,14 +5427,25 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             Boolean(metaAfterLoad.lastCloudContentHash) &&
             currentDbHash === metaAfterLoad.lastCloudContentHash;
 
+          const cacheTimestampReport =
+            localReadyForCache && driveBackupsMatchCache && driveFilesMatchCache && dbMatchesLastCloud
+              ? runDriveTimestampComparison(currentDb, driveFiles, scope, {
+                  sourceLabel: 'Comparação de timestamps na verificação do Drive',
+                })
+              : null;
+
           if (
             !rescuedGuestEdits &&
+            !hasQueuedDriveDeletesPre &&
             folderWritable &&
             localReadyForCache &&
             driveBackupsMatchCache &&
             driveFilesMatchCache &&
             dbMatchesLastCloud &&
-            !hasPersistedPendingSync(metaAfterLoad)
+            !hasPersistedPendingSync(metaAfterLoad) &&
+            cacheTimestampReport &&
+            cacheTimestampReport.localNewer.length === 0 &&
+            cacheTimestampReport.driveNewer.length === 0
           ) {
             if (currentDb !== dbRef.current) {
               applyRestoredDatabaseForScope(scope, currentDb, metaAfterLoad.lastCloudSyncAt);
@@ -4959,6 +5468,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setLastCacheVerifiedAt(verifiedAt);
             syncedScopeOnceRef.current = scope;
             lastAutoBackupAtRef.current = Date.now();
+            recordSyncActivity({
+              category: 'drive-sync',
+              operation: 'Verificação inicial do Google Drive',
+              status: cacheTimestampReport.deletedConflicts.length > 0 ? 'warning' : 'success',
+              message:
+                cacheTimestampReport.deletedConflicts.length > 0
+                  ? `Cache validado; ${cacheTimestampReport.deletedConflicts.length} arquivo(s) excluído(s) localmente encontrado(s) no Drive.`
+                  : 'Cache do navegador validado sem alterações no Drive — restauração dispensada.',
+            });
             toast('Cache do navegador atualizado — restauração dispensada (nenhuma alteração no Drive).');
             return;
           }
@@ -5071,19 +5589,30 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               Boolean(pendingCloudSyncRef.current) ||
               rescuedGuestEdits ||
               firestoreUpdatedMs > cloudMs + 1500;
+            const localTombstoneMap = mergeTombstoneMaps(currentDb.deletedTombstones);
+            const cloudTombstoneMap = mergeTombstoneMaps(cloudDb.deletedTombstones);
+            const localHasNewerDeletes =
+              flushedPreDeletedCount > 0 ||
+              getPendingDriveDeletes(scope).length > 0 ||
+              Object.entries(localTombstoneMap).some(([k, ts]) => ts > (cloudTombstoneMap[k] || 0));
             const offlineLocalContinuation =
               localIsNewer &&
               !cloudOutsideActiveFolder &&
               (syncMeta.lastSyncedFolderId === folder.id || hasPersistedUnsyncedLocal) &&
               (lastCloudSyncMs > 0 || rescuedGuestEdits) &&
               localEditMs > Math.max(lastCloudSyncMs, cloudMs) + 1500 &&
-              !hasMoreCustomEntities(cloudDb, currentDb);
+              (!hasMoreCustomEntities(cloudDb, currentDb) || localHasNewerDeletes);
 
             const firestoreIsNewerThanDrive =
               firestoreUpdatedMs > cloudMs + 1000 && !isUntouchedSeedDatabase(currentDb);
 
             let useCloudSnapshot = true;
-            if (sameSessionRenewal || offlineLocalContinuation || firestoreIsNewerThanDrive) {
+            if (
+              sameSessionRenewal ||
+              offlineLocalContinuation ||
+              firestoreIsNewerThanDrive ||
+              (hasPersistedUnsyncedLocal && localHasNewerDeletes && !cloudOutsideActiveFolder)
+            ) {
               useCloudSnapshot = false;
               let baseLocalDb = currentDb;
               if (computeDatabaseContentHash(dbRef.current) !== hydratedBaselineHash && dbRef.current !== dbAtSyncStart) {
@@ -5095,7 +5624,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   baseLocalDb = applyIncrementalDeltaToDatabase(baseLocalDb, concurrentDelta.envelope, { additiveMerge: true });
                 }
               }
-              const { updatedDb, filesRestored, orphansImported, healedLawsCount, permissionBlockedCount } =
+              const {
+                updatedDb,
+                filesRestored,
+                orphansImported,
+                healedLawsCount,
+                permissionBlockedCount,
+                skippedTombstonesCount,
+                fileEvents,
+              } =
                 await restoreFilesAndOrphansFromDriveList(
                   baseLocalDb,
                   driveFiles,
@@ -5117,9 +5654,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 updatedDb,
                 driveFiles,
                 token,
+                scope,
               );
               uploadedFiles.forEach((uf) => addUploadedToLocalSigMaps(uf, false));
               setRestoreProgress(null);
+              runDriveTimestampComparison(updatedDb, [...driveFiles, ...uploadedFiles], scope);
               const updatedMatchesFirestore =
                 Boolean(firestoreLoaded?.db) &&
                 !rescuedGuestEdits &&
@@ -5167,6 +5706,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               pendingCloudSyncRef.current = !folderWritable;
               setHasPendingCloudChanges(!folderWritable);
               const totalFiles = filesRestored + orphansImported + filesUploaded;
+              const affectedFiles: SyncAffectedFile[] = [
+                ...flushedPreDeletedNames.map((name) => ({ name, action: 'trashed' as const })),
+                ...fileEvents,
+                ...uploadedFiles.map((uf) => ({
+                  name: uf.name,
+                  action: 'uploaded' as const,
+                  driveFileId: uf.id,
+                })),
+              ];
+              recordSyncActivity({
+                category: 'drive-sync',
+                operation: 'Sincronização inicial do Google Drive (dados locais preservados)',
+                status: permissionBlockedCount > 0 ? 'warning' : 'success',
+                message: `Estado local mais recente mantido. ${flushedPreDeletedCount} excluído(s) na lixeira, ${orphansImported} órfão(s) importado(s), ${skippedTombstonesCount} ignorado(s) por exclusão, ${filesUploaded} enviado(s).`,
+                affectedFiles,
+                stats: {
+                  trashed: flushedPreDeletedCount,
+                  restored: filesRestored,
+                  imported: orphansImported,
+                  uploaded: filesUploaded,
+                  skippedTombstones: skippedTombstonesCount,
+                },
+              });
               toast(
                 totalFiles > 0
                   ? `Dados mantidos e pastas do Drive sincronizadas (${totalFiles} arquivo(s)).`
@@ -5176,17 +5738,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
             if (useCloudSnapshot) {
               // Non-destructive safeguard: merge unsynced local/Firestore additions/edits made after last sync instead of discarding them
-              let baseMergedCloudDb = cloudDb;
+              let baseMergedCloudDb = applyTombstonesToMergedDatabase(
+                {
+                  ...cloudDb,
+                  deletedTombstones: mergeTombstoneMaps(
+                    cloudDb.deletedTombstones,
+                    currentDb.deletedTombstones,
+                  ),
+                },
+                scope,
+              );
               let preservedLocalEdits = false;
               const localEditedAfterLastSync =
                 localHasCustom &&
                 hashesDiffer &&
                 (rescuedGuestEdits ||
+                  localHasNewerDeletes ||
                   firestoreUpdatedMs > cloudMs + 1500 ||
                   (hasPersistedUnsyncedLocal &&
                     (localIsNewer || localHasUnsavedEdge || (lastCloudSyncMs > 0 && localEditMs > lastCloudSyncMs + 1500))));
               if (localEditedAfterLastSync) {
-                const localDiff = buildIncrementalDatabaseBackup(cloudDb, currentDb, {
+                const localDiff = buildIncrementalDatabaseBackup(baseMergedCloudDb, currentDb, {
                   updatedAt: new Date(localEditMs || Date.now()).toISOString(),
                   userEmail: user.email || undefined,
                 });
@@ -5206,7 +5778,18 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     ),
                   };
                   const preMergeCloud = baseMergedCloudDb;
-                  baseMergedCloudDb = applyIncrementalDeltaToDatabase(cloudDb, additiveLocalEnvelope, { additiveMerge: true });
+                  baseMergedCloudDb = applyIncrementalDeltaToDatabase(baseMergedCloudDb, additiveLocalEnvelope, { additiveMerge: true });
+                  baseMergedCloudDb = {
+                    ...baseMergedCloudDb,
+                    schedule: currentDb.schedule,
+                    scheduleDayDates: currentDb.scheduleDayDates,
+                    weeklySchedules: currentDb.weeklySchedules,
+                    deletedTombstones: mergeTombstoneMaps(
+                      baseMergedCloudDb.deletedTombstones,
+                      currentDb.deletedTombstones,
+                    ),
+                  };
+                  baseMergedCloudDb = applyTombstonesToMergedDatabase(baseMergedCloudDb, scope);
                   baseMergedCloudDb = reconcileCompletedAndArchivedItems(
                     baseMergedCloudDb,
                     currentDb,
@@ -5216,7 +5799,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 }
               }
 
-              const { updatedDb, filesRestored, orphansImported, healedLawsCount, permissionBlockedCount } =
+              const {
+                updatedDb,
+                filesRestored,
+                orphansImported,
+                healedLawsCount,
+                permissionBlockedCount,
+                skippedTombstonesCount,
+                fileEvents,
+              } =
                 await restoreFilesAndOrphansFromDriveList(
                   baseMergedCloudDb,
                   driveFiles,
@@ -5250,9 +5841,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 finalUpdatedDb,
                 driveFiles,
                 token,
+                scope,
               );
               uploadedFiles.forEach((uf) => addUploadedToLocalSigMaps(uf, false));
               setRestoreProgress(null);
+              runDriveTimestampComparison(finalUpdatedDb, [...driveFiles, ...uploadedFiles], scope);
               const finalMatchesFirestore =
                 Boolean(firestoreLoaded?.db) &&
                 !hadConcurrentLocalEdits &&
@@ -5307,6 +5900,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
               const totalFiles = filesRestored + orphansImported + filesUploaded;
               const incCount = latestCloud.incrementalDeltas?.length || 0;
+              const affectedFiles: SyncAffectedFile[] = [
+                ...flushedPreDeletedNames.map((name) => ({ name, action: 'trashed' as const })),
+                ...fileEvents,
+                ...uploadedFiles.map((uf) => ({
+                  name: uf.name,
+                  action: 'uploaded' as const,
+                  driveFileId: uf.id,
+                })),
+              ];
+              recordSyncActivity({
+                category: 'drive-sync',
+                operation: 'Sincronização inicial do Google Drive',
+                status: permissionBlockedCount > 0 ? 'warning' : 'success',
+                message: `${preservedLocalEdits ? 'Snapshot do Drive mesclado com edições locais' : 'Snapshot do Drive aplicado'}${incCount > 0 ? ` (+${incCount} incremento(s))` : ''}. ${flushedPreDeletedCount} excluído(s), ${orphansImported} órfão(s) importado(s), ${skippedTombstonesCount} ignorado(s) por exclusão, ${filesUploaded} enviado(s).`,
+                affectedFiles,
+                stats: {
+                  trashed: flushedPreDeletedCount,
+                  restored: filesRestored,
+                  imported: orphansImported,
+                  uploaded: filesUploaded,
+                  skippedTombstones: skippedTombstonesCount,
+                },
+              });
               toast(
                 preservedLocalEdits
                   ? `Dados sincronizados e suas alterações mais recentes foram preservadas!`
@@ -5330,7 +5946,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 baseLocalDb = applyIncrementalDeltaToDatabase(baseLocalDb, concurrentDelta.envelope, { additiveMerge: true });
               }
             }
-            const { updatedDb, filesRestored, orphansImported, healedLawsCount, permissionBlockedCount } =
+            const {
+              updatedDb,
+              filesRestored,
+              orphansImported,
+              healedLawsCount,
+              permissionBlockedCount,
+              skippedTombstonesCount,
+              fileEvents,
+            } =
               await restoreFilesAndOrphansFromDriveList(
                 baseLocalDb,
                 driveFiles,
@@ -5352,9 +5976,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               updatedDb,
               driveFiles,
               token,
+              scope,
             );
             uploadedFiles.forEach((uf) => addUploadedToLocalSigMaps(uf, false));
             setRestoreProgress(null);
+            runDriveTimestampComparison(updatedDb, [...driveFiles, ...uploadedFiles], scope);
             if (orphansImported > 0 || healedLawsCount > 0 || rescuedGuestEdits) {
               applyRestoredDatabaseForScope(scope, updatedDb);
               if (orphansImported > 0) {
@@ -5390,15 +6016,68 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             setLastCloudSyncAt(nowIso);
             pendingCloudSyncRef.current = false;
             setHasPendingCloudChanges(false);
+
+            recordSyncActivity({
+              category: 'drive-sync',
+              operation: 'Primeira sincronização com pasta do Google Drive',
+              status: permissionBlockedCount > 0 ? 'warning' : 'success',
+              message: `Snapshot inicial criado na pasta "${resolvedFolderName}". ${orphansImported} órfão(s) importado(s), ${skippedTombstonesCount} ignorado(s) por exclusão, ${filesUploaded} enviado(s).`,
+              affectedFiles: [
+                ...flushedPreDeletedNames.map((name) => ({ name, action: 'trashed' as const })),
+                ...fileEvents,
+                ...uploadedFiles.map((uf) => ({ name: uf.name, action: 'uploaded' as const, driveFileId: uf.id })),
+                ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
+                ...(savedInitialBackupFile ? [{ name: savedInitialBackupFile.name, action: 'uploaded' as const, driveFileId: savedInitialBackupFile.id }] : []),
+              ],
+              stats: {
+                trashed: flushedPreDeletedCount,
+                restored: filesRestored,
+                imported: orphansImported,
+                uploaded: filesUploaded,
+                skippedTombstones: skippedTombstonesCount,
+              },
+            });
           }
 
           lastAutoBackupAtRef.current = Date.now();
           syncedScopeOnceRef.current = scope;
         } catch (err: any) {
           console.warn('[Cloud Sync Auth] Falha na verificação inicial do Drive:', err);
-          const isTokenErr = String(err?.message || '').includes('TOKEN_EXPIRED');
+          const msg = String(err?.message || '');
+          const isTokenErr = msg.includes('TOKEN_EXPIRED');
+          const isPickerErr = msg.includes('DRIVE_FOLDER_PERMISSION');
+          recordSyncActivity({
+            category: 'drive-sync',
+            operation: 'Falha na sincronização inicial do Google Drive',
+            status: 'error',
+            errorCode: isTokenErr
+              ? 'oauth/drive-token-expired'
+              : isPickerErr
+                ? 'DRIVE_FOLDER_PERMISSION'
+                : undefined,
+            message: isTokenErr
+              ? 'Sessão OAuth do Google Drive sem permissão ou expirada. Clique em "Reconectar conta Google" para restaurar backups e exclusões na nuvem.'
+              : msg || 'Erro desconhecido ao acessar pasta do Google Drive.',
+          });
           if (isTokenErr) {
             setDriveTokenReady(false);
+            toast(
+              'Sessão OAuth do Google Drive sem permissão ou expirada. Clique em "Reconectar" para autorizar o Google Drive.',
+              true,
+            );
+          } else if (isPickerErr) {
+            const pref = getPreferredStudyFolder();
+            setDrivePermissionNeedsPicker({
+              folderId: pref.id || 'root',
+              folderName: pref.name || activeDriveFolderNameRef.current || DRIVE_FOLDER_NAME,
+              count: 1,
+            });
+            toast(
+              'O Google Drive exige selecionar ou autorizar a pasta pelo Seletor oficial. Clique em "Autorizar Drive".',
+              true,
+            );
+          } else if (msg) {
+            toast(`Aviso ao conectar pasta no Google Drive: ${msg}`, true);
           }
           if (activeScopeRef.current === scope) {
             lastAutoBackupAtRef.current = Date.now();
@@ -5414,7 +6093,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       activeCloudSyncPromiseRef.current = task;
       return task;
     },
-    [applyRestoredDatabaseForScope, toast],
+    [applyRestoredDatabaseForScope, recordSyncActivity, runDriveTimestampComparison, toast],
   );
 
   const flushCloudSyncNow = useCallback(async () => {
@@ -5427,13 +6106,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
     const currentDb = dbRef.current;
     const curHash = computeDatabaseContentHash(currentDb);
-    if (lastCloudHashRef.current && curHash === lastCloudHashRef.current) {
+    const hasPendingDeletes =
+      getPendingDriveDeletes(scope).length > 0 ||
+      getPendingDriveDeletes('offline_guest').length > 0;
+    if (!hasPendingDeletes && lastCloudHashRef.current && curHash === lastCloudHashRef.current) {
       pendingCloudSyncRef.current = false;
       setHasPendingCloudChanges(false);
       return;
     }
 
-    const { hasChanges, envelope } = buildIncrementalDatabaseBackup(
+    const { hasChanges } = buildIncrementalDatabaseBackup(
       lastCloudDbRef.current,
       currentDb,
       {
@@ -5442,7 +6124,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         userEmail: googleUser?.email || undefined,
       },
     );
-    if (lastCloudDbRef.current && !hasChanges) {
+    if (!hasPendingDeletes && lastCloudDbRef.current && !hasChanges) {
       lastCloudHashRef.current = curHash;
       pendingCloudSyncRef.current = false;
       setHasPendingCloudChanges(false);
@@ -5469,34 +6151,74 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     pendingCloudSyncRef.current = false;
     let shouldRetryConcurrentEdit = false;
     try {
+      let remainingDeletes = 0;
+      let flushedDeleteIds: string[] = [];
+      let flushedDeleteNames: string[] = [];
+      if (hasPendingDeletes) {
+        const flushed = await flushPendingDriveDeletes(scope, token);
+        remainingDeletes = flushed.remainingCount;
+        flushedDeleteIds = flushed.deletedIds;
+        flushedDeleteNames = flushed.deletedNames;
+        if (flushed.deletedIds.length > 0) {
+          removeFileIdsFromCacheMeta(scope, flushed.deletedIds);
+        }
+      }
+
       const nowIso = new Date().toISOString();
       const mergedCloudDb: StudyDatabase = currentDb;
       const mergedHash = computeDatabaseContentHash(mergedCloudDb);
 
-      const savedSync = await saveCloudSyncSnapshot(
-        {
-          version: 2,
-          app: 'Central de Estudos',
-          updatedAt: nowIso,
-          contentHash: mergedHash,
-          userEmail: googleUser?.email || undefined,
-          data: mergedCloudDb,
-        },
-        token,
-      );
+      const savedSync =
+        lastCloudHashRef.current !== mergedHash
+          ? await saveCloudSyncSnapshot(
+              {
+                version: 2,
+                app: 'Central de Estudos',
+                updatedAt: nowIso,
+                contentHash: mergedHash,
+                userEmail: googleUser?.email || undefined,
+                data: mergedCloudDb,
+              },
+              token,
+            )
+          : null;
 
       lastCloudDbRef.current = mergedCloudDb;
       lastCloudHashRef.current = mergedHash;
       const updatedMeta = recordUploadedFilesInCacheMeta(scope, {
-        backupFiles: [savedSync],
-        extraPatch: { lastCloudSyncAt: nowIso, lastCloudContentHash: mergedHash, hasPendingCloudSync: false },
+        backupFiles: savedSync ? [savedSync] : [],
+        extraPatch: {
+          lastCloudSyncAt: nowIso,
+          lastCloudContentHash: mergedHash,
+          hasPendingCloudSync: remainingDeletes > 0,
+        },
       });
       setLastCloudSyncAt(nowIso);
       if (updatedMeta.lastCacheVerifiedAt) setLastCacheVerifiedAt(updatedMeta.lastCacheVerifiedAt);
-      if (computeDatabaseContentHash(dbRef.current) !== curHash) {
+      if (flushedDeleteIds.length > 0 || savedSync) {
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: 'Sincronização contínua com o Google Drive',
+          status: remainingDeletes > 0 ? 'warning' : 'success',
+          message:
+            flushedDeleteIds.length > 0
+              ? `Espelho atualizado e ${flushedDeleteIds.length} arquivo(s) excluído(s) enviado(s) para a lixeira do Drive.`
+              : `Espelho automático (${CLOUD_SYNC_FILENAME}) atualizado no Google Drive.`,
+          affectedFiles: [
+            ...flushedDeleteNames.map((name) => ({ name, action: 'trashed' as const })),
+            ...(savedSync ? [{ name: savedSync.name, action: 'uploaded' as const, driveFileId: savedSync.id }] : []),
+          ],
+          stats: {
+            trashed: flushedDeleteIds.length,
+            uploaded: savedSync ? 1 : 0,
+            queuedDeletes: remainingDeletes,
+          },
+        });
+      }
+      if (computeDatabaseContentHash(dbRef.current) !== curHash || remainingDeletes > 0) {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
-        shouldRetryConcurrentEdit = true;
+        shouldRetryConcurrentEdit = computeDatabaseContentHash(dbRef.current) !== curHash;
       } else {
         setHasPendingCloudChanges(false);
       }
@@ -5505,6 +6227,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE')) {
         pendingCloudSyncRef.current = false;
         setHasPendingCloudChanges(false);
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: 'Conflito na sincronização do Drive',
+          status: 'warning',
+          errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
+          message: 'Alterações mais recentes detectadas no Drive; envio bloqueado para evitar sobrescrita.',
+        });
         toast(
           'Alterações mais recentes encontradas no Google Drive. Evitando sobrescrita do arquivo remoto.',
           true,
@@ -5513,6 +6242,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
         saveSyncMeta(scope, { hasPendingCloudSync: true });
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: 'Falha na sincronização contínua do Google Drive',
+          status: 'error',
+          errorCode: errMsg.includes('TOKEN_EXPIRED')
+            ? 'oauth/drive-token-expired'
+            : errMsg.includes('DRIVE_FOLDER_PERMISSION')
+              ? 'DRIVE_FOLDER_PERMISSION'
+              : undefined,
+          message: errMsg || 'Erro ao enviar alterações pendentes para o Google Drive.',
+        });
         if (errMsg.includes('TOKEN_EXPIRED')) {
           setDriveTokenReady(false);
         } else if (errMsg.includes('DRIVE_FOLDER_PERMISSION')) {
@@ -5532,28 +6272,35 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }, 350);
       }
     }
-  }, [driveConnected, driveTokenReady, googleUser?.email, toast]);
+  }, [driveConnected, driveTokenReady, googleUser?.email, recordSyncActivity, toast]);
 
-  // Camada 3 (Google Drive): debounce de 20000ms (20s) após parar de digitar + flush imediato em visibilitychange/pagehide
+  // Camada 3 (Google Drive): debounce rápido para exclusões (2.5s) ou 20000ms (20s) + flush imediato em visibilitychange/pagehide
   useEffect(() => {
     if (!driveConnected || !driveTokenReady) return;
     const scope = activeScopeRef.current;
     if (scope === 'offline_guest') return;
     if (syncedScopeOnceRef.current !== scope) return;
     if (isRestoringRef.current || activeCloudSyncPromiseRef.current || isSyncingDrive) return;
-    if (!pendingCloudSyncRef.current) return;
+    const hasPendingDeletes =
+      getPendingDriveDeletes(scope).length > 0 ||
+      getPendingDriveDeletes('offline_guest').length > 0;
+    if (!pendingCloudSyncRef.current && !hasPendingDeletes) return;
 
+    const delayMs = Date.now() - lastDeletionMsRef.current < 15_000 ? 2500 : DRIVE_SYNC_DEBOUNCE_MS;
     const timer = window.setTimeout(() => {
+      const stillHasDeletes =
+        getPendingDriveDeletes(activeScopeRef.current).length > 0 ||
+        getPendingDriveDeletes('offline_guest').length > 0;
       if (
         syncedScopeOnceRef.current !== activeScopeRef.current ||
         activeCloudSyncPromiseRef.current ||
         isRestoringRef.current ||
-        !pendingCloudSyncRef.current
+        (!pendingCloudSyncRef.current && !stillHasDeletes)
       ) {
         return;
       }
       void flushCloudSyncNow();
-    }, DRIVE_SYNC_DEBOUNCE_MS);
+    }, delayMs);
 
     return () => window.clearTimeout(timer);
   }, [db, driveConnected, driveTokenReady, flushCloudSyncNow, isSyncingDrive]);
@@ -5638,9 +6385,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setLastCloudSyncAt(nowIso);
       if (updatedMeta.lastCacheVerifiedAt) setLastCacheVerifiedAt(updatedMeta.lastCacheVerifiedAt);
       setHasPendingCloudChanges(false);
+      recordSyncActivity({
+        category: 'drive-backup',
+        operation: 'Backup incremental automático (30 min)',
+        status: 'success',
+        message: `Backup incremental gravado no Google Drive (${envelope.changesSummary.addedOrUpdated} item(ns) alterado(s)).`,
+        affectedFiles: [
+          { name: savedIncFile.name, action: 'uploaded', driveFileId: savedIncFile.id },
+          ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
+        ],
+        stats: { uploaded: savedSyncFile ? 2 : 1 },
+      });
       toast('Backup incremental automático salvo no Google Drive.');
     } catch (err: any) {
       const errMsg = String(err?.message || '');
+      recordSyncActivity({
+        category: 'drive-backup',
+        operation: 'Falha no backup automático (30 min)',
+        status: errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE') ? 'warning' : 'error',
+        errorCode: errMsg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+        message: errMsg || 'Erro ao gravar backup automático no Google Drive.',
+      });
       if (errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE')) {
         lastAutoBackupAtRef.current = Date.now();
         toast(
@@ -5657,7 +6422,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } finally {
       cloudSaveInFlightRef.current = false;
     }
-  }, [driveConnected, googleUser?.email, toast]);
+  }, [driveConnected, googleUser?.email, recordSyncActivity, toast]);
 
   // Automatic backup snapshot to Google Drive every 30 minutes (never disconnects on timeout)
   useEffect(() => {
@@ -5678,33 +6443,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       window.removeEventListener('focus', onFocusOrVisible);
     };
   }, [driveConnected, runPeriodicAutoBackupIfDue]);
-
-  const flushLocalFolderSyncNow = useCallback(async () => {
-    if (localFolderSyncTimerRef.current) {
-      window.clearTimeout(localFolderSyncTimerRef.current);
-      localFolderSyncTimerRef.current = null;
-    }
-    const handle = localFolderHandleRef.current;
-    if (!handle || !localFolderWritableRef.current) return;
-    const curDb = dbRef.current;
-    const syncIso = new Date().toISOString();
-    const payload = {
-      version: 2,
-      app: 'Central de Estudos',
-      updatedAt: syncIso,
-      contentHash: computeDatabaseContentHash(curDb),
-      data: curDb,
-    };
-    pendingLocalFolderWriteRef.current += 1;
-    try {
-      const ok = await saveLocalFolderSyncSnapshot(handle, payload);
-      if (ok) {
-        setLastLocalFolderSyncAt(syncIso);
-      }
-    } finally {
-      pendingLocalFolderWriteRef.current = Math.max(0, pendingLocalFolderWriteRef.current - 1);
-    }
-  }, []);
 
   // Flush drafts and pending local/cloud changes immediately when the user hides the tab or leaves/reloads
   useEffect(() => {
@@ -5768,12 +6506,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 lastFirestoreAutoWriteAtRef.current = Date.now();
                 lastServerWorkspaceHashRef.current = curHash;
                 setFirebaseLastError(null);
+                const keepPending =
+                  getPendingDriveDeletes(scope).length > 0 ||
+                  (scope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0) ||
+                  (driveConnectedRef.current && lastCloudHashRef.current !== curHash);
                 markFirestoreBaselineSynced(
                   currentUser.uid,
                   scope,
                   curHash,
                   curTimerSig,
                   res.updatedAt,
+                  keepPending ? { keepPendingCloudSync: true } : undefined,
                 );
               })
               .catch((err) => {
@@ -5785,10 +6528,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         }
       }
-      if (localFolderSyncTimerRef.current && localFolderHandleRef.current && localFolderWritableRef.current) {
-        void flushLocalFolderSyncNow();
-      }
-      if (pendingCloudSyncRef.current && driveConnected && driveTokenReady) {
+      const hasPendingDeletes =
+        getPendingDriveDeletes(scope).length > 0 ||
+        (scope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0);
+      if ((pendingCloudSyncRef.current || hasPendingDeletes) && driveConnected && driveTokenReady) {
         void flushCloudSyncNow();
       }
     };
@@ -5799,7 +6542,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       flushLocalAndCloud();
       if (
         pendingIdbDbWrites > 0 ||
-        pendingLocalFolderWriteRef.current > 0 ||
         (driveConnected && !driveTokenReady && (hasPendingCloudChanges || pendingCloudSyncRef.current))
       ) {
         e.preventDefault();
@@ -5818,7 +6560,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     driveConnected,
     driveTokenReady,
     flushCloudSyncNow,
-    flushLocalFolderSyncNow,
     hasPendingCloudChanges,
     isFirestoreDatabaseDirty,
     isFirestoreTimerDirty,
@@ -5937,6 +6678,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         );
         setDriveConnected(true);
         setDriveTokenReady(Boolean(token));
+        setSyncActivityLogs(loadSyncActivityLogs(newScope));
 
         if (token) {
           if (syncedScopeOnceRef.current !== newScope) {
@@ -5955,6 +6697,35 @@ function isEmailAuthorized(email?: string | null): boolean {
                 } else if (pendingCloudSyncRef.current) {
                   void flushCloudSyncNow();
                 }
+              } else if (loggedStartupMissingTokenScopeRef.current !== newScope) {
+                loggedStartupMissingTokenScopeRef.current = newScope;
+                const queuedDeletes = [
+                  ...getPendingDriveDeletes(newScope),
+                  ...getPendingDriveDeletes('offline_guest'),
+                ];
+                const queuedLabels = queuedDeletes.flatMap((q) => [
+                  ...(q.names || []),
+                  ...(q.folderNames || []).map((f) => `Pasta: ${f}`),
+                ]);
+                recordSyncActivity(
+                  {
+                    category: 'oauth',
+                    operation: 'Sessão OAuth do Google Drive pendente ao iniciar',
+                    status: 'warning',
+                    errorCode: 'oauth/drive-token-expired',
+                    message:
+                      queuedLabels.length > 0
+                        ? `O Firebase Firestore está ativo, mas o token OAuth do Google Drive expirou ou foi encerrado ao abrir nova janela. ${queuedLabels.length} exclusão(ões) aguardam reconexão para ir à lixeira do Drive.`
+                        : 'O Firebase Firestore está ativo, mas o token OAuth do Google Drive expirou ou não está presente nesta janela. Clique em "Reconectar conta Google" para reativar backups e exclusões no Drive.',
+                    affectedFiles: queuedLabels.map((name) => ({
+                      name,
+                      action: 'queued-delete' as const,
+                      detail: 'Aguardando reconexão OAuth do Drive',
+                    })),
+                    stats: queuedLabels.length > 0 ? { queuedDeletes: queuedLabels.length } : undefined,
+                  },
+                  newScope,
+                );
               }
             })
             .finally(() => {
@@ -6036,10 +6807,11 @@ function isEmailAuthorized(email?: string | null): boolean {
         setDriveFolderUrl(null);
         setLastCloudSyncAt(null);
         setLastCacheVerifiedAt(null);
+        setSyncActivityLogs(loadSyncActivityLogs('offline_guest'));
       },
     );
     return () => unsubscribe();
-  }, [flushCloudSyncNow, syncAccountWithDriveOnAuth]);
+  }, [flushCloudSyncNow, recordSyncActivity, syncAccountWithDriveOnAuth]);
 
   // Keep React driveTokenReady synchronized whenever Drive OAuth token is silently renewed or cleared
   useEffect(() => {
@@ -6179,8 +6951,8 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
 
         console.log('[StudyProvider][AuthMonitor] Validação periódica de autenticação Firestore (30s):', {
-          status: oauthDriveExpired ? 'oauth-expired' : report.status,
-          code: oauthDriveExpired ? 'oauth/drive-token-expired' : report.code,
+          status: report.status,
+          code: report.code,
           uid: report.uid,
           email: report.email,
           emailVerified: report.emailVerified,
@@ -6220,21 +6992,8 @@ function isEmailAuthorized(email?: string | null): boolean {
             };
           }
 
-          if (oauthDriveExpired) {
-            const sameOAuthIssue = prev.code === 'oauth/drive-token-expired';
-            return {
-              status: 'expired',
-              code: 'oauth/drive-token-expired',
-              message:
-                'A sessão OAuth do Google Drive expirou neste navegador. Clique em "Reconectar Conta Google" para restaurar o envio completo de backups e PDFs.',
-              lastCheckedAt: report.checkedAt,
-              tokenExpiresAt: report.tokenExpiresAt,
-              consecutiveFailures: prev.consecutiveFailures + 1,
-              oauthDriveExpired: true,
-              dismissed: sameOAuthIssue ? prev.dismissed : false,
-            };
-          }
-
+          // Firestore uses Firebase Auth's auto-refreshing ID token, which remains healthy
+          // even when the 1-hour Google Drive OAuth access token expires.
           return {
             status: 'healthy',
             code: report.code,
@@ -6242,25 +7001,20 @@ function isEmailAuthorized(email?: string | null): boolean {
             lastCheckedAt: report.checkedAt,
             tokenExpiresAt: report.tokenExpiresAt,
             consecutiveFailures: 0,
-            oauthDriveExpired: false,
+            oauthDriveExpired,
             dismissed: false,
           };
         });
 
-        if (report.status === 'healthy' && !oauthDriveExpired) {
+        if (report.status === 'healthy') {
           setFirebaseLastError((prev) => (prev?.category === 'auth' ? null : prev));
         }
 
         if (!options?.silent) {
-          if (report.status === 'healthy' && !oauthDriveExpired) {
+          if (report.status === 'healthy') {
             toast('Autenticação Firebase e conexão com o Firestore validadas!');
-          } else if (report.status === 'expired' || report.status === 'inconsistent' || oauthDriveExpired) {
-            toast(
-              oauthDriveExpired
-                ? 'Sessão OAuth do Google Drive expirada. Reconecte sua conta.'
-                : report.message,
-              true,
-            );
+          } else if (report.status === 'expired' || report.status === 'inconsistent') {
+            toast(report.message, true);
           }
         }
 
@@ -6494,32 +7248,59 @@ function isEmailAuthorized(email?: string | null): boolean {
         setGoogleUser(res.user);
         setDriveConnected(true);
         setDriveTokenReady(Boolean(res.accessToken));
-        toast(`Conectado como ${res.user.email || 'usuário Google'}! Sincronizando dados na nuvem...`);
+        setSyncActivityLogs(loadSyncActivityLogs(newScope));
 
-        if (res.accessToken) {
-          void (async () => {
-            try {
-              const folder = await getOrCreateStudyFolder(res.accessToken);
-              const resolvedFolderName = folder.name || getPreferredStudyFolder().name;
-              rememberKnownStudyDriveFolderName(resolvedFolderName);
-              setActiveDriveFolderName(resolvedFolderName);
-              if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
-              await syncAccountWithDriveOnAuth(res.user, res.accessToken, newScope, hadScopedLocal);
-            } catch (driveErr: any) {
-              console.warn('[Google Drive] Login OK, mas houve aviso ao preparar pasta do Drive:', driveErr);
-            }
-          })();
+        if (!res.accessToken) {
+          recordSyncActivity(
+            {
+              category: 'oauth',
+              operation: 'Login Google sem permissão do Drive',
+              status: 'warning',
+              errorCode: 'oauth/drive-token-expired',
+              message: `Conta ${res.user.email || ''} conectada ao Firebase, mas o acesso OAuth ao Google Drive não foi concedido.`,
+            },
+            newScope,
+          );
+          toast(
+            `Conectado ao Firebase como ${res.user.email || 'usuário Google'}, mas o Google não concedeu permissão ao Google Drive. Clique em "Reconectar" para autorizar o Drive.`,
+            true,
+          );
+          return true;
         }
+
+        recordSyncActivity(
+          {
+            category: 'oauth',
+            operation: 'Conta Google e Drive autorizados',
+            status: 'success',
+            message: `Sessão OAuth do Google Drive autorizada para ${res.user.email || 'conta Google'}.`,
+          },
+          newScope,
+        );
+        toast(`Conectado como ${res.user.email || 'usuário Google'}! Sincronizando dados no Firebase e Google Drive...`);
+        void syncAccountWithDriveOnAuth(res.user, res.accessToken, newScope, hadScopedLocal).catch(
+          (driveErr: any) => {
+            const driveMsg = String(driveErr?.message || 'Falha ao conectar pasta do Drive.');
+            toast(`Conta Google conectada, mas houve erro no Google Drive: ${driveMsg}`, true);
+          },
+        );
         return true;
       }
       return false;
     } catch (e: any) {
       const msg = e?.message || 'Falha na autenticação com o Google.';
       setAuthError(msg);
+      recordSyncActivity({
+        category: 'oauth',
+        operation: 'Falha ao conectar conta Google',
+        status: 'error',
+        errorCode: typeof e?.code === 'string' ? e.code : undefined,
+        message: msg,
+      });
       toast(`Erro ao conectar ao Google: ${msg}`, true);
       return false;
     }
-  }, [syncAccountWithDriveOnAuth, toast]);
+  }, [recordSyncActivity, syncAccountWithDriveOnAuth, toast]);
 
   const disconnectGoogleDrive = useCallback(async () => {
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
@@ -6611,6 +7392,8 @@ function isEmailAuthorized(email?: string | null): boolean {
     setLastCloudSyncAt(null);
     setLastFirebaseSyncAt(null);
     setLastCacheVerifiedAt(null);
+    setDriveSyncConflicts([]);
+    dismissedConflictIdsRef.current.clear();
     activeFirebaseOpsRef.current = 0;
     firebaseInFlightRef.current = false;
     firebaseHydratedUidRef.current = null;
@@ -6631,11 +7414,12 @@ function isEmailAuthorized(email?: string | null): boolean {
   }, [toast]);
 
   const ensureDriveToken = useCallback(async (): Promise<string | null> => {
-    let activeToken = await getAccessToken({ allowSilentRefresh: true });
+    // Check cached/persisted token synchronously first so connectGoogleDrive() runs inside the user gesture
+    let activeToken = await getAccessToken({ allowSilentRefresh: false });
     if (!activeToken) {
       const ok = await connectGoogleDrive();
       if (!ok) return null;
-      activeToken = await getAccessToken({ allowSilentRefresh: true });
+      activeToken = await getAccessToken({ allowSilentRefresh: false });
     }
     if (activeToken) {
       setDriveTokenReady(true);
@@ -6713,6 +7497,14 @@ function isEmailAuthorized(email?: string | null): boolean {
             : normalizeAndMergeDatabase(pickedPayload);
           restoredAny = true;
         }
+      }
+
+      const flushedPicker = await flushPendingDriveDeletes(scope, token).catch(() => ({
+        deletedIds: [] as string[],
+        remainingCount: 0,
+      }));
+      if (flushedPicker.deletedIds.length > 0) {
+        removeFileIdsFromCacheMeta(scope, flushedPicker.deletedIds);
       }
 
       const driveFiles = await listAllStudyFilesInDrive(token).catch(() => []);
@@ -6803,84 +7595,70 @@ function isEmailAuthorized(email?: string | null): boolean {
       folderLink = folder.webViewLink;
       if (folderLink) setDriveFolderUrl(folderLink);
 
-      // Map known blobKeys to proper Drive filenames and nested subfolders inside active root folder
-      const blobMeta = new Map<string, { filename: string; altNames?: string[]; subfolder?: string | string[] }>();
+      const scope = activeScopeRef.current || 'offline_guest';
       const cur = dbRef.current;
-      const toDriveSeg = (raw: string) => visibleName(raw).replace(/[\\/]+/g, ' - ').trim();
-      Object.entries(cur.pdfFolders || {}).forEach(([folderKey, list]) =>
-        list.forEach((f) =>
-          blobMeta.set(f.blobKey, {
-            filename: f.name,
-            subfolder: ['PDFs Pessoais', toDriveSeg(folderKey)].filter(Boolean),
-          }),
-        ),
-      );
-      Object.entries(cur.summaryFolders || {}).forEach(([folderKey, list]) =>
-        list.forEach((s) =>
-          blobMeta.set(s.blobKey, {
-            filename: s.name,
-            altNames: [`RESUMO - ${s.name}`],
-            subfolder: ['Resumos e Mapas', toDriveSeg(folderKey)].filter(Boolean),
-          }),
-        ),
-      );
-      Object.entries(cur.laws || {}).forEach(([folderKey, folderObj]) =>
-        (folderObj.pdfs || []).forEach((p) =>
-          blobMeta.set(p.blobKey, {
-            filename: p.name,
-            altNames: [`LEI - ${p.name}`],
-            subfolder: ['Lei Seca', toDriveSeg(folderKey)].filter(Boolean),
-          }),
-        ),
-      );
-      (cur.proofFiles || []).forEach((pf) =>
-        blobMeta.set(pf.blobKey, {
-          filename: pf.name,
-          altNames: [`PROVA - ${pf.name}`],
-          subfolder: 'Provas e Gabaritos',
-        }),
-      );
-      (cur.essays || []).forEach((e) => {
-        blobMeta.set(e.original_blobKey, {
-          filename: `DISCURSIVA - ${e.original_arquivo}`,
-          altNames: [e.original_arquivo],
-          subfolder: 'Discursivas',
-        });
-        if (e.corrigido_blobKey && e.corrigido_arquivo) {
-          blobMeta.set(e.corrigido_blobKey, {
-            filename: `CORRECAO - ${e.corrigido_arquivo}`,
-            altNames: [e.corrigido_arquivo],
-            subfolder: 'Discursivas',
-          });
-        }
+      const existingDriveFiles = await listAllStudyFilesInDrive(activeToken);
+      const report = runDriveTimestampComparison(cur, existingDriveFiles, scope, {
+        includeDismissed: true,
+        sourceLabel: 'Comparação de timestamps na sincronização manual',
       });
 
-      const existingDriveFiles = await listAllStudyFilesInDrive(activeToken);
-      const existingNamesLower = new Set(existingDriveFiles.map((f) => f.name.toLowerCase()));
-
       const allBlobs = await getAllFileBlobs();
-      let skipped = 0;
+      const blobByKey = new Map(allBlobs.map((b) => [b.key, b.blob]));
+      const handledBlobKeys = new Set<string>();
       const uploadedDriveFiles: DriveFileInfo[] = [];
+      const failedFileEvents: SyncAffectedFile[] = [];
+      let skipped = report.inSync.length + report.driveNewer.length;
 
+      for (const comp of [...report.localOnly, ...report.localNewer]) {
+        handledBlobKeys.add(comp.blobKey);
+        const blob = blobByKey.get(comp.blobKey);
+        if (!blob) continue;
+        try {
+          const uploadedFile = await uploadFileToDrive(
+            blob,
+            comp.name,
+            activeToken,
+            comp.subfolder,
+            comp.driveFile ? { existingFileId: comp.driveFile.id } : undefined,
+          );
+          uploadedDriveFiles.push(uploadedFile);
+          synced += 1;
+        } catch (err) {
+          console.error(`Erro ao sincronizar ${comp.blobKey}:`, err);
+          failedFileEvents.push({
+            name: comp.name,
+            action: 'failed',
+            module: comp.moduleLabel,
+            detail: err instanceof Error ? err.message : 'Falha ao enviar arquivo',
+          });
+          errors += 1;
+        }
+      }
+
+      // Fallback for any orphaned local blobs not referenced in StudyDatabase
+      const existingNamesLower = new Set(
+        [...existingDriveFiles, ...uploadedDriveFiles].map((f) => f.name.toLowerCase()),
+      );
       for (const item of allBlobs) {
-        const mapped = blobMeta.get(item.key);
-        const targetName = mapped?.filename || (item.key.endsWith('.pdf') ? item.key : `${item.key}.pdf`);
-        const targetSub = mapped?.subfolder;
-        const alreadyExists =
-          existingNamesLower.has(targetName.toLowerCase()) ||
-          (mapped?.altNames || []).some((alt) => existingNamesLower.has(alt.toLowerCase()));
-
-        if (alreadyExists) {
+        if (handledBlobKeys.has(item.key) || item.key.endsWith('::clean')) continue;
+        const targetName = item.key.endsWith('.pdf') ? item.key : `${item.key}.pdf`;
+        if (existingNamesLower.has(targetName.toLowerCase())) {
           skipped += 1;
           continue;
         }
         try {
-          const uploadedFile = await uploadFileToDrive(item.blob, targetName, activeToken, targetSub);
+          const uploadedFile = await uploadFileToDrive(item.blob, targetName, activeToken);
           existingNamesLower.add(targetName.toLowerCase());
           uploadedDriveFiles.push(uploadedFile);
           synced += 1;
         } catch (err) {
           console.error(`Erro ao sincronizar ${item.key}:`, err);
+          failedFileEvents.push({
+            name: targetName,
+            action: 'failed',
+            detail: err instanceof Error ? err.message : 'Falha ao enviar arquivo',
+          });
           errors += 1;
         }
       }
@@ -6903,7 +7681,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         );
         lastCloudDbRef.current = dbRef.current;
         lastCloudHashRef.current = curHash;
-        saveSyncMeta(activeScopeRef.current, {
+        saveSyncMeta(scope, {
           lastCloudSyncAt: nowIso,
           lastCloudContentHash: curHash,
         });
@@ -6912,7 +7690,7 @@ function isEmailAuthorized(email?: string | null): boolean {
 
       if (uploadedDriveFiles.length > 0 || savedSyncFile) {
         const combinedFilesMap = buildDriveSignatureMap([...existingDriveFiles, ...uploadedDriveFiles]);
-        const updatedMeta = recordUploadedFilesInCacheMeta(activeScopeRef.current, {
+        const updatedMeta = recordUploadedFilesInCacheMeta(scope, {
           backupFiles: savedSyncFile ? [savedSyncFile] : [],
           driveFiles: uploadedDriveFiles,
           folderId: folder.id,
@@ -6924,15 +7702,39 @@ function isEmailAuthorized(email?: string | null): boolean {
         if (updatedMeta.lastCacheVerifiedAt) setLastCacheVerifiedAt(updatedMeta.lastCacheVerifiedAt);
       }
 
+      recordSyncActivity({
+        category: 'drive-upload',
+        operation: 'Sincronização manual do acervo local',
+        status: errors > 0 || report.deletedConflicts.length > 0 ? 'warning' : 'success',
+        message:
+          synced > 0
+            ? `${synced} arquivo(s) enviado(s)/atualizado(s) no Drive; ${skipped} já atualizado(s).`
+            : `Todos os ${skipped} arquivo(s) locais já estão atualizados no Google Drive.`,
+        affectedFiles: [
+          ...uploadedDriveFiles.map((uf) => ({ name: uf.name, action: 'uploaded' as const, driveFileId: uf.id })),
+          ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
+          ...failedFileEvents,
+        ],
+        stats: { uploaded: synced + (savedSyncFile ? 1 : 0) },
+      });
+
       if (synced > 0) {
-        toast(`Sincronização concluída! ${synced} novo(s) arquivo(s) e banco de dados salvos no Drive.`);
+        toast(`Sincronização concluída! ${synced} arquivo(s) e banco de dados salvos no Drive.`);
       } else if (errors === 0) {
-        toast(`Banco de dados sincronizado! Todos os ${skipped} arquivo(s) já estão no Google Drive.`);
+        toast(`Banco de dados sincronizado! Todos os ${skipped} arquivo(s) já estão atualizados no Google Drive.`);
       } else {
         toast('Banco sincronizado, mas houve falha em alguns arquivos.', true);
       }
     } catch (err: any) {
-      if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+      const msg = String(err?.message || '');
+      if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+      recordSyncActivity({
+        category: 'drive-upload',
+        operation: 'Falha ao sincronizar acervo local com o Drive',
+        status: 'error',
+        errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+        message: msg || 'Falha geral na sincronização do acervo.',
+      });
       toast(`Erro na sincronização: ${err?.message || 'Falha geral'}`, true);
       errors += 1;
     } finally {
@@ -6940,7 +7742,7 @@ function isEmailAuthorized(email?: string | null): boolean {
     }
 
     return { synced, errors, folderUrl: folderLink };
-  }, [driveFolderUrl, ensureDriveToken, googleUser?.email, toast]);
+  }, [driveFolderUrl, ensureDriveToken, googleUser?.email, recordSyncActivity, runDriveTimestampComparison, toast]);
 
   const selectDriveStudyFolder = useCallback(
     async (folder: { id?: string; name?: string }): Promise<boolean> => {
@@ -7044,6 +7846,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       setIsSyncingDrive(true);
       try {
         const executeRestore = async (tokenToUse: string) => {
+          const scope = activeScopeRef.current;
           const folder = await getOrCreateStudyFolder(tokenToUse);
           setActiveDriveFolderName(folder.name || getPreferredStudyFolder().name);
           if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
@@ -7072,8 +7875,6 @@ function isEmailAuthorized(email?: string | null): boolean {
                 },
           );
 
-          const scope = activeScopeRef.current;
-
           const matchingFolderFiles = targetFolderId
             ? driveFiles.filter((df) =>
                 targetFolderId === 'root'
@@ -7084,6 +7885,14 @@ function isEmailAuthorized(email?: string | null): boolean {
 
           const hasCloudData = Boolean(latestCloud?.payload || latestCloud?.incrementalDeltas?.length);
           if (!hasCloudData && matchingFolderFiles.length === 0) {
+            recordSyncActivity({
+              category: 'drive-restore',
+              operation: 'Restauração do Google Drive',
+              status: 'warning',
+              message: targetFolderId
+                ? 'Nenhum backup ou arquivo compatível encontrado na pasta selecionada.'
+                : 'Nenhum backup ou arquivo encontrado nas pastas do Google Drive.',
+            });
             if (!options?.silentIfEmpty) {
               toast(
                 targetFolderId
@@ -7121,7 +7930,14 @@ function isEmailAuthorized(email?: string | null): boolean {
           }
 
           const hasStudyFolderFiles = driveFiles.some((df) => df.isInStudyFolder);
-          const { updatedDb, filesRestored, orphansImported, permissionBlockedCount } =
+          const {
+            updatedDb,
+            filesRestored,
+            orphansImported,
+            permissionBlockedCount,
+            skippedTombstonesCount,
+            fileEvents,
+          } =
             await restoreFilesAndOrphansFromDriveList(
               baseDb,
               driveFiles,
@@ -7169,7 +7985,26 @@ function isEmailAuthorized(email?: string | null): boolean {
           }
           syncedScopeOnceRef.current = scope;
 
+          const restoreTimestampReport = runDriveTimestampComparison(updatedDb, driveFiles, scope, {
+            onlyFolderId: targetFolderId,
+            includeDismissed: true,
+            sourceLabel: 'Comparação de timestamps na restauração do Drive',
+          });
+
           const totalFiles = filesRestored + orphansImported;
+          recordSyncActivity({
+            category: 'drive-restore',
+            operation: targetFolderId ? 'Restauração de pasta do Google Drive' : 'Restauração completa do Google Drive',
+            status: permissionBlockedCount > 0 || restoreTimestampReport.deletedConflicts.length > 0 ? 'warning' : 'success',
+            message: `${restoredDb ? 'Banco restaurado' : 'Pasta verificada'}. ${filesRestored} arquivo(s) baixado(s)/atualizado(s), ${orphansImported} órfão(s) importado(s), ${skippedTombstonesCount} bloqueado(s) por exclusão (${restoreTimestampReport.deletedConflicts.length} conflito(s) aguardando decisão).`,
+            affectedFiles: [...fileEvents],
+            stats: {
+              restored: filesRestored,
+              imported: orphansImported,
+              skippedTombstones: skippedTombstonesCount,
+            },
+          });
+
           if (permissionBlockedCount > 0 && totalFiles === 0) {
             toast(
               'Esses arquivos foram enviados fora do app. Use "Selecionar arquivos dentro da pasta no Drive" para autorizar o download pelo Google.',
@@ -7203,7 +8038,15 @@ function isEmailAuthorized(email?: string | null): boolean {
           throw err;
         }
       } catch (err: any) {
-        if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Falha ao restaurar do Google Drive',
+          status: 'error',
+          errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+          message: msg || 'Falha na restauração do Google Drive.',
+        });
         toast(`Erro ao restaurar dados do Google Drive: ${err?.message || 'Falha'}`, true);
         return { restoredDb: false, filesRestored: 0, orphansImported: 0, permissionBlockedCount: 0 };
       } finally {
@@ -7211,7 +8054,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         setIsSyncingDrive(false);
       }
     },
-    [applyRestoredDatabaseForScope, connectGoogleDrive, ensureDriveToken, googleUser?.email, toast],
+    [applyRestoredDatabaseForScope, connectGoogleDrive, ensureDriveToken, googleUser?.email, recordSyncActivity, runDriveTimestampComparison, toast],
   );
 
   const migrateDriveToFirebase = useCallback(async (): Promise<boolean> => {
@@ -7307,6 +8150,8 @@ function isEmailAuthorized(email?: string | null): boolean {
             let filesRestored = 0;
             let orphansImported = 0;
             let permissionBlockedCount = 0;
+            let skippedTombstonesCount = 0;
+            let fileEvents: SyncAffectedFile[] = [];
 
             if (studyCandidates.length > 0) {
               const res = await restoreFilesAndOrphansFromDriveList(
@@ -7326,6 +8171,8 @@ function isEmailAuthorized(email?: string | null): boolean {
               filesRestored = res.filesRestored;
               orphansImported = res.orphansImported;
               permissionBlockedCount = res.permissionBlockedCount;
+              skippedTombstonesCount = res.skippedTombstonesCount;
+              fileEvents = res.fileEvents;
             }
 
             if (restoredDb || filesRestored > 0 || orphansImported > 0) {
@@ -7333,6 +8180,22 @@ function isEmailAuthorized(email?: string | null): boolean {
             }
 
             const total = filesRestored + orphansImported;
+            recordSyncActivity({
+              category: 'drive-restore',
+              operation: 'Importação via seletor do Google Drive',
+              status: permissionBlockedCount > 0 && total === 0 ? 'warning' : 'success',
+              message: restoredDb
+                ? `Backup JSON e ${total} arquivo(s) selecionados importados; ${skippedTombstonesCount} ignorado(s) por exclusão.`
+                : total > 0
+                  ? `${total} arquivo(s) importado(s) do Google Drive; ${skippedTombstonesCount} ignorado(s) por exclusão.`
+                  : 'Nenhum arquivo novo foi importado pelo seletor.',
+              affectedFiles: fileEvents,
+              stats: {
+                restored: filesRestored,
+                imported: orphansImported,
+                skippedTombstones: skippedTombstonesCount,
+              },
+            });
             toast(
               restoredDb
                 ? `Backup JSON e ${total} arquivo(s) selecionados restaurados do Google Drive!`
@@ -7386,12 +8249,20 @@ function isEmailAuthorized(email?: string | null): boolean {
 
         return null;
       } catch (err: any) {
-        if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Falha no seletor do Google Drive',
+          status: 'error',
+          errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+          message: msg || 'Falha ao abrir seletor do Google Drive.',
+        });
         toast(`Erro ao abrir seletor do Google Drive: ${err?.message || 'Falha'}`, true);
         return null;
       }
     },
-    [applyRestoredDatabaseForScope, ensureDriveToken, restoreAllFromGoogleDrive, toast],
+    [applyRestoredDatabaseForScope, ensureDriveToken, recordSyncActivity, restoreAllFromGoogleDrive, toast],
   );
 
   const inspectDriveFolders = useCallback(async (): Promise<DriveFolderSummary[]> => {
@@ -7426,7 +8297,13 @@ function isEmailAuthorized(email?: string | null): boolean {
       try {
         const driveFiles = await listAllStudyFilesInDrive(activeToken);
         const scope = activeScopeRef.current;
-        const { updatedDb, filesRestored, orphansImported } = await restoreFilesAndOrphansFromDriveList(
+        const {
+          updatedDb,
+          filesRestored,
+          orphansImported,
+          skippedTombstonesCount,
+          fileEvents,
+        } = await restoreFilesAndOrphansFromDriveList(
           dbRef.current,
           driveFiles,
           activeToken,
@@ -7442,9 +8319,32 @@ function isEmailAuthorized(email?: string | null): boolean {
         } else {
           toast('Nenhum arquivo novo suportado encontrado nesta pasta (ou já foram importados).');
         }
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Importação de pasta do Google Drive',
+          status: 'success',
+          message:
+            total > 0
+              ? `${total} arquivo(s) importado(s); ${skippedTombstonesCount} ignorado(s) por exclusão.`
+              : `Pasta verificada; ${skippedTombstonesCount} arquivo(s) ignorado(s) por exclusão.`,
+          affectedFiles: fileEvents,
+          stats: {
+            restored: filesRestored,
+            imported: orphansImported,
+            skippedTombstones: skippedTombstonesCount,
+          },
+        });
         return total;
       } catch (err: any) {
-        if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Falha ao importar pasta do Google Drive',
+          status: 'error',
+          errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+          message: msg || 'Falha ao importar pasta do Drive.',
+        });
         toast(`Erro ao importar pasta do Drive: ${err?.message || 'Falha'}`, true);
         return 0;
       } finally {
@@ -7452,7 +8352,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         setIsSyncingDrive(false);
       }
     },
-    [applyRestoredDatabaseForScope, ensureDriveToken, toast],
+    [applyRestoredDatabaseForScope, ensureDriveToken, recordSyncActivity, toast],
   );
 
   const recoverFileFromDrive = useCallback(
@@ -7517,20 +8417,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       filename: string,
       subfolderName?: string | string[],
     ): Promise<boolean> => {
-      let savedToLocalDisk = false;
-      if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        savedToLocalDisk = await writeFileToLocalDirectory(
-          localFolderHandleRef.current,
-          subfolderName,
-          filename,
-          fileOrBlob,
-        );
-        if (savedToLocalDisk) {
-          setLastLocalFolderSyncAt(new Date().toISOString());
-        }
-      }
-
-      if (!driveConnected) return savedToLocalDisk;
+      if (!driveConnected) return false;
       const notifyThrottle = (msg: string) => {
         const now = Date.now();
         if (now - lastDriveUploadAlertAtRef.current > 4000) {
@@ -7542,10 +8429,18 @@ function isEmailAuthorized(email?: string | null): boolean {
       const token = await getAccessToken();
       if (!token) {
         setDriveTokenReady(false);
+        recordSyncActivity({
+          category: 'drive-upload',
+          operation: 'Envio automático para o Drive adiado',
+          status: 'warning',
+          errorCode: 'oauth/drive-token-expired',
+          message: `Sessão OAuth do Google Drive indisponível para enviar "${filename}". Reconecte a conta Google para concluir o envio.`,
+          affectedFiles: [{ name: filename, action: 'failed', detail: 'Sessão OAuth expirada' }],
+        });
         notifyThrottle(
           'Sua permissão temporária do Google Drive expirou. Clique em "Reconectar Drive" em Backup e Restauração para enviar arquivos na nuvem.',
         );
-        return savedToLocalDisk;
+        return false;
       }
       setDriveTokenReady(true);
 
@@ -7555,6 +8450,21 @@ function isEmailAuthorized(email?: string | null): boolean {
           driveFiles: [uploaded],
         });
         if (updatedMeta.lastCacheVerifiedAt) setLastCacheVerifiedAt(updatedMeta.lastCacheVerifiedAt);
+        recordSyncActivity({
+          category: 'drive-upload',
+          operation: 'Arquivo enviado ao Google Drive',
+          status: 'success',
+          message: `Arquivo "${filename}" enviado e sincronizado no Google Drive.`,
+          affectedFiles: [
+            {
+              name: uploaded.name || filename,
+              action: 'uploaded',
+              driveFileId: uploaded.id,
+              module: Array.isArray(subfolderName) ? subfolderName.join(' / ') : subfolderName,
+            },
+          ],
+          stats: { uploaded: 1 },
+        });
         return true;
       } catch (err: any) {
         const msg = String(err?.message || '');
@@ -7565,757 +8475,269 @@ function isEmailAuthorized(email?: string | null): boolean {
           );
         } else if (msg.includes('DRIVE_FOLDER_PERMISSION')) {
           notifyThrottle(
-            `O Google Drive bloqueou o envio para a pasta "${activeDriveFolderNameRef.current}". Em Backup e Restauração, clique em "Escolher pasta de salvamento no Drive" para liberar a gravação.`,
+            `O Google Drive bloqueou o envio para a pasta "${activeDriveFolderNameRef.current}". Em Backup e Restauração, clique em "Escolher pasta no Drive" para liberar a gravação.`,
           );
         } else {
           notifyThrottle(`Falha ao salvar "${filename}" no Google Drive: ${msg || 'Erro no envio'}`);
         }
-        console.warn(`[Auto-sync Drive] Falha ao enviar ${filename}:`, err);
-        return savedToLocalDisk;
-      }
-    },
-    [driveConnected, toast],
-  );
-
-  const syncAllDatabaseAndFilesToLocalFolder = useCallback(
-    async (
-      rootHandle: FileSystemDirectoryHandle,
-      targetDb: StudyDatabase,
-      scope: string,
-      existingEntries: LocalDiskFileEntry[] = [],
-    ): Promise<number> => {
-      await ensureLocalStudySubfolders(rootHandle);
-
-      const existingNames = new Set<string>();
-      for (const e of existingEntries) {
-        existingNames.add(normalizeFileLookup(e.name));
-        existingNames.add(normalizeFileLookup(stripDrivePrefix(e.name)));
-      }
-
-      let writtenFilesCount = 0;
-      const toLocalSeg = (raw: string) => visibleName(raw).replace(/[\\/]+/g, ' - ').trim();
-      const knownBackupRoots = [
-        rootHandle.name,
-        getPreferredStudyFolder().name,
-        ...getKnownStudyDriveFolderNames(),
-      ];
-
-      // 1. Write Backups/central_estudos_sync_latest.json
-      const nowIso = new Date().toISOString();
-      const syncPayload = {
-        version: 2,
-        app: 'Central de Estudos',
-        updatedAt: nowIso,
-        contentHash: computeDatabaseContentHash(targetDb),
-        data: targetDb,
-      };
-      const okSync = await saveLocalFolderSyncSnapshot(rootHandle, syncPayload);
-      if (okSync) writtenFilesCount += 1;
-
-      // 2. Write referenced blobs from IndexedDB into their respective local subfolders
-      const blobMeta = new Map<
-        string,
-        { filename: string; altNames?: string[]; subfolder?: string | string[] }
-      >();
-
-      Object.entries(targetDb.pdfFolders || {}).forEach(([folderKey, list]) => {
-        if (isReservedBackupFolderName(folderKey, knownBackupRoots, list)) return;
-        list.forEach((f) =>
-          blobMeta.set(f.blobKey, {
-            filename: f.name,
-            subfolder: ['PDFs Pessoais', toLocalSeg(folderKey)].filter(Boolean),
-          }),
-        );
-      });
-      Object.entries(targetDb.summaryFolders || {}).forEach(([folderKey, list]) =>
-        list.forEach((s) =>
-          blobMeta.set(s.blobKey, {
-            filename: s.name,
-            altNames: [`RESUMO - ${s.name}`],
-            subfolder: ['Resumos e Mapas', toLocalSeg(folderKey)].filter(Boolean),
-          }),
-        ),
-      );
-      Object.entries(targetDb.laws || {}).forEach(([folderKey, folderObj]) =>
-        (folderObj.pdfs || []).forEach((p) =>
-          blobMeta.set(p.blobKey, {
-            filename: p.name,
-            altNames: [`LEI - ${p.name}`],
-            subfolder: ['Lei Seca', toLocalSeg(folderKey)].filter(Boolean),
-          }),
-        ),
-      );
-      for (const pf of targetDb.proofFiles || []) {
-        blobMeta.set(pf.blobKey, {
-          filename: `PROVA - ${pf.name}`,
-          altNames: [pf.name],
-          subfolder:
-            pf.bank && pf.bank !== 'Geral'
-              ? ['Provas e Gabaritos', toLocalSeg(pf.bank)]
-              : 'Provas e Gabaritos',
-        });
-        if (pf.gabarito_conteudo) {
-          const gabName = pf.gabarito_arquivo || `${pf.name}.gabarito.txt`;
-          if (!existingNames.has(normalizeFileLookup(gabName))) {
-            const okGab = await writeFileToLocalDirectory(
-              rootHandle,
-              pf.bank ? ['Provas e Gabaritos', toLocalSeg(pf.bank)] : 'Provas e Gabaritos',
-              gabName,
-              new Blob([pf.gabarito_conteudo], { type: 'text/plain;charset=utf-8' }),
-            );
-            if (okGab) writtenFilesCount += 1;
-          }
-        }
-      }
-      for (const e of targetDb.essays || []) {
-        blobMeta.set(e.original_blobKey, {
-          filename: `DISCURSIVA - ${e.original_arquivo}`,
-          altNames: [e.original_arquivo],
-          subfolder: 'Discursivas',
-        });
-        if (e.corrigido_blobKey && e.corrigido_arquivo) {
-          blobMeta.set(e.corrigido_blobKey, {
-            filename: `CORRECAO - ${e.corrigido_arquivo}`,
-            altNames: [e.corrigido_arquivo],
-            subfolder: 'Discursivas',
-          });
-        }
-      }
-
-      if (blobMeta.size > 0) {
-        const allBlobs = await getAllFileBlobs(scope);
-        for (const item of allBlobs) {
-          const mapped = blobMeta.get(item.key);
-          if (!mapped) continue;
-          const candidates = [mapped.filename, ...(mapped.altNames || [])];
-          const alreadyOnDisk = candidates.some(
-            (c) =>
-              existingNames.has(normalizeFileLookup(c)) ||
-              existingNames.has(normalizeFileLookup(stripDrivePrefix(c))),
-          );
-          if (alreadyOnDisk) continue;
-          const ok = await writeFileToLocalDirectory(
-            rootHandle,
-            mapped.subfolder,
-            mapped.filename,
-            item.blob,
-          );
-          if (ok) {
-            existingNames.add(normalizeFileLookup(mapped.filename));
-            writtenFilesCount += 1;
-          }
-        }
-      }
-
-      // 3. Write Cronogramas .txt files
-      const activeWeekKey = resolveActiveScheduleWeekKey(
-        targetDb.scheduleDayDates,
-        targetDb.schedule,
-      );
-      const activeWeekMeta = buildScheduleWeekMetadata(activeWeekKey, targetDb.scheduleDayDates);
-      const activeScheduleTxt = serializeScheduleWeekToText(
-        activeWeekMeta.weekKey,
-        targetDb.schedule,
-        activeWeekMeta.dayDates,
-      );
-      await writeFileToLocalDirectory(
-        rootHandle,
-        'Cronogramas',
-        activeWeekMeta.fileName,
-        activeScheduleTxt,
-      );
-
-      for (const rec of Object.values(targetDb.weeklySchedules || {})) {
-        if (!rec || rec.weekKey === activeWeekMeta.weekKey) continue;
-        const wkTxt = serializeScheduleWeekToText(
-          rec.weekKey,
-          rec.schedule,
-          rec.scheduleDayDates || {},
-        );
-        await writeFileToLocalDirectory(rootHandle, 'Cronogramas', rec.fileName, wkTxt);
-      }
-
-      // 4. Write Datas e Locais & Editais .txt files
-      const allContests = targetDb.contests || [];
-      if (allContests.length > 0) {
-        const masterTxt = serializeAllContestsMasterTxt(allContests);
-        await writeFileToLocalDirectory(
-          rootHandle,
-          'Datas e Locais',
-          'DATAS E LOCAIS - Controle Geral de Inscricoes Boletos e Locais.txt',
-          masterTxt,
-        );
-        for (const c of allContests) {
-          const regTxt = serializeContestRegistrationTxt(c);
-          await writeFileToLocalDirectory(
-            rootHandle,
-            'Datas e Locais',
-            buildContestTxtFileName(c),
-            regTxt,
-          );
-          if ((c.edital_pontos?.length || 0) > 0) {
-            const editalTxt = serializeContestEditalTxt(c);
-            await writeFileToLocalDirectory(
-              rootHandle,
-              'Editais',
-              buildEditalTxtFileName(c),
-              editalTxt,
-            );
-          }
-        }
-      }
-
-      setLastLocalFolderSyncAt(nowIso);
-      return writtenFilesCount;
-    },
-    [],
-  );
-
-  const processScannedLocalFolder = useCallback(
-    async (
-      entries: LocalDiskFileEntry[],
-      summary: LocalFolderScanSummary,
-      handle: FileSystemDirectoryHandle | null,
-      writable: boolean,
-    ): Promise<boolean> => {
-      setIsSyncingLocalFolder(true);
-      try {
-        window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
-        const scope = activeScopeRef.current;
-        rememberKnownStudyDriveFolderName(summary.rootFolderName);
-
-        // 1. Check for database backups inside the local folder
-        const backupRes = await extractLatestBackupFromLocalFiles(entries);
-        const hasDiskBackup = Boolean(
-          backupRes.basePayload || backupRes.incrementalDeltas.length > 0,
-        );
-
-        let workingDb = dbRef.current;
-        const localHasCustom = !isUntouchedSeedDatabase(workingDb);
-
-        if (hasDiskBackup) {
-          let diskDb = backupRes.basePayload
-            ? normalizeAndMergeDatabase(backupRes.basePayload)
-            : workingDb;
-          if (backupRes.incrementalDeltas.length > 0) {
-            for (const incDelta of backupRes.incrementalDeltas) {
-              diskDb = applyIncrementalDeltaToDatabase(diskDb, incDelta);
-            }
-          }
-
-          // If current local browser DB also has custom edits not yet in diskDb, merge them non-destructively
-          if (
-            localHasCustom &&
-            computeDatabaseContentHash(workingDb) !== computeDatabaseContentHash(diskDb)
-          ) {
-            const syncMeta = loadSyncMeta(scope);
-            const localEditMs = Date.parse(syncMeta.lastLocalEditAt || '') || 0;
-            if (localEditMs > backupRes.baseTimestampMs + 1500) {
-              const localDiff = buildIncrementalDatabaseBackup(diskDb, workingDb, {
-                updatedAt: new Date(localEditMs || Date.now()).toISOString(),
-              });
-              if (localDiff.hasChanges) {
-                const additiveEnvelope = {
-                  ...localDiff.envelope,
-                  delta: Object.fromEntries(
-                    Object.entries(localDiff.envelope.delta).map(([sec, val]) => {
-                      if (val && typeof val === 'object' && !Array.isArray(val)) {
-                        const copy = { ...(val as Record<string, any>) };
-                        delete copy.deletedIds;
-                        delete copy.deletedKeys;
-                        return [sec, copy];
-                      }
-                      return [sec, val];
-                    }),
-                  ),
-                };
-                const prevDiskDb = diskDb;
-                diskDb = applyIncrementalDeltaToDatabase(diskDb, additiveEnvelope, { additiveMerge: true });
-                diskDb = reconcileCompletedAndArchivedItems(diskDb, workingDb, prevDiskDb);
-              }
-            }
-          }
-          workingDb = diskDb;
-        }
-
-        // 2. Restore referenced blobs and import all study files from the local folder
-        const { driveFiles, fileById } = toDriveCompatibleEntries(entries);
-        const { updatedDb, filesRestored, orphansImported, healedLawsCount } =
-          await restoreFilesAndOrphansFromDriveList(
-            workingDb,
-            driveFiles,
-            '',
-            scope,
-            (current, total, label) => setRestoreProgress({ current, total, label }),
+        recordSyncActivity({
+          category: 'drive-upload',
+          operation: 'Falha ao enviar arquivo ao Drive',
+          status: 'error',
+          errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+          message: `Não foi possível enviar "${filename}" para o Google Drive.`,
+          affectedFiles: [
             {
-              importFromAnyFolder: true,
-              localFileMap: fileById,
+              name: filename,
+              action: 'failed',
+              detail: msg || 'Erro no envio',
+              module: Array.isArray(subfolderName) ? subfolderName.join(' / ') : subfolderName,
             },
+          ],
+        });
+        console.warn(`[Auto-sync Drive] Falha ao enviar ${filename}:`, err);
+        return false;
+      }
+    },
+    [driveConnected, recordSyncActivity, toast],
+  );
+
+  const driveSyncConflictsRef = useRef<DeletedDriveConflict[]>(driveSyncConflicts);
+  driveSyncConflictsRef.current = driveSyncConflicts;
+
+  const resolveDriveConflictRemoveCloud = useCallback(
+    async (conflictId: string): Promise<boolean> => {
+      const target = driveSyncConflictsRef.current.find((c) => c.id === conflictId);
+      if (!target) return false;
+      const activeToken = await ensureDriveToken();
+      if (!activeToken) return false;
+
+      const scope = activeScopeRef.current || 'offline_guest';
+      setResolvingDriveConflictId(conflictId);
+      try {
+        const deleted = await deleteFileFromDrive(target.driveFile.id, activeToken);
+        if (!deleted) {
+          recordSyncActivity(
+            {
+              category: 'drive-delete',
+              operation: 'Falha ao remover conflito da nuvem',
+              status: 'error',
+              message: `Não foi possível enviar "${target.displayName}" para a lixeira do Google Drive.`,
+              affectedFiles: [
+                {
+                  name: target.displayName,
+                  action: 'failed',
+                  module: target.moduleLabel,
+                  driveFileId: target.driveFile.id,
+                  detail: 'Permissão ou falha de rede no Drive',
+                },
+              ],
+            },
+            scope,
           );
-
-        applyRestoredDatabaseForScope(scope, updatedDb);
-
-        localFolderHandleRef.current = handle;
-        localFolderWritableRef.current = writable;
-        setLocalFolderConnected(true);
-        setLocalFolderWritable(writable);
-        setLocalFolderName(summary.rootFolderName);
-        setLocalFolderSummary(summary);
-        setSavedLocalFolderMetaState(summary);
-        if (handle) {
-          setHasSavedLocalFolderHandle(true);
+          toast(`Não foi possível mover "${target.displayName}" para a lixeira do Google Drive.`, true);
+          return false;
         }
 
-        const syncIsoNow = new Date().toISOString();
-        const baselineIso = backupRes.baseTimestampMs
-          ? new Date(backupRes.baseTimestampMs).toISOString()
-          : syncIsoNow;
-        lastLocalBackupDbRef.current = updatedDb;
-        lastLocalBackupHashRef.current = computeDatabaseContentHash(updatedDb);
-        lastLocalBackupIsoRef.current = baselineIso;
-        lastLocalAutoBackupAtRef.current = Date.now();
-        if (hasDiskBackup || writable) {
-          setLastLocalIncrementalBackupAt(baselineIso);
-        }
+        removePendingDriveDeletesForDriveFile(scope, target.driveFile);
+        removeFileIdsFromCacheMeta(scope, [target.driveFile.id]);
+        dismissedConflictIdsRef.current.delete(conflictId);
+        setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
 
-        // 3. If writable directory handle, ensure all subfolders exist and write updated state/files to disk
-        if (handle && writable) {
-          await syncAllDatabaseAndFilesToLocalFolder(handle, updatedDb, scope, entries);
-          const refreshed = await scanDirectoryHandle(handle, writable);
-          setLocalFolderSummary(refreshed.summary);
-          setSavedLocalFolderMetaState(refreshed.summary);
-        } else {
-          setLastLocalFolderSyncAt(syncIsoNow);
-        }
-
-        const totalLoaded = filesRestored + orphansImported;
-        toast(
-          hasDiskBackup
-            ? `Pasta local "${summary.rootFolderName}" carregada! Backup e ${totalLoaded} arquivo(s) identificados e sincronizados localmente.`
-            : totalLoaded > 0 || healedLawsCount > 0
-            ? `Pasta local "${summary.rootFolderName}" conectada! ${totalLoaded} arquivo(s) identificado(s) e salvo(s) localmente.`
-            : `Pasta local "${summary.rootFolderName}" vinculada! Todas as alterações e pastas serão salvas localmente.`,
+        recordSyncActivity(
+          {
+            category: 'drive-delete',
+            operation: 'Conflito resolvido: cópia removida do Drive',
+            status: 'success',
+            message: `O arquivo "${target.displayName}" foi movido para a lixeira do Google Drive conforme escolha do usuário.`,
+            affectedFiles: [
+              {
+                name: target.displayName,
+                action: 'trashed',
+                module: target.moduleLabel,
+                driveFileId: target.driveFile.id,
+              },
+            ],
+            stats: { trashed: 1 },
+          },
+          scope,
         );
+        toast(`"${target.displayName}" removido do Google Drive (movido para a lixeira).`);
         return true;
       } catch (err: any) {
-        toast(`Erro ao ler pasta local: ${err?.message || 'Falha'}`, true);
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        toast(`Erro ao remover arquivo do Drive: ${msg || 'Falha'}`, true);
         return false;
       } finally {
-        setRestoreProgress(null);
-        setIsSyncingLocalFolder(false);
+        setResolvingDriveConflictId((prev) => (prev === conflictId ? null : prev));
       }
     },
-    [applyRestoredDatabaseForScope, syncAllDatabaseAndFilesToLocalFolder, toast],
+    [ensureDriveToken, recordSyncActivity, toast],
   );
 
-  // Silent auto-reconnect when the browser session still holds permission for the saved local folder
-  useEffect(() => {
-    if (autoReconnectedLocalRef.current) return;
-    autoReconnectedLocalRef.current = true;
-    if (auth.currentUser || localFolderHandleRef.current) return;
-    void reconnectSavedLocalDirectory(false).then(async (reconnected) => {
-      if (!reconnected || auth.currentUser || localFolderHandleRef.current) return;
+  const resolveDriveConflictRestoreLocal = useCallback(
+    async (conflictId: string): Promise<boolean> => {
+      const target = driveSyncConflictsRef.current.find((c) => c.id === conflictId);
+      if (!target) return false;
+      const activeToken = await ensureDriveToken();
+      if (!activeToken) return false;
+
+      const scope = activeScopeRef.current || 'offline_guest';
+      setResolvingDriveConflictId(conflictId);
       try {
-        const { entries, summary } = await scanDirectoryHandle(
-          reconnected.handle,
-          reconnected.writable,
+        const nextTombstones = removeDeletedTombstoneKeys(
+          scope,
+          target.tombstoneCompositeKeys,
+          dbRef.current.deletedTombstones,
         );
-        await processScannedLocalFolder(
-          entries,
-          summary,
-          reconnected.handle,
-          reconnected.writable,
-        );
-      } catch {
-        // Ignore silent reconnect error; user can manually reconnect from Login or Backup
-      }
-    });
-  }, [processScannedLocalFolder]);
-
-  const connectLocalStudyFolder = useCallback(async (): Promise<{
-    ok: boolean;
-    needsInputFallback?: boolean;
-    aborted?: boolean;
-  }> => {
-    const res = await pickLocalStudyDirectory();
-    if (res.aborted) return { ok: false, aborted: true };
-    if (res.needsInputFallback || !res.handle) {
-      return { ok: false, needsInputFallback: true };
-    }
-    const { entries, summary } = await scanDirectoryHandle(res.handle, Boolean(res.writable));
-    const ok = await processScannedLocalFolder(
-      entries,
-      summary,
-      res.handle,
-      Boolean(res.writable),
-    );
-    return { ok };
-  }, [processScannedLocalFolder]);
-
-  const reconnectLocalStudyFolder = useCallback(async (): Promise<boolean> => {
-    const reconnected = await reconnectSavedLocalDirectory(true);
-    if (!reconnected) {
-      const picked = await connectLocalStudyFolder();
-      return picked.ok;
-    }
-    const { entries, summary } = await scanDirectoryHandle(
-      reconnected.handle,
-      reconnected.writable,
-    );
-    return processScannedLocalFolder(
-      entries,
-      summary,
-      reconnected.handle,
-      reconnected.writable,
-    );
-  }, [connectLocalStudyFolder, processScannedLocalFolder]);
-
-  const importLocalStudyFolderFromFiles = useCallback(
-    async (files: FileList | File[]): Promise<boolean> => {
-      if (!files || files.length === 0) return false;
-      const { entries, summary } = scanFileListFromInput(files);
-      return processScannedLocalFolder(entries, summary, null, false);
-    },
-    [processScannedLocalFolder],
-  );
-
-  const syncNowWithLocalStudyFolder = useCallback(async (): Promise<boolean> => {
-    if (localFolderHandleRef.current) {
-      const { entries, summary } = await scanDirectoryHandle(
-        localFolderHandleRef.current,
-        localFolderWritableRef.current,
-      );
-      return processScannedLocalFolder(
-        entries,
-        summary,
-        localFolderHandleRef.current,
-        localFolderWritableRef.current,
-      );
-    }
-    const reconnected = await reconnectSavedLocalDirectory(true);
-    if (reconnected) {
-      const { entries, summary } = await scanDirectoryHandle(
-        reconnected.handle,
-        reconnected.writable,
-      );
-      return processScannedLocalFolder(
-        entries,
-        summary,
-        reconnected.handle,
-        reconnected.writable,
-      );
-    }
-    const picked = await connectLocalStudyFolder();
-    return picked.ok;
-  }, [connectLocalStudyFolder, processScannedLocalFolder]);
-
-  const disconnectLocalStudyFolder = useCallback(
-    async (forgetSaved = false) => {
-      window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
-      if (localFolderSyncTimerRef.current) {
-        window.clearTimeout(localFolderSyncTimerRef.current);
-        localFolderSyncTimerRef.current = null;
-      }
-      if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        const handle = localFolderHandleRef.current;
-        const curDb = dbRef.current;
-        const nowIso = new Date().toISOString();
-        const curHash = computeDatabaseContentHash(curDb);
-        const baselineDb = lastLocalBackupDbRef.current;
-        if (baselineDb && lastLocalBackupHashRef.current !== curHash) {
-          const { hasChanges, envelope } = buildIncrementalDatabaseBackup(baselineDb, curDb, {
-            updatedAt: nowIso,
-            baseUpdatedAt: lastLocalBackupIsoRef.current || undefined,
-          });
-          if (hasChanges) {
-            await saveLocalFolderBackupFile(handle, envelope).catch(() => {});
-          }
+        if (scope !== 'offline_guest') {
+          removeDeletedTombstoneKeys('offline_guest', target.tombstoneCompositeKeys);
         }
-        await saveLocalFolderSyncSnapshot(handle, {
-          version: 2,
-          app: 'Central de Estudos',
-          updatedAt: nowIso,
-          contentHash: curHash,
-          data: curDb,
-        }).catch(() => {});
-      }
-      localFolderHandleRef.current = null;
-      localFolderWritableRef.current = false;
-      lastLocalBackupDbRef.current = null;
-      lastLocalBackupHashRef.current = null;
-      lastLocalBackupIsoRef.current = null;
-      setLocalFolderConnected(false);
-      setLocalFolderWritable(false);
-      setLastLocalIncrementalBackupAt(null);
-      if (forgetSaved) {
-        await forgetSavedLocalDirectory();
-        setHasSavedLocalFolderHandle(false);
-        setSavedLocalFolderMetaState(null);
-        setLocalFolderName(null);
-        setLocalFolderSummary(null);
-        toast('Vínculo com a pasta local removido.');
-      } else {
-        toast('Pasta local desconectada (seus dados permanecem salvos localmente).');
-      }
-    },
-    [toast],
-  );
+        removePendingDriveDeletesForDriveFile(scope, target.driveFile);
 
-  const runLocalIncrementalBackupIfDue = useCallback(async () => {
-    const LOCAL_INCREMENTAL_BACKUP_INTERVAL_MS = 10 * 60 * 1000;
-    const handle = localFolderHandleRef.current;
-    if (!handle || !localFolderWritableRef.current) return;
-    if (isRestoringRef.current || localAutoBackupInFlightRef.current) return;
-    if (Date.now() - lastLocalAutoBackupAtRef.current < LOCAL_INCREMENTAL_BACKUP_INTERVAL_MS) return;
+        const baseDbWithoutTombstone: StudyDatabase = {
+          ...dbRef.current,
+          deletedTombstones: nextTombstones,
+        };
 
-    const currentDb = dbRef.current;
-    const curHash = computeDatabaseContentHash(currentDb);
-    const baselineDb = lastLocalBackupDbRef.current;
-    const nowIso = new Date().toISOString();
-    const { hasChanges, envelope } = buildIncrementalDatabaseBackup(baselineDb, currentDb, {
-      updatedAt: nowIso,
-      baseUpdatedAt: lastLocalBackupIsoRef.current || undefined,
-    });
+        const res = await restoreFilesAndOrphansFromDriveList(
+          baseDbWithoutTombstone,
+          [target.driveFile],
+          activeToken,
+          scope,
+          undefined,
+          {
+            onlyFileIds: [target.driveFile.id],
+            importFromAnyFolder: true,
+            skipTargetDbBlobs: true,
+            lazyBinaryBlobs: false,
+          },
+        );
 
-    // Skip creating redundant dated backup if nothing changed since last local backup
-    if ((lastLocalBackupHashRef.current && curHash === lastLocalBackupHashRef.current) || (baselineDb && !hasChanges)) {
-      lastLocalAutoBackupAtRef.current = Date.now();
-      return;
-    }
+        const changed =
+          res.filesRestored > 0 ||
+          res.orphansImported > 0 ||
+          computeDatabaseContentHash(res.updatedDb) !== computeDatabaseContentHash(dbRef.current);
 
-    localAutoBackupInFlightRef.current = true;
-    pendingLocalFolderWriteRef.current += 1;
-    try {
-      const savedIncName = await saveLocalFolderBackupFile(handle, envelope);
-      const syncOk = await saveLocalFolderSyncSnapshot(handle, {
-        version: 2,
-        app: 'Central de Estudos',
-        updatedAt: nowIso,
-        contentHash: curHash,
-        data: currentDb,
-      });
-
-      if (savedIncName || syncOk) {
-        lastLocalAutoBackupAtRef.current = Date.now();
-        lastLocalBackupDbRef.current = currentDb;
-        lastLocalBackupHashRef.current = curHash;
-        lastLocalBackupIsoRef.current = nowIso;
-        setLastLocalIncrementalBackupAt(nowIso);
-        setLastLocalFolderSyncAt(nowIso);
-        if (savedIncName) {
-          setLocalFolderSummary((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  totalFiles: prev.totalFiles + 1,
-                  categories: {
-                    ...prev.categories,
-                    backups: (prev.categories.backups || 0) + 1,
-                  },
-                }
-              : prev,
+        if (!changed && res.permissionBlockedCount > 0) {
+          toast(
+            `O Google Drive exige autorização pelo Seletor para baixar "${target.displayName}".`,
+            true,
           );
-          toast(`Backup incremental local automático (10 min) salvo em "${handle.name}/Backups".`);
+          return false;
         }
-      } else {
-        lastLocalAutoBackupAtRef.current = Date.now() - LOCAL_INCREMENTAL_BACKUP_INTERVAL_MS + 60 * 1000;
-      }
-    } catch (err) {
-      lastLocalAutoBackupAtRef.current = Date.now() - LOCAL_INCREMENTAL_BACKUP_INTERVAL_MS + 60 * 1000;
-      console.warn('[Auto-backup local 10min] Falha ao salvar backup incremental local:', err);
-    } finally {
-      pendingLocalFolderWriteRef.current = Math.max(0, pendingLocalFolderWriteRef.current - 1);
-      localAutoBackupInFlightRef.current = false;
-    }
-  }, [toast]);
 
-  // Automatic incremental backup to connected Local Folder every 10 minutes
-  useEffect(() => {
-    if (!localFolderConnected || !localFolderWritable) return;
-    const intervalId = window.setInterval(() => {
-      void runLocalIncrementalBackupIfDue();
-    }, 30 * 1000);
-    const onFocusOrVisible = () => {
-      if (document.visibilityState === 'visible') {
-        void runLocalIncrementalBackupIfDue();
-      }
-    };
-    document.addEventListener('visibilitychange', onFocusOrVisible);
-    window.addEventListener('focus', onFocusOrVisible);
-    return () => {
-      window.clearInterval(intervalId);
-      document.removeEventListener('visibilitychange', onFocusOrVisible);
-      window.removeEventListener('focus', onFocusOrVisible);
-    };
-  }, [localFolderConnected, localFolderWritable, runLocalIncrementalBackupIfDue]);
+        const updatedDbToApply = changed ? res.updatedDb : baseDbWithoutTombstone;
+        applyRestoredDatabaseForScope(scope, updatedDbToApply);
+        pendingCloudSyncRef.current = true;
+        setHasPendingCloudChanges(true);
+        dismissedConflictIdsRef.current.delete(conflictId);
+        setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
 
-  const saveLocalIncrementalBackupNow = useCallback(async (): Promise<boolean> => {
-    window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
-    const handle = localFolderHandleRef.current;
-    if (!handle || !localFolderWritableRef.current) {
-      toast(
-        localFolderConnected
-          ? 'A pasta atual foi importada em modo somente leitura. Use "Selecionar Pasta Local" para permitir gravação direta.'
-          : 'Selecione uma Pasta Local para gravar backups incrementais diretamente no computador.',
-        true,
-      );
-      return false;
-    }
-
-    const currentDb = dbRef.current;
-    const curHash = computeDatabaseContentHash(currentDb);
-    const baselineDb = lastLocalBackupDbRef.current;
-    const nowIso = new Date().toISOString();
-    const { hasChanges, envelope } = buildIncrementalDatabaseBackup(baselineDb, currentDb, {
-      updatedAt: nowIso,
-      baseUpdatedAt: lastLocalBackupIsoRef.current || undefined,
-    });
-
-    if (baselineDb && (!hasChanges || lastLocalBackupHashRef.current === curHash)) {
-      await saveLocalFolderSyncSnapshot(handle, {
-        version: 2,
-        app: 'Central de Estudos',
-        updatedAt: nowIso,
-        contentHash: curHash,
-        data: currentDb,
-      }).catch(() => false);
-      toast('Nenhuma alteração desde o último backup incremental local — cópias existentes preservadas.');
-      return true;
-    }
-
-    setIsSyncingLocalFolder(true);
-    pendingLocalFolderWriteRef.current += 1;
-    try {
-      const savedName = await saveLocalFolderBackupFile(handle, envelope);
-      const syncOk = await saveLocalFolderSyncSnapshot(handle, {
-        version: 2,
-        app: 'Central de Estudos',
-        updatedAt: nowIso,
-        contentHash: curHash,
-        data: currentDb,
-      });
-      if (!savedName && !syncOk) {
-        toast('Não foi possível gravar o backup incremental na pasta local.', true);
+        recordSyncActivity(
+          {
+            category: 'drive-restore',
+            operation: 'Conflito resolvido: arquivo restaurado localmente',
+            status: 'success',
+            message: `"${target.displayName}" foi restaurado no dispositivo local a partir do Google Drive e liberado do bloqueio de exclusão.`,
+            affectedFiles: [
+              {
+                name: target.displayName,
+                action: 'restored',
+                module: target.moduleLabel,
+                driveFileId: target.driveFile.id,
+              },
+            ],
+            stats: { restored: Math.max(1, res.filesRestored + res.orphansImported) },
+          },
+          scope,
+        );
+        toast(`"${target.displayName}" restaurado localmente a partir do Google Drive!`);
+        return true;
+      } catch (err: any) {
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        recordSyncActivity(
+          {
+            category: 'drive-restore',
+            operation: 'Falha ao restaurar arquivo em conflito',
+            status: 'error',
+            errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+            message: msg || `Não foi possível restaurar "${target.displayName}".`,
+            affectedFiles: [
+              {
+                name: target.displayName,
+                action: 'failed',
+                module: target.moduleLabel,
+                driveFileId: target.driveFile.id,
+              },
+            ],
+          },
+          scope,
+        );
+        toast(`Erro ao restaurar "${target.displayName}": ${msg || 'Falha'}`, true);
         return false;
+      } finally {
+        setResolvingDriveConflictId((prev) => (prev === conflictId ? null : prev));
       }
-      lastLocalAutoBackupAtRef.current = Date.now();
-      lastLocalBackupDbRef.current = currentDb;
-      lastLocalBackupHashRef.current = curHash;
-      lastLocalBackupIsoRef.current = nowIso;
-      setLastLocalIncrementalBackupAt(nowIso);
-      setLastLocalFolderSyncAt(nowIso);
-      const refreshed = await scanDirectoryHandle(handle, localFolderWritableRef.current);
-      setLocalFolderSummary(refreshed.summary);
-      setSavedLocalFolderMetaState(refreshed.summary);
-      toast(
-        `Backup incremental local salvo em "${handle.name}/Backups" (${envelope.changesSummary.addedOrUpdated} item(ns) em ${envelope.changedSections.length} seção(ões))!`,
-      );
-      return true;
-    } catch (err: any) {
-      toast(`Erro ao salvar backup incremental local: ${err?.message || 'Falha'}`, true);
-      return false;
-    } finally {
-      pendingLocalFolderWriteRef.current = Math.max(0, pendingLocalFolderWriteRef.current - 1);
-      setIsSyncingLocalFolder(false);
-    }
-  }, [localFolderConnected, toast]);
+    },
+    [applyRestoredDatabaseForScope, ensureDriveToken, recordSyncActivity, toast],
+  );
 
-  const listLocalBackups = useCallback(async (): Promise<LocalBackupFileInfo[]> => {
-    const handle = localFolderHandleRef.current;
-    if (!handle) return [];
-    try {
-      return await listLocalFolderBackups(handle);
-    } catch {
-      return [];
+  const resolveAllDriveConflictsRemoveCloud = useCallback(async () => {
+    const list = [...driveSyncConflictsRef.current];
+    for (const conflict of list) {
+      const ok = await resolveDriveConflictRemoveCloud(conflict.id);
+      if (!ok) break;
     }
+  }, [resolveDriveConflictRemoveCloud]);
+
+  const resolveAllDriveConflictsRestoreLocal = useCallback(async () => {
+    const list = [...driveSyncConflictsRef.current];
+    for (const conflict of list) {
+      const ok = await resolveDriveConflictRestoreLocal(conflict.id);
+      if (!ok) break;
+    }
+  }, [resolveDriveConflictRestoreLocal]);
+
+  const dismissDriveSyncConflicts = useCallback(() => {
+    for (const c of driveSyncConflictsRef.current) {
+      dismissedConflictIdsRef.current.add(c.id);
+    }
+    setDriveSyncConflicts([]);
   }, []);
 
-  const restoreLocalBackup = useCallback(
-    async (backup: LocalBackupFileInfo): Promise<boolean> => {
-      const handle = localFolderHandleRef.current;
-      if (!handle) {
-        toast('Nenhuma pasta local conectada para restaurar.', true);
-        return false;
-      }
-      setIsSyncingLocalFolder(true);
-      try {
-        const snapshot = await readLocalBackupFile(handle, backup.name, backup.subfolder);
-        if (!snapshot || typeof snapshot !== 'object') {
-          throw new Error('Arquivo de backup local inválido ou corrompido.');
-        }
-
-        const isIncremental = isIncrementalBackupPayload(snapshot);
-        let merged: StudyDatabase;
-        if (isIncremental) {
-          const { entries } = await scanDirectoryHandle(handle, localFolderWritableRef.current);
-          const backupRes = await extractLatestBackupFromLocalFiles(entries);
-          let baseDb = backupRes.basePayload
-            ? normalizeAndMergeDatabase(backupRes.basePayload)
-            : dbRef.current;
-          if (backupRes.incrementalDeltas.length > 0) {
-            for (const incDelta of backupRes.incrementalDeltas) {
-              if ((Date.parse(incDelta.updatedAt || '') || 0) <= backup.modifiedMs) {
-                baseDb = applyIncrementalDeltaToDatabase(baseDb, incDelta);
-              }
-            }
-          }
-          merged = applyIncrementalDeltaToDatabase(baseDb, snapshot);
+  const checkDriveTimestampConflictsNow = useCallback(async (): Promise<DeletedDriveConflict[]> => {
+    const activeToken = await ensureDriveToken();
+    if (!activeToken) return [];
+    const scope = activeScopeRef.current || 'offline_guest';
+    setIsSyncingDrive(true);
+    try {
+      const driveFiles = await listAllStudyFilesInDrive(activeToken);
+      const report = runDriveTimestampComparison(dbRef.current, driveFiles, scope, {
+        includeDismissed: true,
+        sourceLabel: 'Verificação manual de timestamps (Local × Drive)',
+      });
+      if (report.deletedConflicts.length === 0) {
+        if (report.localNewer.length > 0 || report.driveNewer.length > 0) {
+          toast(
+            `Comparação concluída: ${report.localNewer.length} arquivo(s) mais recente(s) localmente e ${report.driveNewer.length} no Google Drive. Nenhum arquivo excluído encontrado na nuvem.`,
+          );
         } else {
-          merged = normalizeAndMergeDatabase(snapshot);
+          toast('Timestamps comparados — tudo sincronizado e sem arquivos excluídos divergentes no Drive.');
         }
-
-        const scope = activeScopeRef.current;
-        const restoredIso =
-          snapshot?.updatedAt || snapshot?.exportedAt || new Date().toISOString();
-        applyRestoredDatabaseForScope(scope, merged, restoredIso);
-        const restoredHash = computeDatabaseContentHash(merged);
-        lastLocalBackupDbRef.current = merged;
-        lastLocalBackupHashRef.current = restoredHash;
-        lastLocalBackupIsoRef.current = restoredIso;
-        lastLocalAutoBackupAtRef.current = Date.now();
-        setLastLocalIncrementalBackupAt(restoredIso);
-        setLastLocalFolderSyncAt(new Date().toISOString());
-
-        toast(
-          isIncremental
-            ? `Alterações incrementais de "${backup.name}" mescladas sem apagar os demais dados!`
-            : `Backup local "${backup.name}" restaurado com sucesso!`,
-        );
-        return true;
-      } catch (err: any) {
-        toast(`Falha ao restaurar backup local: ${err?.message || 'Erro'}`, true);
-        return false;
-      } finally {
-        setIsSyncingLocalFolder(false);
       }
-    },
-    [applyRestoredDatabaseForScope, toast],
-  );
-
-  const deleteLocalBackup = useCallback(
-    async (backup: LocalBackupFileInfo): Promise<boolean> => {
-      const handle = localFolderHandleRef.current;
-      if (!handle || !localFolderWritableRef.current) {
-        toast('Pasta local em modo somente leitura ou desconectada.', true);
-        return false;
-      }
-      const removed = await deleteLocalBackupFile(handle, backup.name, backup.subfolder);
-      if (removed) {
-        const refreshed = await scanDirectoryHandle(handle, localFolderWritableRef.current).catch(
-          () => null,
-        );
-        if (refreshed) {
-          setLocalFolderSummary(refreshed.summary);
-          setSavedLocalFolderMetaState(refreshed.summary);
-        }
-        toast(`Backup local "${backup.name}" excluído.`);
-        return true;
-      }
-      toast(`Não foi possível excluir "${backup.name}".`, true);
-      return false;
-    },
-    [toast],
-  );
+      return report.deletedConflicts;
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+      toast(`Erro ao comparar datas com o Google Drive: ${msg || 'Falha'}`, true);
+      return [];
+    } finally {
+      setIsSyncingDrive(false);
+    }
+  }, [ensureDriveToken, runDriveTimestampComparison, toast]);
 
   const saveCloudBackup = useCallback(async (): Promise<boolean> => {
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
@@ -8398,18 +8820,37 @@ function isEmailAuthorized(email?: string | null): boolean {
       if (updatedMeta.lastCacheVerifiedAt) setLastCacheVerifiedAt(updatedMeta.lastCacheVerifiedAt);
       pendingCloudSyncRef.current = false;
       setHasPendingCloudChanges(false);
+      recordSyncActivity({
+        category: 'drive-backup',
+        operation: 'Backup incremental manual no Google Drive',
+        status: 'success',
+        message: `Backup salvo no Drive (${envelope.changesSummary.addedOrUpdated} item(ns) alterado(s) em ${envelope.changedSections.length} seção(ões)).`,
+        affectedFiles: [
+          ...(savedDatedFile ? [{ name: savedDatedFile.name, action: 'uploaded' as const, driveFileId: savedDatedFile.id }] : []),
+          ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
+        ],
+        stats: { uploaded: (savedDatedFile ? 1 : 0) + (savedSyncFile ? 1 : 0) },
+      });
       toast(
         `Backup salvo no Drive (${envelope.changesSummary.addedOrUpdated} item(ns) alterado(s) em ${envelope.changedSections.length} seção(ões))!`,
       );
       return true;
     } catch (err: any) {
-      if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+      const msg = String(err?.message || '');
+      if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+      recordSyncActivity({
+        category: 'drive-backup',
+        operation: 'Falha no backup manual do Google Drive',
+        status: 'error',
+        errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+        message: msg || 'Falha ao enviar backup para o Google Drive.',
+      });
       toast(`Erro ao salvar backup no Drive: ${err?.message || 'Falha no upload'}`, true);
       return false;
     } finally {
       setIsSyncingDrive(false);
     }
-  }, [ensureDriveToken, googleUser?.email, toast]);
+  }, [ensureDriveToken, googleUser?.email, recordSyncActivity, toast]);
 
   const listCloudBackups = useCallback(async (): Promise<DriveFileInfo[]> => {
     const activeToken = await getAccessToken();
@@ -8476,7 +8917,13 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
 
         const scope = activeScopeRef.current;
-        const { updatedDb, filesRestored, orphansImported } = await restoreFilesAndOrphansFromDriveList(
+        const {
+          updatedDb,
+          filesRestored,
+          orphansImported,
+          skippedTombstonesCount,
+          fileEvents,
+        } = await restoreFilesAndOrphansFromDriveList(
           merged,
           driveFiles,
           activeToken,
@@ -8500,6 +8947,20 @@ function isEmailAuthorized(email?: string | null): boolean {
         syncedScopeOnceRef.current = scope;
 
         const totalFiles = filesRestored + orphansImported;
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: isIncremental
+            ? 'Aplicação de backup incremental do Drive'
+            : 'Restauração de backup específico do Drive',
+          status: 'success',
+          message: `Snapshot aplicado (${filesRestored} arquivo(s) baixado(s), ${orphansImported} órfão(s) importado(s), ${skippedTombstonesCount} ignorado(s) por exclusão).`,
+          affectedFiles: fileEvents,
+          stats: {
+            restored: filesRestored,
+            imported: orphansImported,
+            skippedTombstones: skippedTombstonesCount,
+          },
+        });
         toast(
           isIncremental
             ? totalFiles > 0
@@ -8511,7 +8972,15 @@ function isEmailAuthorized(email?: string | null): boolean {
         );
         return true;
       } catch (err: any) {
-        if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Falha ao restaurar backup específico do Drive',
+          status: 'error',
+          errorCode: msg.includes('TOKEN_EXPIRED') ? 'oauth/drive-token-expired' : undefined,
+          message: msg || 'Erro ao restaurar backup.',
+        });
         toast(`Falha ao restaurar backup da nuvem: ${err?.message || 'Erro'}`, true);
         return false;
       } finally {
@@ -8519,7 +8988,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         setIsSyncingDrive(false);
       }
     },
-    [applyRestoredDatabaseForScope, ensureDriveToken, toast],
+    [applyRestoredDatabaseForScope, ensureDriveToken, recordSyncActivity, toast],
   );
 
   const deleteCloudBackup = useCallback(
@@ -9603,7 +10072,7 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const deleteSubmittedSimulation = useCallback(
     async (simulationId: string) => {
-      const targetSim = db.submittedSimulations.find((s) => s.id === simulationId);
+      const targetSim = dbRef.current.submittedSimulations.find((s) => s.id === simulationId);
       const ok = await requestConfirm({
         title: 'Excluir simulado enviado',
         description:
@@ -9613,35 +10082,18 @@ function isEmailAuthorized(email?: string | null): boolean {
       });
       if (!ok) return;
 
-      const removedAttempts = db.completedSimulations.filter((c) => c.prova_id === simulationId).length;
-      if (targetSim?.arquivo && localFolderHandleRef.current && localFolderWritableRef.current) {
-        const stillReferencedInProofs = db.proofFiles.some(
-          (p) => normalizeFileLookup(p.name) === normalizeFileLookup(targetSim.arquivo),
-        );
-        await deleteFileFromLocalDirectory(localFolderHandleRef.current, 'Questões', targetSim.arquivo);
-        if (!stillReferencedInProofs) {
-          await deleteFileFromLocalDirectory(
-            localFolderHandleRef.current,
-            'Provas e Gabaritos',
-            targetSim.arquivo,
-          );
-          await deleteFileFromLocalDirectory(
-            localFolderHandleRef.current,
-            'Provas e Gabaritos',
+      const removedAttempts = dbRef.current.completedSimulations.filter(
+        (c) => c.prova_id === simulationId,
+      ).length;
+      if (targetSim?.arquivo) {
+        deleteOrQueueDriveFiles({
+          names: [
             `PROVA - ${targetSim.arquivo}`,
-          );
-          await deleteFileFromLocalDirectory(
-            localFolderHandleRef.current,
-            'Provas e Gabaritos',
+            targetSim.arquivo,
             `${targetSim.arquivo}.gabarito.txt`,
-          );
-          await deleteFileFromLocalDirectory(
-            localFolderHandleRef.current,
-            'Provas e Gabaritos',
-            `GABARITO - ${targetSim.arquivo}`,
-          );
-        }
-        setLastLocalFolderSyncAt(new Date().toISOString());
+          ],
+          subfolderHints: ['Provas e Gabaritos', 'Questões', 'Simulados'],
+        });
       }
       setDb((prev) => ({
         ...prev,
@@ -9650,7 +10102,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       }));
       toast(`Simulado removido. ${removedAttempts} tentativa(s) e estatísticas excluídas.`);
     },
-    [db.completedSimulations, db.proofFiles, db.submittedSimulations, requestConfirm, toast],
+    [deleteOrQueueDriveFiles, requestConfirm, toast],
   );
 
   // Annotations (Error Notebook)
@@ -10150,33 +10602,6 @@ function isEmailAuthorized(email?: string | null): boolean {
           }
         }
 
-        // 2b. Write into connected Local Folder ('Datas e Locais' & 'Editais') if writable
-        if (localFolderHandleRef.current && localFolderWritableRef.current) {
-          await writeFileToLocalDirectory(
-            localFolderHandleRef.current,
-            'Datas e Locais',
-            masterFileName,
-            masterTxt,
-          );
-          for (const c of targetContests) {
-            await writeFileToLocalDirectory(
-              localFolderHandleRef.current,
-              'Datas e Locais',
-              buildContestTxtFileName(c),
-              serializeContestRegistrationTxt(c),
-            );
-            if ((c.edital_pontos?.length || 0) > 0) {
-              await writeFileToLocalDirectory(
-                localFolderHandleRef.current,
-                'Editais',
-                buildEditalTxtFileName(c),
-                serializeContestEditalTxt(c),
-              );
-            }
-          }
-          setLastLocalFolderSyncAt(new Date().toISOString());
-        }
-
         // 3. Upsert into Google Drive folders ('Datas e Locais' & 'Editais') if connected
         const token = driveConnected && driveTokenReady ? await getAccessToken() : null;
         if (token) {
@@ -10221,8 +10646,8 @@ function isEmailAuthorized(email?: string | null): boolean {
         if (!options?.silent) {
           toast(
             token
-              ? 'Arquivos .txt salvos nas pastas "Datas e Locais" e "Editais" (local + Google Drive).'
-              : 'Arquivos .txt de Datas & Locais e Editais salvos na pasta local.',
+              ? 'Arquivos .txt salvos nas pastas "Datas e Locais" e "Editais" do Google Drive.'
+              : 'Arquivos .txt de Datas & Locais e Editais salvos localmente no navegador.',
           );
         }
       } catch (err: any) {
@@ -10378,19 +10803,24 @@ function isEmailAuthorized(email?: string | null): boolean {
   const deleteContest = useCallback(
     (id: string) => {
       const target = dbRef.current.contests.find((c) => c.id === id);
-      const remainingCount = dbRef.current.contests.filter((c) => c.id !== id).length;
-      if (target && localFolderHandleRef.current && localFolderWritableRef.current) {
-        const handle = localFolderHandleRef.current;
-        void deleteFileFromLocalDirectory(handle, 'Datas e Locais', buildContestTxtFileName(target));
-        void deleteFileFromLocalDirectory(handle, 'Editais', buildEditalTxtFileName(target));
-        if (remainingCount === 0) {
-          void deleteFileFromLocalDirectory(
-            handle,
-            'Datas e Locais',
-            'DATAS E LOCAIS - Controle Geral de Inscricoes Boletos e Locais.txt',
-          );
-        }
-        setLastLocalFolderSyncAt(new Date().toISOString());
+      if (contestTxtSyncTimerRef.current) {
+        window.clearTimeout(contestTxtSyncTimerRef.current);
+        contestTxtSyncTimerRef.current = null;
+      }
+      void deleteFileBlob(`contest_txt_${id}`);
+      void deleteFileBlob(`edital_txt_${id}`);
+      if (target) {
+        const namesToDelete = [
+          buildContestTxtFileName(target),
+          buildEditalTxtFileName(target),
+          ...(target.edital_arquivo
+            ? [`EDITAL - ${target.edital_arquivo}`, target.edital_arquivo]
+            : []),
+        ].filter(Boolean);
+        deleteOrQueueDriveFiles({
+          names: namesToDelete,
+          subfolderHints: ['Datas e Locais', 'Editais'],
+        });
       }
       setDb((prev) => {
         const next: StudyDatabase = {
@@ -10405,7 +10835,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       scheduleAutoContestTxtSync();
       toast('Concurso excluído.');
     },
-    [scheduleAutoContestTxtSync, toast],
+    [deleteOrQueueDriveFiles, scheduleAutoContestTxtSync, toast],
   );
 
   const openContestEdital = useCallback((contestId: string) => {
@@ -10863,16 +11293,6 @@ function isEmailAuthorized(email?: string | null): boolean {
         return next;
       });
 
-      if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        await writeFileToLocalDirectory(
-          localFolderHandleRef.current,
-          'Cronogramas',
-          meta.fileName,
-          txtContent,
-        );
-        setLastLocalFolderSyncAt(new Date().toISOString());
-      }
-
       const token = driveConnected && driveTokenReady ? await getAccessToken() : null;
       if (token) {
         try {
@@ -10888,7 +11308,7 @@ function isEmailAuthorized(email?: string | null): boolean {
             setDriveTokenReady(false);
           }
           if (!options?.silent) {
-            toast(`Cronograma salvo localmente; aviso no Drive: ${err?.message || 'Falha'}`, true);
+            toast(`Cronograma salvo no navegador; aviso no Drive: ${err?.message || 'Falha'}`, true);
             return;
           }
         }
@@ -10897,8 +11317,8 @@ function isEmailAuthorized(email?: string | null): boolean {
       if (!options?.silent) {
         toast(
           token
-            ? `Arquivo "${meta.fileName}" salvo na pasta Cronogramas (local + Google Drive)!`
-            : `Arquivo "${meta.fileName}" salvo na pasta Cronogramas local!`,
+            ? `Arquivo "${meta.fileName}" salvo na pasta Cronogramas do Google Drive!`
+            : `Arquivo "${meta.fileName}" salvo no navegador!`,
         );
       }
     },
@@ -10964,13 +11384,16 @@ function isEmailAuthorized(email?: string | null): boolean {
     (weekKey: string) => {
       const cleanKey = weekKey.trim().toUpperCase();
       const target = dbRef.current.weeklySchedules?.[cleanKey];
-      if (target?.fileName && localFolderHandleRef.current && localFolderWritableRef.current) {
-        void deleteFileFromLocalDirectory(
-          localFolderHandleRef.current,
-          'Cronogramas',
-          target.fileName,
-        );
-        setLastLocalFolderSyncAt(new Date().toISOString());
+      if (scheduleTxtSyncTimerRef.current) {
+        window.clearTimeout(scheduleTxtSyncTimerRef.current);
+        scheduleTxtSyncTimerRef.current = null;
+      }
+      const fileName = target?.fileName || buildScheduleWeekMetadata(cleanKey).fileName;
+      if (fileName) {
+        deleteOrQueueDriveFiles({
+          names: [fileName],
+          subfolderHints: ['Cronogramas'],
+        });
       }
       setDb((prev) => {
         const nextMap = { ...(prev.weeklySchedules || {}) };
@@ -10984,9 +11407,9 @@ function isEmailAuthorized(email?: string | null): boolean {
         return next;
       });
       void deleteFileBlob(`schedule_week_${cleanKey}`);
-      toast('Arquivo semanal removido da lista local.');
+      toast('Arquivo semanal removido da lista.');
     },
-    [toast],
+    [deleteOrQueueDriveFiles, toast],
   );
 
   const saveScheduleDay = useCallback(
@@ -11527,12 +11950,14 @@ function isEmailAuthorized(email?: string | null): boolean {
       const driveSubfolders = folderLabel ? ['Lei Seca', folderLabel] : 'Lei Seca';
       await autoSyncFileToDrive(file, file.name, driveSubfolders);
 
+      const nowIso = new Date().toISOString();
       const fileEntry = {
         id: uid(12),
         name: file.name,
         size: file.size,
         blobKey,
         createdAt: localDateIso(),
+        updatedAt: nowIso,
       };
 
       setDb((prev) => {
@@ -11721,7 +12146,7 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const deleteLawFolder = useCallback(
     async (folder: string): Promise<number> => {
-      const target = db.laws[folder];
+      const target = dbRef.current.laws[folder];
       if (!target) return 0;
 
       if (target.pdfs && target.pdfs.length) {
@@ -11730,18 +12155,14 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
       }
 
-      if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-        if (folderLabel) {
-          await deleteDirectoryFromLocalDirectory(localFolderHandleRef.current, ['Lei Seca', folderLabel]);
-        }
-        await deleteDirectoryFromLocalDirectory(localFolderHandleRef.current, ['Lei Seca', folder]);
-        for (const p of target.pdfs || []) {
-          await deleteFileFromLocalDirectory(localFolderHandleRef.current, 'Lei Seca', p.name);
-          await deleteFileFromLocalDirectory(localFolderHandleRef.current, 'Lei Seca', `LEI - ${p.name}`);
-        }
-        setLastLocalFolderSyncAt(new Date().toISOString());
-      }
+      deleteOrQueueDriveFiles({
+        fileIds: (target.pdfs || [])
+          .map((p) => p.blobKey)
+          .filter((k) => Boolean(k && k.startsWith('drive_'))),
+        names: (target.pdfs || []).flatMap((p) => [`LEI - ${p.name}`, p.name]).filter(Boolean),
+        subfolderHints: ['Lei Seca', visibleName(folder)].filter(Boolean),
+        folderNames: [folder, visibleName(folder)],
+      });
 
       const itemCount = (target.items || []).length;
 
@@ -11755,18 +12176,26 @@ function isEmailAuthorized(email?: string | null): boolean {
         const nextReadDates = { ...(prev.lawReadDates || {}) };
         delete nextReadDates[folder];
 
+        const nextReadLawItems = { ...(prev.readLawItems || {}) };
+        delete nextReadLawItems[folder];
+
+        const nextLastReadPos = { ...(prev.lawLastReadPosition || {}) };
+        delete nextLastReadPos[folder];
+
         return {
           ...prev,
           laws: nextLaws,
           lawHighlights: nextHighlights,
           lawReadDates: nextReadDates,
+          readLawItems: nextReadLawItems,
+          lawLastReadPosition: nextLastReadPos,
         };
       });
 
       toast(`Pasta de legislação "${visibleName(folder)}" removida.`);
       return itemCount;
     },
-    [db.laws, toast],
+    [deleteOrQueueDriveFiles, toast],
   );
 
   const addManualLawItem = useCallback(
@@ -12385,6 +12814,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         size: file.size,
         blobKey,
         createdAt: localDateIso(),
+        updatedAt: new Date().toISOString(),
       });
     }
 
@@ -12506,27 +12936,15 @@ function isEmailAuthorized(email?: string | null): boolean {
   const deletePersonalPdf = useCallback(
     async (folder: string, fileId: string) => {
       if (isProtectedPdfFolder(folder)) return;
-      const target = (db.pdfFolders[folder] || []).find((f) => f.id === fileId);
+      const target = (dbRef.current.pdfFolders[folder] || []).find((f) => f.id === fileId);
       if (target) {
         await deleteFileBlob(target.blobKey);
         await deleteFileBlob(`${target.blobKey}::clean`);
-        if (localFolderHandleRef.current && localFolderWritableRef.current) {
-          const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-          if (folderLabel) {
-            await deleteFileFromLocalDirectory(
-              localFolderHandleRef.current,
-              ['PDFs Pessoais', folderLabel],
-              target.name,
-            );
-          }
-          await deleteFileFromLocalDirectory(
-            localFolderHandleRef.current,
-            ['PDFs Pessoais', folder],
-            target.name,
-          );
-          await deleteFileFromLocalDirectory(localFolderHandleRef.current, 'PDFs Pessoais', target.name);
-          setLastLocalFolderSyncAt(new Date().toISOString());
-        }
+        deleteOrQueueDriveFiles({
+          fileIds: target.blobKey?.startsWith('drive_') ? [target.blobKey] : undefined,
+          names: [target.name],
+          subfolderHints: ['PDFs Pessoais', visibleName(folder)].filter(Boolean),
+        });
       }
       setDb((prev) => {
         const nextAnnotations = { ...(prev.pdfAnnotations || {}) };
@@ -12542,7 +12960,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       });
       toast('PDF removido.');
     },
-    [db.pdfFolders, isProtectedPdfFolder, toast],
+    [deleteOrQueueDriveFiles, isProtectedPdfFolder, toast],
   );
 
   const deletePdfFolder = useCallback(
@@ -12551,28 +12969,17 @@ function isEmailAuthorized(email?: string | null): boolean {
         toast('Pasta de backup protegida — não pode ser removida.', true);
         return 0;
       }
-      const files = db.pdfFolders[folder] || [];
+      const files = dbRef.current.pdfFolders[folder] || [];
       for (const f of files) {
         await deleteFileBlob(f.blobKey);
         await deleteFileBlob(`${f.blobKey}::clean`);
       }
-      if (localFolderHandleRef.current && localFolderWritableRef.current) {
-        const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-        if (folderLabel) {
-          await deleteDirectoryFromLocalDirectory(localFolderHandleRef.current, [
-            'PDFs Pessoais',
-            folderLabel,
-          ]);
-        }
-        await deleteDirectoryFromLocalDirectory(localFolderHandleRef.current, [
-          'PDFs Pessoais',
-          folder,
-        ]);
-        for (const f of files) {
-          await deleteFileFromLocalDirectory(localFolderHandleRef.current, 'PDFs Pessoais', f.name);
-        }
-        setLastLocalFolderSyncAt(new Date().toISOString());
-      }
+      deleteOrQueueDriveFiles({
+        fileIds: files.map((f) => f.blobKey).filter((k) => Boolean(k && k.startsWith('drive_'))),
+        names: files.map((f) => f.name).filter(Boolean),
+        subfolderHints: ['PDFs Pessoais', visibleName(folder)].filter(Boolean),
+        folderNames: [folder, visibleName(folder)],
+      });
       setDb((prev) => {
         const next = { ...prev.pdfFolders };
         delete next[folder];
@@ -12584,7 +12991,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       });
       return files.length;
     },
-    [db.pdfFolders, isProtectedPdfFolder, toast],
+    [deleteOrQueueDriveFiles, isProtectedPdfFolder, toast],
   );
 
   // Summaries
@@ -12618,6 +13025,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         mimeType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/png'),
         blobKey,
         createdAt: localDateIso(),
+        updatedAt: new Date().toISOString(),
       };
       setDb((prev) => ({
         ...prev,
@@ -12633,24 +13041,14 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const deleteSummaryFile = useCallback(
     async (folder: string, fileId: string) => {
-      const target = (db.summaryFolders[folder] || []).find((f) => f.id === fileId);
+      const target = (dbRef.current.summaryFolders[folder] || []).find((f) => f.id === fileId);
       if (target) {
         await deleteFileBlob(target.blobKey);
-        if (localFolderHandleRef.current && localFolderWritableRef.current) {
-          const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-          const dirs: Array<string | string[]> = folderLabel
-            ? [['Resumos e Mapas', folderLabel], ['Resumos e Mapas', folder], 'Resumos e Mapas']
-            : ['Resumos e Mapas'];
-          for (const d of dirs) {
-            await deleteFileFromLocalDirectory(localFolderHandleRef.current, d, target.name);
-            await deleteFileFromLocalDirectory(
-              localFolderHandleRef.current,
-              d,
-              `RESUMO - ${target.name}`,
-            );
-          }
-          setLastLocalFolderSyncAt(new Date().toISOString());
-        }
+        deleteOrQueueDriveFiles({
+          fileIds: target.blobKey?.startsWith('drive_') ? [target.blobKey] : undefined,
+          names: [`RESUMO - ${target.name}`, target.name],
+          subfolderHints: ['Resumos e Mapas', visibleName(folder)].filter(Boolean),
+        });
       }
       setDb((prev) => ({
         ...prev,
@@ -12661,7 +13059,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       }));
       toast('Arquivo excluído.');
     },
-    [db.summaryFolders, toast],
+    [deleteOrQueueDriveFiles, toast],
   );
 
   // Proofs
@@ -12731,6 +13129,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         observacoes: '',
         correcoes: [],
         createdAt: localDateIso(),
+        updatedAt: new Date().toISOString(),
       };
       setDb((prev) => {
         const nextSubmitted = [...prev.submittedSimulations];
@@ -12859,6 +13258,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         observacoes: observacoes.trim(),
         correcoes: [],
         createdAt: localDateIso(),
+        updatedAt: new Date().toISOString(),
       };
       setDb((prev) => {
         const nextSubmitted = [...prev.submittedSimulations];
@@ -12906,23 +13306,12 @@ function isEmailAuthorized(email?: string | null): boolean {
           ? visibleName(target.bank).replace(/[\\/]+/g, ' - ').trim()
           : '';
       const proofSubfolder: string | string[] = bankSeg ? ['Provas e Gabaritos', bankSeg] : 'Provas e Gabaritos';
-      if (
-        localFolderHandleRef.current &&
-        localFolderWritableRef.current &&
-        normalizeFileLookup(target.name) !== normalizeFileLookup(replacement.name)
-      ) {
-        await deleteFileFromLocalDirectory(localFolderHandleRef.current, proofSubfolder, target.name);
-        await deleteFileFromLocalDirectory(
-          localFolderHandleRef.current,
-          proofSubfolder,
-          `PROVA - ${target.name}`,
-        );
-      }
       await autoSyncFileToDrive(replacement, `PROVA - ${replacement.name}`, proofSubfolder);
+      const nowIso = new Date().toISOString();
       setDb((prev) => ({
         ...prev,
         proofFiles: prev.proofFiles.map((p) =>
-          p.id === proofId ? { ...p, name: replacement.name, size: replacement.size } : p,
+          p.id === proofId ? { ...p, name: replacement.name, size: replacement.size, updatedAt: nowIso } : p,
         ),
       }));
       toast(`Arquivo "${visibleName(target.name)}" substituído por "${visibleName(replacement.name)}".`);
@@ -12932,32 +13321,25 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const deleteProofFile = useCallback(
     async (proofId: string) => {
-      const target = db.proofFiles.find((p) => p.id === proofId);
+      const target = dbRef.current.proofFiles.find((p) => p.id === proofId);
       if (target) {
         await deleteFileBlob(target.blobKey);
-        if (localFolderHandleRef.current && localFolderWritableRef.current) {
-          const bankSeg =
-            target.bank && target.bank.trim() && target.bank !== 'Geral'
-              ? visibleName(target.bank).replace(/[\\/]+/g, ' - ').trim()
-              : '';
-          const dirs: Array<string | string[]> = bankSeg
-            ? [['Provas e Gabaritos', bankSeg], 'Provas e Gabaritos']
-            : ['Provas e Gabaritos'];
-          const namesToDelete = [
-            target.name,
+        const bankSeg =
+          target.bank && target.bank.trim() && target.bank !== 'Geral'
+            ? visibleName(target.bank).replace(/[\\/]+/g, ' - ').trim()
+            : '';
+        deleteOrQueueDriveFiles({
+          fileIds: target.blobKey?.startsWith('drive_') ? [target.blobKey] : undefined,
+          names: [
             `PROVA - ${target.name}`,
-            ...(target.gabarito_arquivo
-              ? [target.gabarito_arquivo, `GABARITO - ${target.gabarito_arquivo}`]
-              : []),
+            target.name,
             `${target.name}.gabarito.txt`,
-          ];
-          for (const d of dirs) {
-            for (const fname of namesToDelete) {
-              await deleteFileFromLocalDirectory(localFolderHandleRef.current, d, fname);
-            }
-          }
-          setLastLocalFolderSyncAt(new Date().toISOString());
-        }
+            ...(target.gabarito_arquivo
+              ? [`GABARITO - ${target.gabarito_arquivo}`, target.gabarito_arquivo]
+              : []),
+          ].filter(Boolean),
+          subfolderHints: bankSeg ? ['Provas e Gabaritos', bankSeg] : ['Provas e Gabaritos'],
+        });
       }
       setDb((prev) => ({
         ...prev,
@@ -12965,7 +13347,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       }));
       toast('Prova excluída.');
     },
-    [db.proofFiles, toast],
+    [deleteOrQueueDriveFiles, toast],
   );
 
   const updateProofObservations = useCallback(
@@ -13062,11 +13444,13 @@ function isEmailAuthorized(email?: string | null): boolean {
       const blobKey = `essay-${uid(16)}`;
       await saveFileBlob(blobKey, file);
       await autoSyncFileToDrive(file, `DISCURSIVA - ${file.name}`, 'Discursivas');
+      const nowIso = new Date().toISOString();
       const record: EssayRecord = {
         id: uid(16),
         titulo: titulo.trim(),
         data: localDateTimeBrazilian(),
-        created_at: new Date().toISOString().slice(0, 19),
+        created_at: nowIso.slice(0, 19),
+        updatedAt: nowIso,
         original_arquivo: file.name,
         original_blobKey: blobKey,
         original_mime: file.type || 'application/octet-stream',
@@ -13110,13 +13494,15 @@ function isEmailAuthorized(email?: string | null): boolean {
         corrigido_mime = correctedFile.type || 'application/octet-stream';
       }
 
+      const nowIso = new Date().toISOString();
       const updated: EssayRecord = {
         ...target,
         feedback: trimmedFeedback,
         corrigido_arquivo,
         corrigido_blobKey,
         corrigido_mime,
-        corrigida_em: new Date().toISOString().slice(0, 19),
+        corrigida_em: nowIso.slice(0, 19),
+        updatedAt: nowIso,
       };
       setDb((prev) => ({
         ...prev,
@@ -13345,6 +13731,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         size: file.size,
         blobKey,
         createdAt: localDateIso(),
+        updatedAt: new Date().toISOString(),
       };
       setDb((prev) => {
         const cur = prev.laws[folder];
@@ -13566,6 +13953,20 @@ function isEmailAuthorized(email?: string | null): boolean {
       danger: true,
     });
     if (!ok) return;
+    if (contestTxtSyncTimerRef.current) {
+      window.clearTimeout(contestTxtSyncTimerRef.current);
+      contestTxtSyncTimerRef.current = null;
+    }
+    if (scheduleTxtSyncTimerRef.current) {
+      window.clearTimeout(scheduleTxtSyncTimerRef.current);
+      scheduleTxtSyncTimerRef.current = null;
+    }
+    const scope = activeScopeRef.current || 'offline_guest';
+    clearDeletedTombstones(scope);
+    clearDeletedTombstones('offline_guest');
+    clearPendingDriveDeletes(scope);
+    clearPendingDriveDeletes('offline_guest');
+    lastDeletionMsRef.current = 0;
     await clearAllFileBlobs();
     await ensureSeededBlobs();
     setDb(createInitialDatabase());
@@ -13827,24 +14228,16 @@ function isEmailAuthorized(email?: string | null): boolean {
         restoreCloudBackup,
         deleteCloudBackup,
         pruneOldCloudBackups,
-        localFolderConnected,
-        localFolderWritable,
-        localFolderName,
-        localFolderSummary,
-        savedLocalFolderMeta,
-        hasSavedLocalFolderHandle,
-        lastLocalFolderSyncAt,
-        lastLocalIncrementalBackupAt,
-        isSyncingLocalFolder,
-        connectLocalStudyFolder,
-        reconnectLocalStudyFolder,
-        importLocalStudyFolderFromFiles,
-        syncNowWithLocalStudyFolder,
-        disconnectLocalStudyFolder,
-        saveLocalIncrementalBackupNow,
-        listLocalBackups,
-        restoreLocalBackup,
-        deleteLocalBackup,
+        syncActivityLogs,
+        clearSyncActivityLogs,
+        driveSyncConflicts,
+        resolvingDriveConflictId,
+        resolveDriveConflictRemoveCloud,
+        resolveDriveConflictRestoreLocal,
+        resolveAllDriveConflictsRemoveCloud,
+        resolveAllDriveConflictsRestoreLocal,
+        dismissDriveSyncConflicts,
+        checkDriveTimestampConflictsNow,
         examFocusMode,
         setExamFocusMode,
       }}

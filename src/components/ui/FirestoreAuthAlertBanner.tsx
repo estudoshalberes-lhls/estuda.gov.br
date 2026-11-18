@@ -8,6 +8,7 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
     validateFirestoreConnectionNow,
     dismissFirestoreConnectionAlert,
     connectGoogleDrive,
+    setActivePage,
   } = useStudy();
   const [checking, setChecking] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -108,7 +109,15 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 transition-colors whitespace-nowrap cursor-pointer"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${reconnecting ? 'animate-spin' : ''}`} aria-hidden="true" />
-            <span>{reconnecting ? 'Reconectando…' : 'Reconectar Conta Google'}</span>
+            <span>{reconnecting ? 'Reconectando…' : 'Reconectar conta Google'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActivePage('Configurações')}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-semibold hover:border-[var(--accent)] transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <span>Configurações OAuth</span>
           </button>
 
           <button

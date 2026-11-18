@@ -3,6 +3,7 @@ import { THEMES } from '../data/seedData';
 import { useStudy } from '../context/StudyContext';
 import { ModuleName } from '../types/study';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
+import { GoogleDriveOAuthPanel } from '../components/settings/GoogleDriveOAuthPanel';
 
 const CONFIGURABLE_MODULES: ReadonlyArray<{
   name: ModuleName;
@@ -72,11 +73,13 @@ export const SettingsPage: React.FC = () => {
     <div>
       <PageHeader
         eyebrow="PREFERÊNCIAS DO PORTAL · CONFIGURAÇÕES"
-        title="Aparência, layout e controles por módulo"
-        description="Personalize o tema institucional, o comportamento da barra lateral e quais painéis de envio ou busca ficam visíveis."
+        title="Conta Google, aparência e controles por módulo"
+        description="Gerencie a conexão OAuth do Google Drive, personalize o tema institucional, a barra lateral e os painéis visíveis."
       />
 
       <div className="grid grid-cols-1 gap-4">
+        <GoogleDriveOAuthPanel />
+
         <Panel title="Tema visual" subtitle="Alterações aplicadas imediatamente em toda a interface.">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">
             {THEMES.map((theme) => {

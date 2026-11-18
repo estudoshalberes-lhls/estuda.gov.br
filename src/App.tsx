@@ -7,6 +7,7 @@ import { TopModuleNav } from './components/layout/TopModuleNav';
 import { GovFederalBar } from './components/layout/GovFederalBar';
 import { MobileTimerFloat } from './components/layout/MobileTimerFloat';
 import { ConfirmDialog } from './components/ui/ConfirmDialog';
+import { DriveSyncConflictDialog } from './components/backup/DriveSyncConflictDialog';
 import { ToastRegion } from './components/ui/ToastRegion';
 import { BackToTopButton } from './components/ui/BackToTopButton';
 import { OfflineIndicator } from './components/ui/OfflineIndicator';
@@ -200,15 +201,15 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 };
 
 const MainApp: React.FC = () => {
-  const { firebaseConnected, driveConnected, localFolderConnected } = useStudy();
+  const { firebaseConnected, driveConnected } = useStudy();
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [forceLoginScreen, setForceLoginScreen] = useState<boolean>(false);
 
   React.useEffect(() => {
-    if (firebaseConnected || driveConnected || localFolderConnected) {
+    if (firebaseConnected || driveConnected) {
       setForceLoginScreen(false);
     }
-  }, [firebaseConnected, driveConnected, localFolderConnected]);
+  }, [firebaseConnected, driveConnected]);
 
   const handleContinueOffline = () => {
     setOfflineMode(true);
@@ -220,8 +221,7 @@ const MainApp: React.FC = () => {
     setForceLoginScreen(true);
   };
 
-  const shouldShowLogin =
-    forceLoginScreen || (!firebaseConnected && !driveConnected && !localFolderConnected && !offlineMode);
+  const shouldShowLogin = forceLoginScreen || (!firebaseConnected && !driveConnected && !offlineMode);
 
   return (
     <>
@@ -231,6 +231,7 @@ const MainApp: React.FC = () => {
         <AppShell onExitToLogin={handleExitToLogin} />
       )}
       <ConfirmDialog />
+      <DriveSyncConflictDialog />
       <ToastRegion />
       <OfflineIndicator />
     </>

@@ -8,7 +8,6 @@ import {
   Eraser,
   ExternalLink,
   FileText,
-  FolderSync,
   Hand,
   Highlighter,
   Loader2,
@@ -113,8 +112,6 @@ export const PdfAnnotatorViewer: React.FC<PdfAnnotatorViewerProps> = ({
   const {
     db,
     driveConnected,
-    localFolderConnected,
-    syncNowWithLocalStudyFolder,
     recoverFileFromDrive,
     savePdfAnnotations,
     commitAnnotatedPersonalPdf,
@@ -1054,26 +1051,6 @@ export const PdfAnnotatorViewer: React.FC<PdfAnnotatorViewerProps> = ({
         <div className="py-10 text-center text-[13px] text-[var(--muted)] flex flex-col items-center gap-3">
           <span>Conteúdo do PDF não encontrado no cache deste navegador.</span>
           <div className="flex flex-wrap items-center justify-center gap-2">
-            {localFolderConnected && (
-              <button
-                type="button"
-                onClick={async () => {
-                  setRecovering(true);
-                  try {
-                    await syncNowWithLocalStudyFolder();
-                    const blob = await getFileBlob(file.blobKey);
-                    if (blob) await loadPdfDocument(blob);
-                  } finally {
-                    setRecovering(false);
-                  }
-                }}
-                disabled={recovering}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold"
-              >
-                <FolderSync className="w-3.5 h-3.5" />
-                {recovering ? 'Relendo pasta local…' : 'Recarregar da pasta local'}
-              </button>
-            )}
             {driveConnected && (
               <button
                 type="button"

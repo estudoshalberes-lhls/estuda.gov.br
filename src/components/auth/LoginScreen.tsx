@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useState } from 'react';
 import {
   AlertCircle,
   ArrowRight,
@@ -6,14 +6,9 @@ import {
   Check,
   Copy,
   ExternalLink,
-  FolderCheck,
-  FolderOpen,
-  FolderSync,
-  HardDrive,
   Lock,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
-import { CANONICAL_LOCAL_SUBFOLDERS, getLocalCategoryList } from '../../lib/localFolderSync';
 import firebaseConfig from '../../../firebase-applet-config.json';
 import { GovFederalBar } from '../layout/GovFederalBar';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
@@ -43,9 +38,9 @@ const WORKSPACE_PILLARS = [
   },
   {
     index: '04.',
-    title: 'Arquivo em Pasta Local & Nuvem',
+    title: 'Firebase & Google Drive em Nuvem',
     description:
-      'Leia diretamente sua pasta do computador identificando todos os módulos e grave tudo localmente sem burocracia.',
+      'Sincronize todas as tabelas em tempo real no Firebase Firestore e salve seus PDFs e backups no Google Drive.',
   },
 ] as const;
 
@@ -57,81 +52,16 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
     connectGoogleDrive,
     authError,
     toast,
-    localFolderConnected,
-    localFolderWritable,
-    localFolderName,
-    localFolderSummary,
-    savedLocalFolderMeta,
-    hasSavedLocalFolderHandle,
-    isSyncingLocalFolder,
-    lastLocalFolderSyncAt,
-    lastLocalIncrementalBackupAt,
     lastCloudSyncAt,
-    restoreProgress,
-    connectLocalStudyFolder,
-    reconnectLocalStudyFolder,
-    importLocalStudyFolderFromFiles,
   } = useStudy();
 
   const [loading, setLoading] = useState(false);
-  const [localLoading, setLocalLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedHost, setCopiedHost] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
-  const folderInputRef = useRef<HTMLInputElement | null>(null);
 
-  const handleSelectLocalFolder = async () => {
-    setLocalLoading(true);
-    setErrorMessage(null);
-    try {
-      const res = await connectLocalStudyFolder();
-      if (res.needsInputFallback) {
-        folderInputRef.current?.click();
-      } else if (res.ok) {
-        onContinueOffline();
-      }
-    } finally {
-      setLocalLoading(false);
-    }
-  };
-
-  const handleReconnectSavedLocalFolder = async () => {
-    setLocalLoading(true);
-    setErrorMessage(null);
-    try {
-      const ok = await reconnectLocalStudyFolder();
-      if (ok) {
-        onContinueOffline();
-      } else {
-        const pickRes = await connectLocalStudyFolder();
-        if (pickRes.needsInputFallback) {
-          folderInputRef.current?.click();
-        } else if (pickRes.ok) {
-          onContinueOffline();
-        }
-      }
-    } finally {
-      setLocalLoading(false);
-    }
-  };
-
-  const handleFolderInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
-    setLocalLoading(true);
-    setErrorMessage(null);
-    try {
-      const ok = await importLocalStudyFolderFromFiles(files);
-      if (ok) {
-        onContinueOffline();
-      }
-    } finally {
-      setLocalLoading(false);
-      if (folderInputRef.current) {
-        folderInputRef.current.value = '';
-      }
-    }
-  };
+  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
+  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
 
   const handleGoogleLogin = async (forceAccountPicker = false) => {
     setLoading(true);
@@ -162,8 +92,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
         displayedError.toLowerCase().includes('redirect_uri_mismatch')),
   );
   const needsDomainHelp = isUnauthorizedDomainError || isOriginMismatchError;
-  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
-  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
   const copyValue = isUnauthorizedDomainError ? currentHost : currentOrigin;
   const domainConsoleUrl = isUnauthorizedDomainError
     ? `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`
@@ -183,9 +111,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
       toast('Não foi possível copiar automaticamente. Selecione e copie o endereço exibido.', true);
     }
   };
-
-  const activeSummary = localFolderSummary || savedLocalFolderMeta;
-  const isBusyLocal = localLoading || isSyncingLocalFolder;
 
   return (
     <div className="min-h-screen w-full bg-[var(--page)] text-[var(--text)] flex flex-col justify-between">
@@ -220,16 +145,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
         </div>
       </div>
 
-      {/* Input oculto para fallback ou seleção direta de pasta completa com subpastas */}
-      <input
-        ref={folderInputRef}
-        type="file"
-        multiple
-        onChange={handleFolderInputChange}
-        className="hidden"
-        {...({ webkitdirectory: '', directory: '' } as any)}
-      />
-
       <main className="flex-1 w-full max-w-[1180px] mx-auto px-5 py-8 sm:px-8 lg:py-12 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_410px] gap-8 lg:gap-12 items-start">
         {/* Coluna Esquerda: Vitrine Visual Institucional + Pilares do Portal */}
         <section className="flex flex-col gap-6 min-w-0">
@@ -259,7 +174,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   Portal Único do Estudante Federal.
                 </h1>
                 <p className="mt-3 mb-0 text-[14px] leading-relaxed text-[var(--muted)]">
-                  Emita seu comprovante de regularidade no edital, consulte a lei seca sem fila de espera e sincronize seu acervo local de provas e simulados com zero burocracia.
+                  Emita seu comprovante de regularidade no edital, consulte a lei seca sem fila de espera e sincronize seu acervo de provas e simulados na nuvem com zero burocracia.
                 </p>
                 <div className="mt-4 pt-3 border-t border-[var(--line)] text-[11.5px] font-semibold text-[var(--accent)]">
                   Programa Bolsa-Questão &amp; Café Forte · Exercício 2026
@@ -319,7 +234,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   <button
                     type="button"
                     onClick={() => void handleGoogleLogin(true)}
-                    disabled={loading || isBusyLocal}
+                    disabled={loading}
                     className="w-full py-1.5 text-[11.5px] font-semibold text-[var(--accent)] hover:underline bg-transparent border-0 cursor-pointer"
                   >
                     Trocar de conta Google
@@ -329,7 +244,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                 <button
                   type="button"
                   onClick={() => void handleGoogleLogin()}
-                  disabled={loading || isBusyLocal}
+                  disabled={loading}
                   className="w-full min-h-[44px] px-5 py-2.5 rounded-full border border-[var(--line-strong)] bg-white text-[#1f1f1f] hover:border-[var(--accent)] text-[13.5px] font-bold flex items-center justify-center gap-2.5 transition-colors cursor-pointer disabled:opacity-60 shadow-xs"
                 >
                   <svg
@@ -360,116 +275,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               )}
             </div>
 
-            {/* Método Principal: Pasta Local */}
-            <div className="mt-4">
-              <div className="flex items-center gap-2.5 text-[var(--text)]">
-                <HardDrive className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
-                <strong className="text-[13.5px] font-bold">
-                  Pasta Local do Computador
-                </strong>
-                <span className="text-[11px] font-semibold text-[var(--good)]">
-                  · Gravação direta
-                </span>
-              </div>
-              <p className="mt-1.5 mb-3 text-[12px] leading-relaxed text-[var(--muted)]">
-                Identifica automaticamente todas as subpastas e arquivos usados pelo portal e salva suas alterações diretamente no computador e no navegador.
-              </p>
 
-              {/* Pasta local já vinculada / reconhecida */}
-              {(hasSavedLocalFolderHandle || activeSummary) && (
-                <div className="mb-3 rounded border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3 flex flex-col gap-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <FolderCheck className="w-4 h-4 text-[var(--good)] shrink-0" />
-                      <span className="text-[12px] font-bold text-[var(--text)] truncate">
-                        Pasta vinculada: {localFolderName || activeSummary?.rootFolderName || 'Pasta de Estudos'}
-                      </span>
-                    </div>
-                    {activeSummary && (
-                      <span className="font-mono-num text-[11px] font-semibold text-[var(--accent)] shrink-0">
-                        {activeSummary.totalFiles} arquivo(s) · {activeSummary.totalFolders} pasta(s)
-                      </span>
-                    )}
-                  </div>
-
-                  {activeSummary && (
-                    <div className="text-[11px] text-[var(--muted)] leading-relaxed">
-                      {getLocalCategoryList(activeSummary)
-                        .filter((cat) => cat.fileCount > 0)
-                        .map((cat, idx) => (
-                          <React.Fragment key={cat.key}>
-                            {idx > 0 && <span aria-hidden="true"> · </span>}
-                            <span>
-                              {cat.label}: <strong className="font-mono-num text-[var(--text)]">{cat.fileCount}</strong>
-                            </span>
-                          </React.Fragment>
-                        ))}
-                    </div>
-                  )}
-
-                  {localFolderConnected ? (
-                    <button
-                      type="button"
-                      onClick={onContinueOffline}
-                      className="w-full min-h-[40px] px-5 py-2 rounded-full border border-[var(--good)] bg-[var(--good)] text-white text-[13px] font-bold flex items-center justify-center gap-2 hover:opacity-95 transition-opacity cursor-pointer"
-                    >
-                      <span>Entrar com a pasta &ldquo;{localFolderName}&rdquo;</span>
-                      <ArrowRight className="w-4 h-4 shrink-0" />
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => void handleReconnectSavedLocalFolder()}
-                      disabled={isBusyLocal}
-                      className="w-full min-h-[40px] px-5 py-2 rounded-full border border-[var(--accent)] bg-[var(--accent)] text-white text-[13px] font-bold flex items-center justify-center gap-2 hover:bg-[var(--accent-hover)] transition-colors cursor-pointer disabled:opacity-60"
-                    >
-                      <FolderSync className={`w-4 h-4 shrink-0 ${isBusyLocal ? 'animate-spin' : ''}`} />
-                      <span>
-                        {isBusyLocal
-                          ? 'Lendo pasta local…'
-                          : `Abrir pasta "${activeSummary?.rootFolderName || 'Pasta Local'}"`}
-                      </span>
-                    </button>
-                  )}
-                </div>
-              )}
-
-              {/* Botão Primário estilo "Continuar" gov.br */}
-              <button
-                type="button"
-                onClick={() => void handleSelectLocalFolder()}
-                disabled={isBusyLocal}
-                className="w-full min-h-[42px] px-6 py-2 rounded-full border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[13.5px] font-bold flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait whitespace-nowrap shadow-xs"
-              >
-                <FolderOpen className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span>
-                  {isBusyLocal
-                    ? 'Identificando arquivos…'
-                    : hasSavedLocalFolderHandle || activeSummary
-                    ? 'Selecionar outra Pasta'
-                    : 'Entrar com Pasta Local'}
-                </span>
-              </button>
-
-              {restoreProgress && (
-                <div className="mt-3 rounded border border-[var(--accent)]/40 bg-[var(--panel-soft)] p-2.5">
-                  <div className="flex items-center justify-between gap-2 text-[11px] font-bold text-[var(--text)] mb-1">
-                    <span className="truncate">{restoreProgress.label}</span>
-                    <span className="font-mono-num text-[var(--accent)] shrink-0">
-                      {restoreProgress.current}/{restoreProgress.total}
-                    </span>
-                  </div>
-                  <div className="h-1.5 rounded-full bg-[var(--panel)] overflow-hidden">
-                    <div
-                      className="h-full bg-[var(--accent)] transition-all duration-200"
-                      style={{
-                        width: `${Math.round((restoreProgress.current / Math.max(1, restoreProgress.total)) * 100)}%`,
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
-            </div>
 
             {displayedError && (
               <div
@@ -514,14 +320,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                       </a>
                     </>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => void handleSelectLocalFolder()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-semibold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
-                  >
-                    <FolderOpen className="w-3.5 h-3.5" aria-hidden="true" />
-                    <span>Abrir Pasta Local</span>
-                  </button>
                 </div>
               </div>
             )}
@@ -536,7 +334,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                 <button
                   type="button"
                   onClick={() => void handleGoogleLogin(false)}
-                  disabled={loading || isBusyLocal}
+                  disabled={loading}
                   className="w-full py-2.5 px-1 text-left flex items-center justify-between gap-2 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait bg-transparent border-0"
                 >
                   <span className="flex items-center gap-2.5 min-w-0">
@@ -574,17 +372,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
 
                 <button
                   type="button"
-                  onClick={() => folderInputRef.current?.click()}
-                  disabled={isBusyLocal}
-                  title="Importar pasta local inteira pelo seletor de diretório do navegador"
-                  className="w-full py-2.5 px-1 text-left flex items-center gap-2.5 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer disabled:opacity-60 bg-transparent border-0"
-                >
-                  <FolderSync className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
-                  <span>Importar pasta pelo seletor do navegador</span>
-                </button>
-
-                <button
-                  type="button"
                   onClick={onContinueOffline}
                   className="w-full py-2.5 px-1 text-left flex items-center gap-2.5 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer bg-transparent border-0"
                 >
@@ -600,48 +387,23 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
 
             {/* Informações técnicas e sigilo preservadas no rodapé do cartão */}
             <div className="mt-5 pt-4 border-t border-[var(--line)] flex flex-col gap-2.5 text-[11px] text-[var(--muted)] leading-relaxed">
-              <div>
-                <span className="font-bold text-[var(--text)]">Subpastas reconhecidas: </span>
-                <span className="text-[var(--subtle)]">{CANONICAL_LOCAL_SUBFOLDERS.join(' · ')}</span>
-              </div>
-
               <div className="flex items-start gap-2">
                 <Lock className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5" aria-hidden="true" />
                 <span>
-                  <strong className="font-semibold text-[var(--text)]">Sigilo e Guarda Local Garantidos:</strong>{' '}
-                  {localFolderWritable
-                    ? 'sua pasta local está vinculada com gravação automática direta em disco e no banco IndexedDB do navegador.'
-                    : 'todas as alterações, PDFs, leis, questões e backups são gravados automaticamente na pasta local selecionada e no banco local do navegador.'}
+                  <strong className="font-semibold text-[var(--text)]">Sigilo e Guarda em Nuvem Garantidos:</strong>{' '}
+                  todas as alterações, PDFs, leis, questões e backups são sincronizados com sua conta Google no Firebase Firestore e Google Drive, além do cache seguro no navegador.
                 </span>
               </div>
 
-              {(lastLocalFolderSyncAt || lastLocalIncrementalBackupAt || lastCloudSyncAt) && (
+              {lastCloudSyncAt && (
                 <div className="rounded border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 py-2 text-[10.5px] text-[var(--muted)] flex flex-wrap items-center gap-x-2.5 gap-y-1">
                   <strong className="text-[var(--text)] font-bold">Diagnóstico de Salvamento:</strong>
-                  {lastLocalFolderSyncAt && (
-                    <span>
-                      Pasta local:{' '}
-                      <strong className="font-mono-num text-[var(--text)]">
-                        {new Date(lastLocalFolderSyncAt).toLocaleString('pt-BR')}
-                      </strong>
-                    </span>
-                  )}
-                  {lastLocalIncrementalBackupAt && (
-                    <span>
-                      Backup incremental:{' '}
-                      <strong className="font-mono-num text-[var(--text)]">
-                        {new Date(lastLocalIncrementalBackupAt).toLocaleString('pt-BR')}
-                      </strong>
-                    </span>
-                  )}
-                  {lastCloudSyncAt && (
-                    <span>
-                      Nuvem Drive:{' '}
-                      <strong className="font-mono-num text-[var(--text)]">
-                        {new Date(lastCloudSyncAt).toLocaleString('pt-BR')}
-                      </strong>
-                    </span>
-                  )}
+                  <span>
+                    Nuvem Drive:{' '}
+                    <strong className="font-mono-num text-[var(--text)]">
+                      {new Date(lastCloudSyncAt).toLocaleString('pt-BR')}
+                    </strong>
+                  </span>
                 </div>
               )}
             </div>
@@ -655,7 +417,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
             <strong className="text-[var(--text)]">estuda.gov.br</strong> · Ministério da Aprovação, Café Forte e Madrugadas (Paródia)
           </span>
           <span className="text-[var(--subtle)]">
-            Leitura e Gravação Direta em Pasta Local · Sincronização Opcional via Google Drive
+            Sincronização em Nuvem · Firebase Firestore &amp; Google Drive
           </span>
         </div>
       </footer>

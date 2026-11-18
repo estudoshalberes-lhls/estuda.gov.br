@@ -60,9 +60,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
     driveConnected,
     disconnectGoogleDrive,
     connectGoogleDrive,
-    localFolderConnected,
-    localFolderWritable,
-    localFolderName,
   } = useStudy();
 
   const moduleMap = useMemo(() => {
@@ -253,24 +250,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
               <span className="block text-[11px] font-bold text-[var(--text)] truncate">
                 {driveConnected
                   ? googleUser?.displayName || googleUser?.email || 'Cadastro gov.estud'
-                  : localFolderConnected
-                  ? `Pasta: ${localFolderName || 'Local'}`
-                  : 'Sessão Local'}
+                  : 'Sessão do Navegador'}
               </span>
               <span
                 className={`block text-[10px] font-semibold truncate ${
-                  driveConnected || localFolderConnected ? 'text-[var(--good)]' : 'text-[var(--muted)]'
+                  driveConnected ? 'text-[var(--good)]' : 'text-[var(--muted)]'
                 }`}
               >
-                {driveConnected
-                  ? localFolderConnected
-                    ? 'Regular · Nuvem + Pasta'
-                    : 'Regular · Autenticado'
-                  : localFolderConnected
-                  ? localFolderWritable
-                    ? 'Regular · Gravação local'
-                    : 'Pasta local importada'
-                  : 'Navegador local'}
+                {driveConnected ? 'Regular · Autenticado' : 'Offline no navegador'}
               </span>
             </div>
           </div>
