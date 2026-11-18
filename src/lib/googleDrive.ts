@@ -230,6 +230,19 @@ function restorePersistedDriveAccessToken(user?: User | null): string | null {
 export interface DriveFolderPreference {
   id: string | null;
   name: string;
+  url?: string;
+  updatedAt?: string;
+}
+
+function resolveAccountPrefScope(accountHint?: string | null): string | null {
+  const raw =
+    (typeof accountHint === 'string' && accountHint.trim()) ||
+    auth.currentUser?.email?.trim() ||
+    auth.currentUser?.uid?.trim() ||
+    readLastGoogleEmail() ||
+    '';
+  if (!raw) return null;
+  return raw.toLowerCase();
 }
 
 export function getKnownStudyDriveFolderNames(): string[] {
@@ -244,12 +257,9 @@ export function getKnownStudyDriveFolderNames(): string[] {
         });
       }
     }
-    const prefRaw = localStorage.getItem(DRIVE_FOLDER_PREF_KEY);
-    if (prefRaw) {
-      const prefParsed = JSON.parse(prefRaw) as Partial<DriveFolderPreference>;
-      if (typeof prefParsed?.name === 'string' && prefParsed.name.trim()) {
-        result.add(prefParsed.name.trim());
-      }
+    const pref = getPreferredStudyFolder();
+    if (pref.name && pref.name.trim()) {
+      result.add(pref.name.trim());
     }
   } catch {
     // ignore storage errors
@@ -270,9 +280,12 @@ export function rememberKnownStudyDriveFolderName(name?: string | null): void {
   }
 }
 
-export function getPreferredStudyFolder(): DriveFolderPreference {
+export function getPreferredStudyFolder(accountHint?: string | null): DriveFolderPreference {
   try {
-    const raw = localStorage.getItem(DRIVE_FOLDER_PREF_KEY);
+    const accountScope = resolveAccountPrefScope(accountHint);
+    const raw =
+      (accountScope ? localStorage.getItem(`${DRIVE_FOLDER_PREF_KEY}::${accountScope}`) : null) ||
+      localStorage.getItem(DRIVE_FOLDER_PREF_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<DriveFolderPreference>;
       const name = typeof parsed?.name === 'string' && parsed.name.trim() ? parsed.name.trim() : DRIVE_FOLDER_NAME;
@@ -282,23 +295,47 @@ export function getPreferredStudyFolder(): DriveFolderPreference {
           ? parsed.id.trim()
           : hasExplicitNullId
             ? null
-            : DEFAULT_STUDY_FOLDER_ID;
-      return { id, name };
+            : DEFAULT_STUDY_FOLDER_ID || null;
+      const url =
+        typeof parsed?.url === 'string' && parsed.url.trim()
+          ? parsed.url.trim()
+          : id
+            ? `https://drive.google.com/drive/folders/${id}`
+            : undefined;
+      const updatedAt = typeof parsed?.updatedAt === 'string' && parsed.updatedAt.trim() ? parsed.updatedAt.trim() : undefined;
+      return { id, name, ...(url ? { url } : {}), ...(updatedAt ? { updatedAt } : {}) };
     }
   } catch {
     // ignore storage errors
   }
-  return { id: DEFAULT_STUDY_FOLDER_ID, name: DRIVE_FOLDER_NAME };
+  return { id: DEFAULT_STUDY_FOLDER_ID || null, name: DRIVE_FOLDER_NAME };
 }
 
-export function setPreferredStudyFolder(pref: { id?: string | null; name?: string | null }): DriveFolderPreference {
+export function setPreferredStudyFolder(
+  pref: { id?: string | null; name?: string | null; url?: string | null; updatedAt?: string | null },
+  accountHint?: string | null,
+): DriveFolderPreference {
+  const cleanId = pref.id?.trim() || null;
+  const cleanName = pref.name?.trim() || DRIVE_FOLDER_NAME;
+  const cleanUrl =
+    pref.url?.trim() ||
+    (cleanId ? `https://drive.google.com/drive/folders/${cleanId}` : undefined);
+  const cleanUpdatedAt = pref.updatedAt?.trim() || new Date().toISOString();
+
   const next: DriveFolderPreference = {
-    id: pref.id?.trim() || null,
-    name: pref.name?.trim() || DRIVE_FOLDER_NAME,
+    id: cleanId,
+    name: cleanName,
+    ...(cleanUrl ? { url: cleanUrl } : {}),
+    updatedAt: cleanUpdatedAt,
   };
   rememberKnownStudyDriveFolderName(next.name);
   try {
-    localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify(next));
+    const serialized = JSON.stringify(next);
+    const accountScope = resolveAccountPrefScope(accountHint);
+    if (accountScope) {
+      localStorage.setItem(`${DRIVE_FOLDER_PREF_KEY}::${accountScope}`, serialized);
+    }
+    localStorage.setItem(DRIVE_FOLDER_PREF_KEY, serialized);
   } catch {
     // ignore storage errors
   }
@@ -306,6 +343,7 @@ export function setPreferredStudyFolder(pref: { id?: string | null; name?: strin
   cachedFolderLink = null;
   cachedFolderName = null;
   inflightStudyFolderPromise = null;
+  inflightFolderGraphByToken.clear();
   inflightSubFolderPromises.clear();
   for (const key of Object.keys(cachedSubFolderIds)) {
     delete cachedSubFolderIds[key];
@@ -1121,15 +1159,20 @@ async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphRes
   const normalizedPrefName = pref.name.toLowerCase();
   const canonicalLowerMap = new Map(CANONICAL_SUBFOLDER_NAMES.map((n) => [n.toLowerCase(), n]));
 
-  for (const folder of foldersById.values()) {
-    const lower = folder.name.trim().toLowerCase();
-    if (
-      (pref.id && folder.id === pref.id) ||
-      (DEFAULT_STUDY_FOLDER_ID && folder.id === DEFAULT_STUDY_FOLDER_ID) ||
-      lower === normalizedPrefName ||
-      lower === normalizedDefaultName
-    ) {
-      studyRootIds.add(folder.id);
+  const hasExactPrefFolder = Boolean(pref.id && foldersById.has(pref.id));
+  if (hasExactPrefFolder && pref.id) {
+    studyRootIds.add(pref.id);
+  } else {
+    for (const folder of foldersById.values()) {
+      const lower = folder.name.trim().toLowerCase();
+      if (
+        (pref.id && folder.id === pref.id) ||
+        (DEFAULT_STUDY_FOLDER_ID && folder.id === DEFAULT_STUDY_FOLDER_ID) ||
+        lower === normalizedPrefName ||
+        (!pref.id && lower === normalizedDefaultName)
+      ) {
+        studyRootIds.add(folder.id);
+      }
     }
   }
 
@@ -1341,21 +1384,29 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
           fallbackTargetName = byId.name;
           rememberKnownStudyDriveFolderName(byId.name);
         }
-        const isWritable = await verifyDriveFolderWritable(byId.id, activeToken).catch(() => false);
-        if (isWritable) {
-          const link = byId.webViewLink || `https://drive.google.com/drive/folders/${byId.id}`;
-          cachedFolderId = byId.id;
-          cachedFolderLink = link;
-          cachedFolderName = byId.name;
-          if (byId.name && byId.name !== pref.name) {
-            try {
-              localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: byId.id, name: byId.name }));
-            } catch {
-              // ignore storage errors
+        const link = byId.webViewLink || `https://drive.google.com/drive/folders/${byId.id}`;
+        cachedFolderId = byId.id;
+        cachedFolderLink = link;
+        cachedFolderName = byId.name;
+        if ((byId.name && byId.name !== pref.name) || pref.url !== link) {
+          const updatedPref: DriveFolderPreference = {
+            id: byId.id,
+            name: byId.name || pref.name,
+            url: link,
+            updatedAt: pref.updatedAt || new Date().toISOString(),
+          };
+          try {
+            const serialized = JSON.stringify(updatedPref);
+            const accountScope = resolveAccountPrefScope();
+            if (accountScope) {
+              localStorage.setItem(`${DRIVE_FOLDER_PREF_KEY}::${accountScope}`, serialized);
             }
+            localStorage.setItem(DRIVE_FOLDER_PREF_KEY, serialized);
+          } catch {
+            // ignore storage errors
           }
-          return { id: byId.id, name: byId.name, webViewLink: link };
         }
+        return { id: byId.id, name: byId.name, webViewLink: link };
       }
     }
 
@@ -1377,7 +1428,6 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
     const matches = (searchData.files || []) as Array<{ id: string; name: string; webViewLink?: string }>;
     const writableMatches: Array<{ id: string; name: string; webViewLink?: string }> = [];
     for (const folder of matches) {
-      if (pref.id && folder.id === pref.id) continue;
       const writable = await verifyDriveFolderWritable(folder.id, activeToken);
       if (writable) {
         writableMatches.push(folder);
@@ -1428,7 +1478,17 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
       cachedFolderName = chosen.name;
       rememberKnownStudyDriveFolderName(chosen.name);
       try {
-        localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: chosen.id, name: chosen.name }));
+        const serialized = JSON.stringify({
+          id: chosen.id,
+          name: chosen.name,
+          url: link,
+          updatedAt: new Date().toISOString(),
+        });
+        const accountScope = resolveAccountPrefScope();
+        if (accountScope) {
+          localStorage.setItem(`${DRIVE_FOLDER_PREF_KEY}::${accountScope}`, serialized);
+        }
+        localStorage.setItem(DRIVE_FOLDER_PREF_KEY, serialized);
       } catch {
         // ignore storage errors
       }
@@ -1464,7 +1524,17 @@ export async function getOrCreateStudyFolder(token?: string): Promise<{ id: stri
     cachedFolderName = resolvedName;
     rememberKnownStudyDriveFolderName(resolvedName);
     try {
-      localStorage.setItem(DRIVE_FOLDER_PREF_KEY, JSON.stringify({ id: newFolder.id, name: resolvedName }));
+      const serialized = JSON.stringify({
+        id: newFolder.id,
+        name: resolvedName,
+        url: link,
+        updatedAt: new Date().toISOString(),
+      });
+      const accountScope = resolveAccountPrefScope();
+      if (accountScope) {
+        localStorage.setItem(`${DRIVE_FOLDER_PREF_KEY}::${accountScope}`, serialized);
+      }
+      localStorage.setItem(DRIVE_FOLDER_PREF_KEY, serialized);
     } catch {
       // ignore storage errors
     }

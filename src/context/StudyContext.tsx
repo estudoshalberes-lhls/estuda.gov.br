@@ -972,6 +972,7 @@ interface StudyContextValue {
   driveTokenReady: boolean;
   isRenewingDriveToken: boolean;
   driveFolderUrl: string | null;
+  activeDriveFolderId: string | null;
   activeDriveFolderName: string;
   lastCloudSyncAt: string | null;
   lastCacheVerifiedAt: string | null;
@@ -990,6 +991,7 @@ interface StudyContextValue {
     silentIfEmpty?: boolean;
     folderId?: string;
     forceModule?: 'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries';
+    associateAsDefault?: boolean;
   }) => Promise<{
     restoredDb: boolean;
     filesRestored: number;
@@ -1731,6 +1733,29 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       ...(dataObj.preferences?.quick_access_modules !== undefined
         ? { quick_access_modules: toArraySafe(dataObj.preferences.quick_access_modules) }
         : {}),
+      ...(dataObj.preferences?.default_drive_folder &&
+      typeof dataObj.preferences.default_drive_folder === 'object' &&
+      typeof dataObj.preferences.default_drive_folder.name === 'string' &&
+      dataObj.preferences.default_drive_folder.name.trim()
+        ? {
+            default_drive_folder: {
+              id:
+                typeof dataObj.preferences.default_drive_folder.id === 'string' &&
+                dataObj.preferences.default_drive_folder.id.trim()
+                  ? dataObj.preferences.default_drive_folder.id.trim()
+                  : null,
+              name: dataObj.preferences.default_drive_folder.name.trim(),
+              ...(typeof dataObj.preferences.default_drive_folder.url === 'string' &&
+              dataObj.preferences.default_drive_folder.url.trim()
+                ? { url: dataObj.preferences.default_drive_folder.url.trim() }
+                : {}),
+              ...(typeof dataObj.preferences.default_drive_folder.updatedAt === 'string' &&
+              dataObj.preferences.default_drive_folder.updatedAt.trim()
+                ? { updatedAt: dataObj.preferences.default_drive_folder.updatedAt.trim() }
+                : {}),
+            },
+          }
+        : {}),
     },
     schedule: normalizedSchedule,
     scheduleDayDates:
@@ -1923,15 +1948,20 @@ async function restoreFilesAndOrphansFromDriveList(
   const driveByStripped = new Map<string, DriveFileInfo>();
   const driveById = new Map<string, DriveFileInfo>();
 
+  const defaultPreferredFolderId =
+    (options?.onlyFolderId && options.onlyFolderId !== 'all' ? options.onlyFolderId : undefined) ||
+    targetDb.preferences?.default_drive_folder?.id ||
+    getPreferredStudyFolder().id ||
+    undefined;
+
   const matchesPreferredFolder = (df: DriveFileInfo) =>
     Boolean(
-      options?.onlyFolderId &&
-        options.onlyFolderId !== 'all' &&
-        (df.parents?.includes(options.onlyFolderId) ||
-          df.ancestorFolderIds?.includes(options.onlyFolderId)),
+      defaultPreferredFolderId &&
+        (df.parents?.includes(defaultPreferredFolderId) ||
+          df.ancestorFolderIds?.includes(defaultPreferredFolderId)),
     );
 
-  const orderedDriveFiles = options?.onlyFolderId
+  const orderedDriveFiles = defaultPreferredFolderId
     ? [...driveFiles].sort((a, b) => Number(matchesPreferredFolder(b)) - Number(matchesPreferredFolder(a)))
     : driveFiles;
 
@@ -2425,6 +2455,9 @@ async function restoreFilesAndOrphansFromDriveList(
     if (knownFileNames.has(normName) || knownFileNames.has(normStripped)) return false;
 
     if (options?.onlyFolderId || options?.importFromAnyFolder) return true;
+    if (defaultPreferredFolderId) {
+      return matchesPreferredFolder(df) || Boolean(df.isInStudyFolder);
+    }
     return Boolean(df.isInStudyFolder || hasStudyPrefix(df.name));
   });
 
@@ -3342,8 +3375,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [driveConnected, setDriveConnected] = useState<boolean>(false);
   const [driveTokenReady, setDriveTokenReady] = useState<boolean>(false);
   const [isRenewingDriveToken, setIsRenewingDriveToken] = useState<boolean>(false);
-  const [driveFolderUrl, setDriveFolderUrl] = useState<string | null>(null);
-  const [activeDriveFolderName, setActiveDriveFolderName] = useState<string>(() => getPreferredStudyFolder().name);
+  const [activeDriveFolderId, setActiveDriveFolderId] = useState<string | null>(
+    () => db.preferences?.default_drive_folder?.id || getPreferredStudyFolder().id,
+  );
+  const [driveFolderUrl, setDriveFolderUrl] = useState<string | null>(() => {
+    const pref = db.preferences?.default_drive_folder || getPreferredStudyFolder();
+    return pref.url || (pref.id ? `https://drive.google.com/drive/folders/${pref.id}` : null);
+  });
+  const [activeDriveFolderName, setActiveDriveFolderName] = useState<string>(
+    () => db.preferences?.default_drive_folder?.name || getPreferredStudyFolder().name,
+  );
   const [lastCloudSyncAt, setLastCloudSyncAt] = useState<string | null>(() => loadSyncMeta(initialScope).lastCloudSyncAt || null);
   const [lastCacheVerifiedAt, setLastCacheVerifiedAt] = useState<string | null>(
     () => loadSyncMeta(initialScope).lastCacheVerifiedAt || null,
@@ -4412,6 +4453,58 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   }, []);
 
+  const associateAccountDefaultDriveFolder = useCallback(
+    (
+      folder: { id?: string | null; name?: string | null; url?: string | null; updatedAt?: string },
+      options?: { skipDbUpdate?: boolean },
+    ) => {
+      const cleanId = folder.id?.trim() || null;
+      const cleanName = folder.name?.trim() || DRIVE_FOLDER_NAME;
+      const cleanUrl =
+        folder.url?.trim() ||
+        (cleanId ? `https://drive.google.com/drive/folders/${cleanId}` : undefined);
+      const nowIso = folder.updatedAt || new Date().toISOString();
+
+      setPreferredStudyFolder(
+        { id: cleanId, name: cleanName, url: cleanUrl, updatedAt: nowIso },
+        googleUserRef.current?.email || googleUserRef.current?.uid,
+      );
+      setActiveDriveFolderId((prev) => (prev === cleanId ? prev : cleanId));
+      setActiveDriveFolderName((prev) => (prev === cleanName ? prev : cleanName));
+      setDriveFolderUrl((prev) => {
+        const nextUrl = cleanUrl || null;
+        return prev === nextUrl ? prev : nextUrl;
+      });
+
+      if (!options?.skipDbUpdate) {
+        setDb((prev) => {
+          const cur = prev.preferences?.default_drive_folder;
+          if (
+            cur &&
+            cur.id === cleanId &&
+            cur.name === cleanName &&
+            (cur.url || undefined) === cleanUrl
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            preferences: {
+              ...prev.preferences,
+              default_drive_folder: {
+                id: cleanId,
+                name: cleanName,
+                ...(cleanUrl ? { url: cleanUrl } : {}),
+                updatedAt: nowIso,
+              },
+            },
+          };
+        });
+      }
+    },
+    [setDb],
+  );
+
   const applyRestoredDatabaseForScope = useCallback(
     (
       scope: string,
@@ -4423,10 +4516,55 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         firestoreTimerSig?: string;
       },
     ) => {
-      const sanitizedDb = applyTombstonesToMergedDatabase(
+      let sanitizedDb = applyTombstonesToMergedDatabase(
         normalizeAndMergeDatabase(nextDb),
         scope,
       );
+      const accountHint =
+        googleUserRef.current?.email ||
+        googleUserRef.current?.uid ||
+        auth.currentUser?.email ||
+        auth.currentUser?.uid;
+      const localPref = getPreferredStudyFolder(accountHint);
+      const dbPrefFolder = sanitizedDb.preferences?.default_drive_folder;
+      const localPrefMs = Date.parse(localPref.updatedAt || '') || 0;
+      const dbPrefMs = Date.parse(dbPrefFolder?.updatedAt || '') || 0;
+
+      if (dbPrefFolder && (dbPrefFolder.id || dbPrefFolder.name)) {
+        const shouldAdoptDbFolder =
+          !localPref.id ||
+          (Boolean(dbPrefFolder.id) && dbPrefMs >= localPrefMs);
+        if (shouldAdoptDbFolder) {
+          associateAccountDefaultDriveFolder(dbPrefFolder, { skipDbUpdate: true });
+        } else if (localPref.id) {
+          sanitizedDb = {
+            ...sanitizedDb,
+            preferences: {
+              ...sanitizedDb.preferences,
+              default_drive_folder: {
+                id: localPref.id,
+                name: localPref.name,
+                ...(localPref.url ? { url: localPref.url } : {}),
+                updatedAt: localPref.updatedAt || new Date().toISOString(),
+              },
+            },
+          };
+        }
+      } else if (localPref.id) {
+        sanitizedDb = {
+          ...sanitizedDb,
+          preferences: {
+            ...sanitizedDb.preferences,
+            default_drive_folder: {
+              id: localPref.id,
+              name: localPref.name,
+              ...(localPref.url ? { url: localPref.url } : {}),
+              updatedAt: localPref.updatedAt || new Date().toISOString(),
+            },
+          },
+        };
+      }
+
       const nextHash = computeDatabaseContentHash(sanitizedDb);
       const curTimerSig = computeTimerSyncSignature({
         elapsed: timerStateRef.current.elapsed,
@@ -5437,11 +5575,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           }
           const dbAtSyncStart = dbRef.current;
+          const persistedDbFolder = dbAtSyncStart.preferences?.default_drive_folder;
+          const localAccountPref = getPreferredStudyFolder(user.email || user.uid);
+          if (persistedDbFolder?.id && !localAccountPref.id) {
+            setPreferredStudyFolder(persistedDbFolder, user.email || user.uid);
+          }
           const folder = await getOrCreateStudyFolder(token);
-          const resolvedFolderName = folder.name || getPreferredStudyFolder().name;
+          const resolvedFolderName = folder.name || getPreferredStudyFolder(user.email || user.uid).name;
           rememberKnownStudyDriveFolderName(resolvedFolderName);
-          setActiveDriveFolderName(resolvedFolderName);
-          if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
+          associateAccountDefaultDriveFolder({
+            id: folder.id,
+            name: resolvedFolderName,
+            url: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
+          });
 
           const preSyncMeta = loadSyncMeta(scope);
           const skipSubfolderEnsure = preSyncMeta.lastSubfoldersSyncedFolderId === folder.id;
@@ -7840,9 +7986,11 @@ function isEmailAuthorized(email?: string | null): boolean {
 
       if (picked?.folders?.[0]) {
         const pickedFolder = picked.folders[0];
-        setPreferredStudyFolder({ id: pickedFolder.id, name: pickedFolder.name });
-        setActiveDriveFolderName(pickedFolder.name);
-        setDriveFolderUrl(pickedFolder.url || `https://drive.google.com/drive/folders/${pickedFolder.id}`);
+        associateAccountDefaultDriveFolder({
+          id: pickedFolder.id,
+          name: pickedFolder.name,
+          url: pickedFolder.url || `https://drive.google.com/drive/folders/${pickedFolder.id}`,
+        });
       }
 
       const jsonCandidates = (picked?.files || []).filter(
@@ -7915,9 +8063,11 @@ function isEmailAuthorized(email?: string | null): boolean {
         const resolvedFolder = await getOrCreateStudyFolder(token);
         activeFolderId = resolvedFolder.id;
         activeFolderName = resolvedFolder.name;
-        setPreferredStudyFolder({ id: resolvedFolder.id, name: resolvedFolder.name });
-        setActiveDriveFolderName(resolvedFolder.name);
-        setDriveFolderUrl(resolvedFolder.webViewLink || `https://drive.google.com/drive/folders/${resolvedFolder.id}`);
+        associateAccountDefaultDriveFolder({
+          id: resolvedFolder.id,
+          name: resolvedFolder.name,
+          url: resolvedFolder.webViewLink || `https://drive.google.com/drive/folders/${resolvedFolder.id}`,
+        });
         await syncStudySubFoldersInDrive(resolvedFolder.id, token).catch(() => ({}));
         writableNow = true;
       }
@@ -8162,43 +8312,42 @@ function isEmailAuthorized(email?: string | null): boolean {
             );
             setPreferredStudyFolder({ id: null, name: DRIVE_FOLDER_NAME });
             const fallbackResolved = await getOrCreateStudyFolder(activeToken);
-            setPreferredStudyFolder({ id: fallbackResolved.id, name: fallbackResolved.name });
-            setActiveDriveFolderName(fallbackResolved.name);
-            setDriveFolderUrl(
-              fallbackResolved.webViewLink || `https://drive.google.com/drive/folders/${fallbackResolved.id}`,
-            );
+            associateAccountDefaultDriveFolder({
+              id: fallbackResolved.id,
+              name: fallbackResolved.name,
+              url: fallbackResolved.webViewLink || `https://drive.google.com/drive/folders/${fallbackResolved.id}`,
+            });
             setDrivePermissionNeedsPicker(null);
-            toast(`Pasta gravável ativada no Google Drive: "${fallbackResolved.name}".`);
+            toast(`Pasta padrão da conta ativada no Google Drive: "${fallbackResolved.name}".`);
             return true;
           }
 
-          let targetId = meta.id;
-          let targetName = meta.name;
-          let targetUrl = meta.webViewLink || `https://drive.google.com/drive/folders/${meta.id}`;
-          const writable = await verifyDriveFolderWritable(meta.id, activeToken);
-
-          if (!writable) {
-            // Automatically create/resolve a writable folder with the same name so mobile users never get blocked by Google Picker
-            setPreferredStudyFolder({ id: null, name: meta.name || DRIVE_FOLDER_NAME });
-            const resolvedWritable = await getOrCreateStudyFolder(activeToken);
-            targetId = resolvedWritable.id;
-            targetName = resolvedWritable.name;
-            targetUrl =
-              resolvedWritable.webViewLink || `https://drive.google.com/drive/folders/${resolvedWritable.id}`;
-          }
+          const targetId = meta.id;
+          const targetName = meta.name;
+          const targetUrl = meta.webViewLink || `https://drive.google.com/drive/folders/${meta.id}`;
+          const writable = await verifyDriveFolderWritable(meta.id, activeToken).catch(() => false);
 
           const scope = activeScopeRef.current;
           const prevSyncedFolder = loadSyncMeta(scope).lastSyncedFolderId;
-          setPreferredStudyFolder({ id: targetId, name: targetName });
-          setActiveDriveFolderName(targetName);
-          setDriveFolderUrl(targetUrl);
-          setDrivePermissionNeedsPicker(null);
+          associateAccountDefaultDriveFolder({ id: targetId, name: targetName, url: targetUrl });
+          if (writable) {
+            setDrivePermissionNeedsPicker(null);
+            await syncStudySubFoldersInDrive(targetId, activeToken).catch(() => ({}));
+          } else {
+            setDrivePermissionNeedsPicker({
+              folderId: targetId,
+              folderName: targetName,
+              count: 1,
+            });
+          }
           if (prevSyncedFolder && prevSyncedFolder !== targetId) {
             invalidateDriveBrowserCacheMeta(scope);
             syncedScopeOnceRef.current = null;
             setLastCacheVerifiedAt(null);
           }
-          toast(`Pasta ativa definida para salvar dados e arquivos: "${targetName}".`);
+          toast(
+            `Pasta "${targetName}" associada como padrão da conta para todos os salvamentos e leituras!`,
+          );
           return true;
         }
 
@@ -8207,16 +8356,21 @@ function isEmailAuthorized(email?: string | null): boolean {
         const resolved = await getOrCreateStudyFolder(activeToken);
         const scope = activeScopeRef.current;
         const prevSyncedFolder = loadSyncMeta(scope).lastSyncedFolderId;
-        setPreferredStudyFolder({ id: resolved.id, name: resolved.name });
-        setActiveDriveFolderName(resolved.name);
-        setDriveFolderUrl(resolved.webViewLink || `https://drive.google.com/drive/folders/${resolved.id}`);
+        associateAccountDefaultDriveFolder({
+          id: resolved.id,
+          name: resolved.name,
+          url: resolved.webViewLink || `https://drive.google.com/drive/folders/${resolved.id}`,
+        });
         setDrivePermissionNeedsPicker(null);
+        await syncStudySubFoldersInDrive(resolved.id, activeToken).catch(() => ({}));
         if (prevSyncedFolder && prevSyncedFolder !== resolved.id) {
           invalidateDriveBrowserCacheMeta(scope);
           syncedScopeOnceRef.current = null;
           setLastCacheVerifiedAt(null);
         }
-        toast(`Pasta ativa definida para salvar dados e arquivos: "${resolved.name}".`);
+        toast(
+          `Pasta "${resolved.name}" associada como padrão da conta para todos os salvamentos e leituras!`,
+        );
         return true;
       } catch (err: any) {
         if (String(err?.message || '').includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
@@ -8224,7 +8378,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         return false;
       }
     },
-    [ensureDriveToken, toast],
+    [associateAccountDefaultDriveFolder, ensureDriveToken, toast],
   );
 
   const restoreAllFromGoogleDrive = useCallback(
@@ -8232,6 +8386,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       silentIfEmpty?: boolean;
       folderId?: string;
       forceModule?: 'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries';
+      associateAsDefault?: boolean;
     }): Promise<{
       restoredDb: boolean;
       filesRestored: number;
@@ -8241,16 +8396,38 @@ function isEmailAuthorized(email?: string | null): boolean {
       let activeToken = await ensureDriveToken();
       if (!activeToken) return { restoredDb: false, filesRestored: 0, orphansImported: 0, permissionBlockedCount: 0 };
 
-      const targetFolderId = options?.folderId && options.folderId !== 'all' ? options.folderId : undefined;
+      const isExplicitAll = options?.folderId === 'all';
+      const explicitFolderId =
+        options?.folderId && options.folderId !== 'all' ? options.folderId : undefined;
       const forceModule = options?.forceModule || 'auto';
 
       setIsSyncingDrive(true);
       try {
         const executeRestore = async (tokenToUse: string) => {
           const scope = activeScopeRef.current;
+          if (
+            explicitFolderId &&
+            explicitFolderId !== 'root' &&
+            options?.associateAsDefault !== false
+          ) {
+            const meta = await getDriveFolderMetadata(explicitFolderId, tokenToUse).catch(() => null);
+            if (meta) {
+              associateAccountDefaultDriveFolder({
+                id: meta.id,
+                name: meta.name,
+                url: meta.webViewLink || `https://drive.google.com/drive/folders/${meta.id}`,
+              });
+            }
+          }
+
           const folder = await getOrCreateStudyFolder(tokenToUse);
-          setActiveDriveFolderName(folder.name || getPreferredStudyFolder().name);
-          if (folder.webViewLink) setDriveFolderUrl(folder.webViewLink);
+          associateAccountDefaultDriveFolder({
+            id: folder.id,
+            name: folder.name || getPreferredStudyFolder().name,
+            url: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
+          });
+
+          const targetFolderId = isExplicitAll ? undefined : explicitFolderId || folder.id;
 
           const [, backupsList, driveFiles] = await Promise.all([
             syncStudySubFoldersInDrive(folder.id, tokenToUse).catch(() => ({})),
@@ -8262,8 +8439,9 @@ function isEmailAuthorized(email?: string | null): boolean {
             tokenToUse,
             targetFolderId
               ? {
-                  onlyFolderId: targetFolderId,
-                  strictFolder: true,
+                  onlyFolderId: explicitFolderId ? targetFolderId : undefined,
+                  activeFolderId: folder.id,
+                  strictFolder: Boolean(explicitFolderId),
                   expectedEmail: googleUser?.email || undefined,
                   prefetchedBackups: backupsList,
                   bypassCache: true,
@@ -8276,13 +8454,15 @@ function isEmailAuthorized(email?: string | null): boolean {
                 },
           );
 
-          const matchingFolderFiles = targetFolderId
+          const folderFilteredFiles = targetFolderId
             ? driveFiles.filter((df) =>
                 targetFolderId === 'root'
                   ? !df.parents || df.parents.length === 0 || df.folderPath === 'Meu Drive (Raiz)'
                   : Boolean(df.parents?.includes(targetFolderId) || df.ancestorFolderIds?.includes(targetFolderId)),
               )
             : driveFiles;
+          const matchingFolderFiles =
+            !explicitFolderId && folderFilteredFiles.length === 0 ? driveFiles : folderFilteredFiles;
 
           const hasCloudData = Boolean(latestCloud?.payload || latestCloud?.incrementalDeltas?.length);
           if (!hasCloudData && matchingFolderFiles.length === 0) {
@@ -8498,21 +8678,26 @@ function isEmailAuthorized(email?: string | null): boolean {
         const scope = activeScopeRef.current;
         const targetModule = options?.targetModule || 'auto';
 
-        // Always register picked folder as the active save folder first (and verify write access)
+        // Always register picked folder as the account's default folder for all saves and reads
         if (picked.folders.length > 0) {
           const folder = picked.folders[0];
-          const writable = await verifyDriveFolderWritable(folder.id, activeToken);
-          if (!writable) {
-            toast(
-              `A pasta "${folder.name}" não permite gravação por este aplicativo. Escolha uma pasta sua com permissão de edição.`,
-              true,
-            );
-            return null;
-          }
+          const writable = await verifyDriveFolderWritable(folder.id, activeToken).catch(() => false);
           const prevSyncedFolder = loadSyncMeta(scope).lastSyncedFolderId;
-          setPreferredStudyFolder({ id: folder.id, name: folder.name });
-          setActiveDriveFolderName(folder.name);
-          setDriveFolderUrl(folder.url || `https://drive.google.com/drive/folders/${folder.id}`);
+          associateAccountDefaultDriveFolder({
+            id: folder.id,
+            name: folder.name,
+            url: folder.url || `https://drive.google.com/drive/folders/${folder.id}`,
+          });
+          if (writable) {
+            setDrivePermissionNeedsPicker(null);
+            await syncStudySubFoldersInDrive(folder.id, activeToken).catch(() => ({}));
+          } else {
+            setDrivePermissionNeedsPicker({
+              folderId: folder.id,
+              folderName: folder.name,
+              count: 1,
+            });
+          }
           if (prevSyncedFolder && prevSyncedFolder !== folder.id) {
             invalidateDriveBrowserCacheMeta(scope);
             syncedScopeOnceRef.current = null;
@@ -8779,10 +8964,24 @@ function isEmailAuthorized(email?: string | null): boolean {
           .filter((c): c is string => Boolean(c))
           .map((c) => c.toLowerCase());
 
+        const prefFolderId =
+          dbRef.current.preferences?.default_drive_folder?.id || getPreferredStudyFolder().id;
+        const sortedFiles = prefFolderId
+          ? [...driveFiles].sort((a, b) => {
+              const aInPref = Boolean(
+                a.parents?.includes(prefFolderId) || a.ancestorFolderIds?.includes(prefFolderId),
+              );
+              const bInPref = Boolean(
+                b.parents?.includes(prefFolderId) || b.ancestorFolderIds?.includes(prefFolderId),
+              );
+              return Number(bInPref) - Number(aInPref);
+            })
+          : driveFiles;
+
         const match =
-          driveFiles.find((df) => candidates.includes(df.name.toLowerCase())) ||
+          sortedFiles.find((df) => candidates.includes(df.name.toLowerCase())) ||
           (blobKey.startsWith('drive_')
-            ? driveFiles.find((df) => df.id === blobKey.replace(/^drive_/, ''))
+            ? sortedFiles.find((df) => df.id === blobKey.replace(/^drive_/, ''))
             : undefined);
 
         if (!match) return null;
@@ -15225,6 +15424,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         driveTokenReady,
         isRenewingDriveToken,
         driveFolderUrl,
+        activeDriveFolderId,
         activeDriveFolderName,
         lastCloudSyncAt,
         lastCacheVerifiedAt,

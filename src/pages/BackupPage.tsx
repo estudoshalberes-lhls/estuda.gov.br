@@ -50,6 +50,7 @@ export const BackupPage: React.FC = () => {
     driveTokenReady,
     isRenewingDriveToken,
     driveFolderUrl,
+    activeDriveFolderId,
     activeDriveFolderName,
     lastCloudSyncAt,
     lastCacheVerifiedAt,
@@ -91,7 +92,9 @@ export const BackupPage: React.FC = () => {
   const [driveFolders, setDriveFolders] = useState<DriveFolderSummary[]>([]);
   const [loadingCloudList, setLoadingCloudList] = useState(false);
   const [restoringId, setRestoringId] = useState<string | null>(null);
-  const [selectedRestoreFolderId, setSelectedRestoreFolderId] = useState<string>('all');
+  const [selectedRestoreFolderId, setSelectedRestoreFolderId] = useState<string>(
+    () => activeDriveFolderId || 'all',
+  );
   const [folderImportTarget, setFolderImportTarget] = useState<'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries'>('auto');
   const [showFolderLinkInput, setShowFolderLinkInput] = useState(false);
   const [customFolderInput, setCustomFolderInput] = useState('');
@@ -124,6 +127,12 @@ export const BackupPage: React.FC = () => {
   useEffect(() => {
     void refreshCloudList();
   }, [refreshCloudList]);
+
+  useEffect(() => {
+    if (activeDriveFolderId) {
+      setSelectedRestoreFolderId((prev) => (prev === activeDriveFolderId ? prev : activeDriveFolderId));
+    }
+  }, [activeDriveFolderId]);
 
   const selectedFolderObj = driveFolders.find((f) => f.id === selectedRestoreFolderId);
 
@@ -641,8 +650,8 @@ export const BackupPage: React.FC = () => {
                       ? `Conta permanente (${googleUser?.email || 'Google'}) · Renovando permissão do Google Drive automaticamente…`
                       : driveTokenReady
                       ? lastCloudSyncAt
-                        ? `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
-                        : `Sessão permanente ativa · Pasta: "${activeDriveFolderName}" · Renovação automática ativada`
+                        ? `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
+                        : `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Renovação automática ativada`
                       : `Conta e Firebase conectados (${googleUser?.email || 'Google'}), mas a sessão OAuth do Google Drive expirou — clique em "Reconectar conta Google" para reautorizar`
                     : 'Nenhuma conta Google vinculada no momento. Conecte para ativar backups automáticos na nuvem'}
                 </span>
@@ -787,25 +796,42 @@ export const BackupPage: React.FC = () => {
                     className="text-[11.5px] font-bold text-[var(--text)] flex items-center gap-1.5"
                   >
                     <FolderSearch className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                    <span>Pasta de origem para restaurar dados e arquivos:</span>
+                    <span>Pasta padrão da conta (usada para todos os salvamentos e leituras):</span>
                   </label>
                   <select
                     id="restore-folder-select"
                     value={selectedRestoreFolderId}
                     onChange={(e) => {
-                      setSelectedRestoreFolderId(e.target.value);
+                      const nextId = e.target.value;
+                      setSelectedRestoreFolderId(nextId);
                       setNeedsPickerFileConfirmationFolderId(null);
+                      if (nextId && nextId !== 'all' && nextId !== 'root') {
+                        const found = driveFolders.find((f) => f.id === nextId);
+                        void selectDriveStudyFolder({
+                          id: nextId,
+                          name: found?.name || activeDriveFolderName,
+                        }).then((ok) => {
+                          if (ok) void refreshCloudList();
+                        });
+                      }
                     }}
                     className="ce-input w-full max-w-full min-w-0 h-[36px] py-0 px-2.5 text-[12px] font-semibold truncate"
                   >
-                    <option value="all">
-                      Todas as pastas associadas da conta (Restauração completa)
-                    </option>
+                    {activeDriveFolderId && !driveFolders.some((f) => f.id === activeDriveFolderId) && (
+                      <option value={activeDriveFolderId}>
+                        ★ {activeDriveFolderName} (Pasta padrão associada à conta)
+                      </option>
+                    )}
                     {driveFolders.map((folder) => (
                       <option key={folder.id} value={folder.id}>
+                        {folder.id === activeDriveFolderId ? '★ ' : ''}
                         {folder.fullPath} ({folder.studyFileCount} compatível / {folder.fileCount} arquivo(s))
+                        {folder.id === activeDriveFolderId ? ' — Padrão da conta' : ''}
                       </option>
                     ))}
+                    <option value="all">
+                      Todas as pastas associadas da conta (Busca global)
+                    </option>
                   </select>
                 </div>
 

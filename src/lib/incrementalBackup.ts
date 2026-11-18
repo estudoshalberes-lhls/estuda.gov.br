@@ -719,14 +719,33 @@ export function applyIncrementalDeltaToDatabase(
           : d.phrases
         : baseDb.phrases,
     preferences: d.preferences
-      ? {
-          ...baseDb.preferences,
-          ...d.preferences,
-          modules: {
-            ...(baseDb.preferences?.modules || {}),
-            ...(d.preferences.modules || {}),
-          },
-        }
+      ? (() => {
+          const baseFolder = baseDb.preferences?.default_drive_folder;
+          const deltaFolder = d.preferences.default_drive_folder;
+          let resolvedFolder = deltaFolder ?? baseFolder;
+          if (baseFolder && deltaFolder) {
+            const baseMs = Date.parse(baseFolder.updatedAt || '') || 0;
+            const deltaMs = Date.parse(deltaFolder.updatedAt || '') || 0;
+            if (baseFolder.id && !deltaFolder.id) {
+              resolvedFolder = baseFolder;
+            } else if (!baseFolder.id && deltaFolder.id) {
+              resolvedFolder = deltaFolder;
+            } else if (baseMs > deltaMs) {
+              resolvedFolder = baseFolder;
+            } else {
+              resolvedFolder = deltaFolder;
+            }
+          }
+          return {
+            ...baseDb.preferences,
+            ...d.preferences,
+            modules: {
+              ...(baseDb.preferences?.modules || {}),
+              ...(d.preferences.modules || {}),
+            },
+            ...(resolvedFolder ? { default_drive_folder: resolvedFolder } : {}),
+          };
+        })()
       : baseDb.preferences,
     deletedTombstones: mergeTombstoneMaps(baseDb.deletedTombstones, d.deletedTombstones),
   };

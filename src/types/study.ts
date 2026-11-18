@@ -391,6 +391,13 @@ export interface ModuleVisibility {
   hide_search: boolean;
 }
 
+export interface DefaultDriveFolderPreference {
+  id: string | null;
+  name: string;
+  url?: string;
+  updatedAt?: string;
+}
+
 export interface AppPreferences {
   tema: ThemeId;
   modules_top: boolean;
@@ -399,6 +406,7 @@ export interface AppPreferences {
   whiteboard_enabled: boolean;
   modules: Record<string, ModuleVisibility>;
   quick_access_modules?: ModuleName[];
+  default_drive_folder?: DefaultDriveFolderPreference;
 }
 
 export interface QuizAnswer {
