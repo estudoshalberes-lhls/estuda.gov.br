@@ -3572,7 +3572,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const now = Date.now();
     lastLocalWriteMsRef.current = now;
     lastUserEditMsRef.current = now;
-    setLastLocalWriteMs(now);
+    // Only update state when more than 2500ms have elapsed to avoid secondary re-renders on every keystroke/highlight
+    setLastLocalWriteMs((prev) => (now - prev > 2500 ? now : prev));
     if (uid) {
       markLocalFirestoreActivity(uid);
     }
@@ -3739,8 +3740,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const setDb = useCallback((updater: React.SetStateAction<StudyDatabase>) => {
     const prev = dbRef.current;
     const rawNext = typeof updater === 'function' ? updater(prev) : updater;
+    // Fast no-op bailout: if reference is identical, never schedule a state update or DOM redraw
+    if (rawNext === prev) {
+      return;
+    }
     let next = rawNext;
-    if (!isRestoringRef.current && rawNext !== prev) {
+    if (!isRestoringRef.current) {
       const currentScope = activeScopeRef.current || 'offline_guest';
       const pruned = pruneActiveTombstonesForDatabase(
         currentScope,
@@ -3759,10 +3764,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
         next = { ...rawNext, deletedTombstones: updatedTombstones };
         lastDeletionMsRef.current = Date.now();
-        pendingCloudSyncRef.current = true;
       } else if (pruned !== rawNext.deletedTombstones) {
         next = { ...rawNext, deletedTombstones: pruned };
       }
+      pendingCloudSyncRef.current = true;
     }
     dbRef.current = next;
     setDbState(next);
@@ -3950,7 +3955,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
     if (hasCustomOfflineData) {
       pendingCloudSyncRef.current = true;
-      setHasPendingCloudChanges(true);
+      setHasPendingCloudChanges((prev) => (prev ? prev : true));
     }
 
     const hasDriveWorkPending = (targetScope: string, targetHash: string) =>
@@ -3974,7 +3979,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
         if (!hasDriveWorkPending(scope, curHash)) {
           pendingCloudSyncRef.current = false;
-          setHasPendingCloudChanges(false);
+          setHasPendingCloudChanges((prev) => (prev ? false : prev));
           saveSyncMeta(scope, { hasPendingCloudSync: false });
         }
         return;
@@ -10895,37 +10900,59 @@ function isEmailAuthorized(email?: string | null): boolean {
       const cleanTipo = tipo.trim() || 'Ponto Importante';
       const cleanTexto = texto.trim();
 
+      let changed = false;
       if (id.startsWith('correcao-prova:')) {
         const now = new Date().toISOString().slice(0, 19);
-        setDb((prev) => ({
-          ...prev,
-          proofFiles: prev.proofFiles.map((pf) => ({
-            ...pf,
-            correcoes: pf.correcoes.map((corr) => {
+        setDb((prev) => {
+          let localMutated = false;
+          const nextProofFiles = prev.proofFiles.map((pf) => {
+            let pfMutated = false;
+            const nextCorrecoes = pf.correcoes.map((corr) => {
               const entryId = `correcao-prova:${pf.kind}:${pf.bank}:${pf.name}:${corr.id}`;
               if (entryId !== id) return corr;
+              const nextTexto = cleanTexto || corr.texto;
+              const nextQuestao =
+                questionPatch?.enunciado !== undefined && questionPatch.enunciado.trim()
+                  ? questionPatch.enunciado.trim()
+                  : corr.questao;
+              const nextObservacoes =
+                questionPatch?.comentario !== undefined
+                  ? questionPatch.comentario.trim()
+                  : corr.observacoes;
+              if (
+                corr.materia === cleanMateria &&
+                corr.tipo === cleanTipo &&
+                corr.texto === nextTexto &&
+                corr.questao === nextQuestao &&
+                corr.observacoes === nextObservacoes
+              ) {
+                return corr;
+              }
+              pfMutated = true;
+              localMutated = true;
               return {
                 ...corr,
                 materia: cleanMateria,
                 tipo: cleanTipo,
-                texto: cleanTexto || corr.texto,
-                questao:
-                  questionPatch?.enunciado !== undefined && questionPatch.enunciado.trim()
-                    ? questionPatch.enunciado.trim()
-                    : corr.questao,
-                observacoes:
-                  questionPatch?.comentario !== undefined
-                    ? questionPatch.comentario.trim()
-                    : corr.observacoes,
+                texto: nextTexto,
+                questao: nextQuestao,
+                observacoes: nextObservacoes,
                 atualizado_em: now,
               };
-            }),
-          })),
-        }));
+            });
+            return pfMutated ? { ...pf, correcoes: nextCorrecoes } : pf;
+          });
+          if (!localMutated) return prev;
+          changed = true;
+          return {
+            ...prev,
+            proofFiles: nextProofFiles,
+          };
+        });
       } else {
-        setDb((prev) => ({
-          ...prev,
-          annotations: prev.annotations.map((item) => {
+        setDb((prev) => {
+          let localMutated = false;
+          const nextAnnotations = prev.annotations.map((item) => {
             if (item.id !== id) return item;
             const updatedQuestao =
               item.questao && questionPatch
@@ -10945,6 +10972,23 @@ function isEmailAuthorized(email?: string | null): boolean {
                       : {}),
                   }
                 : item.questao;
+            const questaoUnchanged =
+              item.questao === updatedQuestao ||
+              (item.questao &&
+                updatedQuestao &&
+                item.questao.enunciado === updatedQuestao.enunciado &&
+                item.questao.gabarito === updatedQuestao.gabarito &&
+                item.questao.resposta === updatedQuestao.resposta &&
+                item.questao.comentario === updatedQuestao.comentario);
+            if (
+              item.materia === cleanMateria &&
+              item.tipo === cleanTipo &&
+              item.texto === cleanTexto &&
+              questaoUnchanged
+            ) {
+              return item;
+            }
+            localMutated = true;
             return {
               ...item,
               materia: cleanMateria,
@@ -10952,10 +10996,16 @@ function isEmailAuthorized(email?: string | null): boolean {
               texto: cleanTexto,
               ...(updatedQuestao ? { questao: updatedQuestao } : {}),
             };
-          }),
-        }));
+          });
+          if (!localMutated) return prev;
+          changed = true;
+          return {
+            ...prev,
+            annotations: nextAnnotations,
+          };
+        });
       }
-      if (!silent) toast('Registro atualizado.');
+      if (!silent && changed) toast('Registro atualizado.');
     },
     [toast],
   );
@@ -13490,6 +13540,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         toast('Selecione um trecho da lei antes de grifar.', true);
         return;
       }
+      let changed = false;
       setDb((prev) => {
         const existing = prev.lawHighlights[folder] || [];
         const matchIdx = existing.findIndex(
@@ -13497,6 +13548,16 @@ function isEmailAuthorized(email?: string | null): boolean {
             h.text === trimmed &&
             (!options?.itemId || !h.itemId || h.itemId === options.itemId),
         );
+        if (
+          matchIdx >= 0 &&
+          existing[matchIdx].color === color &&
+          existing[matchIdx].itemId === options?.itemId &&
+          existing[matchIdx].startOffset === options?.startOffset &&
+          existing[matchIdx].endOffset === options?.endOffset
+        ) {
+          return prev;
+        }
+        changed = true;
         const nextEntry: LawHighlight = {
           id: matchIdx >= 0 && existing[matchIdx].id ? existing[matchIdx].id : uid(8),
           text: trimmed,
@@ -13514,7 +13575,9 @@ function isEmailAuthorized(email?: string | null): boolean {
           lawHighlights: { ...prev.lawHighlights, [folder]: next },
         };
       });
-      toast('Trecho salvo nos grifos.');
+      if (changed) {
+        toast('Trecho salvo nos grifos.');
+      }
     },
     [setDb, toast],
   );
@@ -13601,41 +13664,44 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const removeLastLawHighlight = useCallback(
     (folder: string) => {
+      let removed = false;
       setDb((prev) => {
-        const existing = [...(prev.lawHighlights[folder] || [])];
-        if (existing.length) existing.pop();
+        const existing = prev.lawHighlights[folder] || [];
+        if (!existing.length) return prev;
+        removed = true;
         return {
           ...prev,
-          lawHighlights: { ...prev.lawHighlights, [folder]: existing },
+          lawHighlights: { ...prev.lawHighlights, [folder]: existing.slice(0, -1) },
         };
       });
-      toast('Último grifo removido.');
+      if (removed) {
+        toast('Último grifo removido.');
+      }
     },
-    [toast],
+    [setDb, toast],
   );
 
   const saveLawNote = useCallback(
     (folder: string, note: string, silent = false) => {
       const cleanFolder = String(folder || '').trim();
       if (!cleanFolder) return;
+      let changed = false;
       setDb((prev) => {
         const prevMap = prev.lawNotes || {};
         if ((prevMap[cleanFolder] || '') === note) return prev;
+        changed = true;
         const nextMap = { ...prevMap };
         if (note.trim()) {
           nextMap[cleanFolder] = note;
         } else {
           delete nextMap[cleanFolder];
         }
-        const next: StudyDatabase = {
+        return {
           ...prev,
           lawNotes: nextMap,
         };
-        dbRef.current = next;
-        pendingCloudSyncRef.current = true;
-        return next;
       });
-      if (!silent) {
+      if (!silent && changed) {
         toast('Observações da lei salvas.');
       }
     },
@@ -13773,8 +13839,12 @@ function isEmailAuthorized(email?: string | null): boolean {
   const savePdfAnnotations = useCallback((blobKey: string, annotations: PdfFileAnnotations) => {
     if (!blobKey) return;
     setDb((prev) => {
-      const nextMap = { ...(prev.pdfAnnotations || {}) };
+      const prevMap = prev.pdfAnnotations || {};
+      const existing = prevMap[blobKey];
       const isEmpty = annotations.strokes.length === 0 && annotations.notes.length === 0;
+      if (isEmpty && !existing) return prev;
+      if (!isEmpty && existing === annotations) return prev;
+      const nextMap = { ...prevMap };
       if (isEmpty) {
         delete nextMap[blobKey];
       } else {

@@ -152,17 +152,17 @@ export const LawsPage: React.FC = () => {
   const [lawNoteDraft, setLawNoteDraft] = useState<string>(savedLawNote);
 
   useEffect(() => {
-    setLawNoteDraft(activeFolder ? db.lawNotes?.[activeFolder] || '' : '');
-  }, [activeFolder, db.lawNotes]);
+    setLawNoteDraft((prev) => (prev === savedLawNote ? prev : savedLawNote));
+  }, [activeFolder, savedLawNote]);
 
   useEffect(() => {
     if (!activeFolder) return;
-    if (lawNoteDraft === (db.lawNotes?.[activeFolder] || '')) return;
+    if (lawNoteDraft === savedLawNote) return;
     const t = window.setTimeout(() => {
       saveLawNote(activeFolder, lawNoteDraft, true);
     }, 650);
     return () => window.clearTimeout(t);
-  }, [activeFolder, db.lawNotes, lawNoteDraft, saveLawNote]);
+  }, [activeFolder, lawNoteDraft, savedLawNote, saveLawNote]);
 
   const handleJumpToArticle = (articleKey: string) => {
     const canonicalKey = resolveCanonicalArticleKeyFromQuery(articleKey);
