@@ -78,6 +78,7 @@ import {
   verifyDriveFolderWritable,
   extractDriveFolderId,
   openDrivePicker,
+  classifyDriveFileSyncOrigin,
   auth,
 } from '../lib/googleDrive';
 import {
@@ -116,6 +117,7 @@ import {
   serializeContestEditalTxt,
   serializeContestRegistrationTxt,
   serializeScheduleWeekToText,
+  sortLawItemsInOrder,
   splitExamQuestion,
   splitLawDevices,
   uid,
@@ -803,6 +805,7 @@ interface StudyContextValue {
   uploadLawFile: (folder: string, file: File, options?: { silent?: boolean }) => Promise<number>;
   reprocessLawFolder: (folder: string) => Promise<number>;
   deleteLawFolder: (folder: string) => Promise<number>;
+  deleteLawPdf: (folder: string, pdfId: string) => Promise<void>;
   addManualLawItem: (
     folder: string,
     dispositivo: string,
@@ -886,6 +889,7 @@ interface StudyContextValue {
   // Discursive Essays
   submitEssay: (titulo: string, file: File) => Promise<EssayRecord>;
   updateEssayCorrection: (essayId: string, feedback: string, correctedFile?: File | null) => Promise<EssayRecord>;
+  deleteEssay: (essayId: string) => Promise<void>;
 
   // Critical Points
   addCriticalPoint: (data: string, materia: string, titulo: string, texto: string) => void;
@@ -1797,7 +1801,11 @@ async function syncMissingReferencedBlobsToDrive(
         item.name,
         token,
         item.subfolder,
-        item.driveFile ? { existingFileId: item.driveFile.id } : undefined,
+        {
+          ...(item.driveFile ? { existingFileId: item.driveFile.id } : {}),
+          moduleTag: item.moduleLabel,
+          sourceAction: item.status === 'local-newer' ? 'sync-update' : 'sync-upload',
+        },
       );
       uploadedFiles.push(uploaded);
       uploadedCount += 1;
@@ -1839,6 +1847,7 @@ async function restoreFilesAndOrphansFromDriveList(
     skipTargetDbBlobs?: boolean;
     lazyBinaryBlobs?: boolean;
     knownSyncedFileIds?: Set<string>;
+    dbBaselineMs?: number;
   },
 ): Promise<{
   updatedDb: StudyDatabase;
@@ -1886,6 +1895,7 @@ async function restoreFilesAndOrphansFromDriveList(
     if (stripped && !driveByStripped.has(stripped)) driveByStripped.set(stripped, df);
   });
 
+  const onlyFileIdSet = options?.onlyFileIds?.length ? new Set(options.onlyFileIds) : null;
   const matchedDriveFileIds = new Set<string>();
   const knownFileNames = new Set<string>();
   let filesRestored = 0;
@@ -1900,6 +1910,43 @@ async function restoreFilesAndOrphansFromDriveList(
       skippedTombstonesCount += 1;
     }
     fileEvents.push(ev);
+  };
+
+  const pendingDeleteTargets = [
+    ...getPendingDriveDeletes(scope),
+    ...(scope !== 'offline_guest' ? getPendingDriveDeletes('offline_guest') : []),
+  ];
+  const matchesQueuedDriveDelete = (df: DriveFileInfo): boolean => {
+    if (pendingDeleteTargets.length === 0) return false;
+    const cleanId = String(df.id || '').trim();
+    const dfFull = normalizeSearch(visibleName(df.name || ''));
+    const dfStripped = normalizeSearch(visibleName(stripDrivePrefix(df.name || '')));
+    const dfSegs = String(df.folderPath || '')
+      .split('/')
+      .map((s) => normalizeSearch(visibleName(s)))
+      .filter(Boolean);
+    return pendingDeleteTargets.some((pd) => {
+      if (pd.fileIds?.some((id) => String(id || '').replace(/^drive_/, '').trim() === cleanId)) {
+        return true;
+      }
+      if (
+        pd.names?.some((n) => {
+          const nf = normalizeSearch(visibleName(n));
+          const ns = normalizeSearch(visibleName(stripDrivePrefix(n)));
+          return (
+            Boolean(nf && (nf === dfFull || nf === dfStripped)) ||
+            Boolean(ns && (ns === dfFull || ns === dfStripped))
+          );
+        })
+      ) {
+        return true;
+      }
+      if (pd.folderNames?.length && df.isInStudyFolder !== false) {
+        const fKeys = new Set(pd.folderNames.map((f) => normalizeSearch(visibleName(f))).filter(Boolean));
+        if (dfSegs.some((s) => fKeys.has(s))) return true;
+      }
+      return false;
+    });
   };
 
   const knownBackupRoots = [
@@ -1988,8 +2035,8 @@ async function restoreFilesAndOrphansFromDriveList(
     const hasExistingBlob = Boolean(existing && existing.size > 0);
 
     // When lazyBinaryBlobs or skipTargetDbBlobs is enabled (e.g. instant login hydration),
-    // skip uncached binaries, but still refresh blobs already cached locally if Drive has a newer timestamp.
-    if (skipBlobDownload && (!driveIsNewer || !hasExistingBlob)) {
+    // skip uncached binaries, unless explicitly picked or Drive has a newer timestamp for an existing cached blob.
+    if (skipBlobDownload && !(match?.id && onlyFileIdSet?.has(match.id)) && (!driveIsNewer || !hasExistingBlob)) {
       return;
     }
 
@@ -2016,12 +2063,18 @@ async function restoreFilesAndOrphansFromDriveList(
         if (driveIsNewer) {
           refreshedBlobTimestamps.set(blobKey, driveTimestampIso || new Date().toISOString());
         }
+        const restoredTag = classifyDriveFileSyncOrigin(match);
         pushFileEvent({
           name: stripDrivePrefix(match.name) || match.name,
           action: 'restored',
           module: match.subfolderName || undefined,
           driveFileId: match.id,
-          detail: driveIsNewer ? 'Atualizado do Drive (versão mais recente)' : undefined,
+          syncOrigin: restoredTag.origin,
+          detail: driveIsNewer
+            ? restoredTag.origin === 'external-modified'
+              ? 'Atualizado do Drive (modificado externamente)'
+              : 'Atualizado do Drive (versão mais recente)'
+            : undefined,
         });
       } catch (err: any) {
         const msg = String(err?.message || '');
@@ -2032,6 +2085,7 @@ async function restoreFilesAndOrphansFromDriveList(
           action: 'failed',
           module: match.subfolderName || undefined,
           driveFileId: match.id,
+          syncOrigin: classifyDriveFileSyncOrigin(match).origin,
           detail: msg || 'Falha ao baixar arquivo do Drive',
         });
         console.warn(`Falha ao carregar ${match.name}:`, err);
@@ -2184,8 +2238,6 @@ async function restoreFilesAndOrphansFromDriveList(
     );
   };
 
-  const onlyFileIdSet = options?.onlyFileIds?.length ? new Set(options.onlyFileIds) : null;
-
   const isGabaritoFilename = (name: string) =>
     /^GABARITO\s*-\s*/i.test(name) || /\.gabarito\.txt$/i.test(name);
 
@@ -2257,6 +2309,7 @@ async function restoreFilesAndOrphansFromDriveList(
 
     if (onlyFileIdSet) {
       if (!onlyFileIdSet.has(df.id)) return false;
+      if (matchedDriveFileIds.has(df.id)) return false;
       return !isBackupFile(df) && isSupportedRestorableStudyFile(df);
     }
     if (!inSelectedFolder(df)) return false;
@@ -2265,16 +2318,47 @@ async function restoreFilesAndOrphansFromDriveList(
     if (!isSupportedRestorableStudyFile(df)) return false;
     if (isGabaritoFilename(df.name)) return false;
     if (options?.lazyBinaryBlobs && dbAlreadyHydrated && knownSyncedIds?.has(df.id)) return false;
-    if (isDriveFileTombstoned(df, nextDb, scope)) {
+
+    const tagInfo = classifyDriveFileSyncOrigin(df);
+    if (isDriveFileTombstoned(df, nextDb, scope) || matchesQueuedDriveDelete(df)) {
       pushFileEvent({
         name: stripDrivePrefix(df.name) || df.name,
         action: 'skipped-tombstone',
         module: df.subfolderName || undefined,
         driveFileId: df.id,
-        detail: 'Bloqueado pelo registro de exclusão',
+        syncOrigin: tagInfo.origin,
+        detail:
+          tagInfo.origin === 'internal'
+            ? 'Cópia interna bloqueada pelo registro de exclusão'
+            : tagInfo.origin === 'external-modified'
+              ? 'Arquivo modificado externamente bloqueado por exclusão'
+              : 'Arquivo externo bloqueado pelo registro de exclusão',
       });
       return false;
     }
+
+    // Sync-tag state-confusion guard: during automatic login sync against an already-hydrated DB,
+    // an older internal app file absent from the DB snapshot was already removed/deleted previously.
+    if (
+      !options?.onlyFolderId &&
+      !options?.importFromAnyFolder &&
+      dbAlreadyHydrated &&
+      tagInfo.origin === 'internal' &&
+      tagInfo.syncedAtMs > 0 &&
+      options?.dbBaselineMs &&
+      tagInfo.syncedAtMs + 60_000 < options.dbBaselineMs
+    ) {
+      pushFileEvent({
+        name: stripDrivePrefix(df.name) || df.name,
+        action: 'skipped-tombstone',
+        module: df.subfolderName || undefined,
+        driveFileId: df.id,
+        syncOrigin: 'internal',
+        detail: 'Cópia interna anterior ao banco atual bloqueada pela etiqueta de sincronização',
+      });
+      return false;
+    }
+
     if (isDriveFilePermissionBlocked(df.id)) {
       permissionBlockedCount += 1;
       pushFileEvent({
@@ -2282,6 +2366,7 @@ async function restoreFilesAndOrphansFromDriveList(
         action: 'failed',
         module: df.subfolderName || undefined,
         driveFileId: df.id,
+        syncOrigin: tagInfo.origin,
         detail: 'Sem permissão do Seletor do Drive',
       });
       return false;
@@ -2422,6 +2507,14 @@ async function restoreFilesAndOrphansFromDriveList(
           }
         };
 
+        const dfOrigin = classifyDriveFileSyncOrigin(df).origin;
+        const originDetail =
+          dfOrigin === 'internal'
+            ? 'Etiqueta interna do app'
+            : dfOrigin === 'external-modified'
+              ? 'Modificado externamente no Drive'
+              : 'Enviado externamente (sem etiqueta)';
+
         if (isLaw) {
           let parsedItems: LawItem[] = [];
           if (blob) {
@@ -2466,7 +2559,9 @@ async function restoreFilesAndOrphansFromDriveList(
           nextLaws[folderKey] = {
             ...existingFolder,
             name: folderKey,
-            items: shouldAppendParsedItems ? [...existingFolder.items, ...parsedItems] : existingFolder.items,
+            items: shouldAppendParsedItems
+              ? sortLawItemsInOrder([...existingFolder.items, ...parsedItems])
+              : sortLawItemsInOrder(existingFolder.items),
             pdfs: updatedPdfs,
           };
           orphansImported += 1;
@@ -2475,6 +2570,8 @@ async function restoreFilesAndOrphansFromDriveList(
             action: 'imported-orphan',
             module: 'Lei Seca',
             driveFileId: df.id,
+            syncOrigin: dfOrigin,
+            detail: originDetail,
           });
         } else if (isProof) {
           const bankName =
@@ -2515,6 +2612,8 @@ async function restoreFilesAndOrphansFromDriveList(
             action: 'imported-orphan',
             module: 'Provas e Gabaritos',
             driveFileId: df.id,
+            syncOrigin: dfOrigin,
+            detail: originDetail,
           });
         } else if (isSummary) {
           const folderName =
@@ -2537,6 +2636,8 @@ async function restoreFilesAndOrphansFromDriveList(
             action: 'imported-orphan',
             module: 'Resumos e Mapas',
             driveFileId: df.id,
+            syncOrigin: dfOrigin,
+            detail: originDetail,
           });
         } else if (isEssay) {
           nextEssays.unshift({
@@ -2556,6 +2657,8 @@ async function restoreFilesAndOrphansFromDriveList(
             action: 'imported-orphan',
             module: 'Discursivas',
             driveFileId: df.id,
+            syncOrigin: dfOrigin,
+            detail: originDetail,
           });
         } else if (isTxtOrMd && forced === 'auto' && blob) {
           // Inspect text files outside canonical folders before misfiling into Personal PDFs
@@ -2584,6 +2687,8 @@ async function restoreFilesAndOrphansFromDriveList(
               action: 'imported-orphan',
               module: 'Provas e Gabaritos',
               driveFileId: df.id,
+              syncOrigin: dfOrigin,
+              detail: originDetail,
             });
           } else if (splitLawDevices(txt).length >= 2) {
             const detectedLaw = parseLawTextToItems(cleanName, txt);
@@ -2596,7 +2701,9 @@ async function restoreFilesAndOrphansFromDriveList(
               nextLaws[folderKey] = {
                 ...existingFolder,
                 name: folderKey,
-                items: existingFolder.items.length ? existingFolder.items : detectedLaw,
+                items: existingFolder.items.length
+                  ? sortLawItemsInOrder(existingFolder.items)
+                  : detectedLaw,
                 pdfs: [
                   ...existingFolder.pdfs,
                   { id: uid(10), name: cleanName, size: sizeNum, blobKey, createdAt: nowIso },
@@ -2608,6 +2715,8 @@ async function restoreFilesAndOrphansFromDriveList(
                 action: 'imported-orphan',
                 module: 'Lei Seca',
                 driveFileId: df.id,
+                syncOrigin: dfOrigin,
+                detail: originDetail,
               });
             }
           }
@@ -2638,6 +2747,8 @@ async function restoreFilesAndOrphansFromDriveList(
             action: 'imported-orphan',
             module: 'PDFs Pessoais',
             driveFileId: df.id,
+            syncOrigin: dfOrigin,
+            detail: originDetail,
           });
         }
       } catch (err: any) {
@@ -2649,6 +2760,7 @@ async function restoreFilesAndOrphansFromDriveList(
           action: 'failed',
           module: df.subfolderName || undefined,
           driveFileId: df.id,
+          syncOrigin: classifyDriveFileSyncOrigin(df).origin,
           detail: msg || 'Erro ao importar arquivo do Drive',
         });
         console.warn(`Falha ao recuperar arquivo "${df.name}" do Drive:`, err);
@@ -2716,7 +2828,7 @@ async function restoreFilesAndOrphansFromDriveList(
     if (recoveredItems.length > 0) {
       lawsAfterRecovery[folderKey] = {
         ...folderData,
-        items: recoveredItems,
+        items: sortLawItemsInOrder(recoveredItems),
       };
       lawsPatched = true;
       healedLawsCount += 1;
@@ -2733,12 +2845,16 @@ async function restoreFilesAndOrphansFromDriveList(
     if (!lower.endsWith('.txt')) return false;
     const matchesSchedule = df.subfolderName === 'Cronogramas' || /^CRONOGRAMA\s*-\s*/i.test(df.name);
     if (!matchesSchedule) return false;
-    if (!onlyFileIdSet?.has(df.id) && isDriveFileTombstoned(df, nextDb, scope)) {
+    if (
+      !onlyFileIdSet?.has(df.id) &&
+      (isDriveFileTombstoned(df, nextDb, scope) || matchesQueuedDriveDelete(df))
+    ) {
       pushFileEvent({
         name: stripDrivePrefix(df.name) || df.name,
         action: 'skipped-tombstone',
         module: 'Cronogramas',
         driveFileId: df.id,
+        syncOrigin: classifyDriveFileSyncOrigin(df).origin,
         detail: 'Cronograma ignorado pelo registro de exclusão',
       });
       return false;
@@ -2838,12 +2954,16 @@ async function restoreFilesAndOrphansFromDriveList(
       df.subfolderName === 'Editais' ||
       /^(?:DATAS\s*E\s*LOCAIS|EDITAL)\s*-\s*/i.test(df.name);
     if (!matchesContest) return false;
-    if (!onlyFileIdSet?.has(df.id) && isDriveFileTombstoned(df, nextDb, scope)) {
+    if (
+      !onlyFileIdSet?.has(df.id) &&
+      (isDriveFileTombstoned(df, nextDb, scope) || matchesQueuedDriveDelete(df))
+    ) {
       pushFileEvent({
         name: stripDrivePrefix(df.name) || df.name,
         action: 'skipped-tombstone',
         module: df.subfolderName || 'Editais',
         driveFileId: df.id,
+        syncOrigin: classifyDriveFileSyncOrigin(df).origin,
         detail: 'Edital/concurso ignorado pelo registro de exclusão',
       });
       return false;
@@ -3342,6 +3462,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 action: 'skipped-tombstone' as const,
                 module: c.moduleLabel,
                 driveFileId: c.driveFile.id,
+                syncOrigin: c.syncOrigin,
                 detail:
                   c.newerSide === 'drive'
                     ? 'Drive mais recente que a exclusão local'
@@ -3354,6 +3475,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 action: 'uploaded' as const,
                 module: item.moduleLabel,
                 driveFileId: item.driveFile?.id,
+                syncOrigin: item.syncOrigin,
                 detail: 'Versão local mais recente',
               })),
               ...report.driveNewer.map((item) => ({
@@ -3361,7 +3483,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 action: 'restored' as const,
                 module: item.moduleLabel,
                 driveFileId: item.driveFile?.id,
-                detail: 'Versão do Drive mais recente',
+                syncOrigin: item.syncOrigin,
+                detail:
+                  item.syncOrigin === 'external-modified'
+                    ? 'Versão do Drive mais recente (modificada externamente)'
+                    : 'Versão do Drive mais recente',
               })),
             ],
             stats: {
@@ -3616,13 +3742,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         lastFirestoreContentHash: dbHash,
         lastFirestoreTimerSig: timerSig,
         lastFirestoreSyncAt: syncedAt,
-        ...(options?.keepPendingCloudSync
-          ? {}
-          : {
-              lastCloudSyncAt: syncedAt,
-              lastCloudContentHash: dbHash,
-              hasPendingCloudSync: false,
-            }),
+        ...(options?.keepPendingCloudSync ? {} : { hasPendingCloudSync: false }),
       });
     },
     [],
@@ -3767,11 +3887,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return;
       }
 
-      const curSyncMeta = loadSyncMeta(scope);
-      if (
-        !isFirestoreDatabaseDirty(activeUser.uid, scope, curHash) ||
-        curHash === curSyncMeta.lastCloudContentHash
-      ) {
+      if (!isFirestoreDatabaseDirty(activeUser.uid, scope, curHash)) {
         if (firebaseSyncTimerRef.current) {
           window.clearTimeout(firebaseSyncTimerRef.current);
           firebaseSyncTimerRef.current = null;
@@ -3812,17 +3928,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const latestDb = dbRef.current;
           const latestScope = activeScopeRef.current;
           const latestHash = computeDatabaseContentHash(latestDb);
-          const latestMeta = loadSyncMeta(latestScope);
-          const latestTimerSig = computeTimerSyncSignature({
-            elapsed: timerStateRef.current.elapsed,
-            startedAt: timerStateRef.current.startedAt,
-            activeTopic: activeTimerTopicRef.current,
-          });
-
-          if (
-            !isFirestoreDatabaseDirty(currentUser.uid, latestScope, latestHash) ||
-            latestHash === latestMeta.lastCloudContentHash
-          ) {
+          if (!isFirestoreDatabaseDirty(currentUser.uid, latestScope, latestHash)) {
             if (!hasDriveWorkPending(latestScope, latestHash)) {
               pendingCloudSyncRef.current = false;
               setHasPendingCloudChanges(false);
@@ -3831,6 +3937,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             return;
           }
 
+          const latestTimerSig = computeTimerSyncSignature({
+            elapsed: timerStateRef.current.elapsed,
+            startedAt: timerStateRef.current.startedAt,
+            activeTopic: activeTimerTopicRef.current,
+          });
           const configDiag = getFirestoreConfigDiagnostics();
           const targetCollectionPath = `users/${currentUser.uid}/dbRecords`;
           console.log('[StudyProvider][autoSync] Status da conexão e destino Firestore:', {
@@ -4241,14 +4352,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         getPendingDriveDeletes(scope).length > 0 ||
         (scope !== 'offline_guest' && getPendingDriveDeletes('offline_guest').length > 0) ||
         (driveConnectedRef.current &&
-          Boolean(lastCloudHashRef.current) &&
-          lastCloudHashRef.current !== nextHash);
+          lastCloudHashRef.current !== nextHash &&
+          (!options?.sourceIsFirestore || Boolean(lastCloudHashRef.current) || !isUntouchedSeedDatabase(sanitizedDb)));
       persistLocalDatabaseForScope(scope, serialized, ts, {
-        lastCloudSyncAt: ts,
+        ...(options?.sourceIsFirestore ? {} : { lastCloudSyncAt: ts }),
         lastLocalEditAt: ts,
         hasPendingCloudSync: hasDrivePending,
       });
-      setLastCloudSyncAt(ts);
+      if (!options?.sourceIsFirestore) {
+        setLastCloudSyncAt(ts);
+      }
       setLastFirebaseSyncAt(ts);
       pendingCloudSyncRef.current = hasDrivePending;
       setHasPendingCloudChanges(hasDrivePending);
@@ -4737,7 +4850,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           let persistedGuestDb: StudyDatabase | null = null;
           if (guestIdbSnap?.raw && shouldPreferIdbSnapshot('offline_guest', guestIdbSnap, true)) {
             try {
-              persistedGuestDb = normalizeAndMergeDatabase(JSON.parse(guestIdbSnap.raw));
+              persistedGuestDb = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(guestIdbSnap.raw)),
+                'offline_guest',
+              );
             } catch {
               persistedGuestDb = null;
             }
@@ -4806,7 +4922,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               );
             }
             rescuedGuestEdits = true;
+            if (localDb.deletedTombstones) {
+              recordDeletedTombstones(scope, [], localDb.deletedTombstones);
+            }
+            const guestQueuedDeletes = getPendingDriveDeletes('offline_guest');
+            for (const qd of guestQueuedDeletes) {
+              queuePendingDriveDeletes(scope, qd);
+            }
+            clearPendingDriveDeletes('offline_guest');
             clearDeletedTombstones('offline_guest');
+            persistLocalDatabaseForScope(
+              'offline_guest',
+              JSON.stringify(createInitialDatabase()),
+              new Date().toISOString(),
+              { lastLocalEditAt: '', hasPendingCloudSync: false },
+            );
             const mergedIso = new Date(Math.max(candidateGuestMs, Date.now())).toISOString();
             localMeta = saveSyncMeta(scope, {
               lastMergedGuestEditAt: mergedIso,
@@ -4900,6 +5030,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             } else if (
               !rescuedGuestEdits &&
               !userEditedDuringHydrate &&
+              Date.now() - lastDeletionMsRef.current > 15_000 &&
+              getPendingDriveDeletes(scope).length === 0 &&
               (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))
             ) {
               if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
@@ -4910,13 +5042,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 });
               } else {
                 setLastFirebaseSyncAt(loadedFirestore.updatedAt);
+                const keepPending =
+                  Boolean(localMeta.hasPendingCloudSync) ||
+                  getPendingDriveDeletes(scope).length > 0 ||
+                  (driveConnectedRef.current && lastCloudHashRef.current !== (remoteUntouched ? localHash : remoteHash));
                 markFirestoreBaselineSynced(
                   googleUid,
                   scope,
                   remoteUntouched ? localHash : remoteHash,
                   serverTimerSig,
                   loadedFirestore.updatedAt,
-                  { keepPendingCloudSync: Boolean(localMeta.hasPendingCloudSync) },
+                  keepPending ? { keepPendingCloudSync: true } : undefined,
                 );
               }
               setFirebaseChunkCount(loadedFirestore.sectionCount);
@@ -5264,8 +5400,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               scope,
             );
             firestoreNormalizedHash = computeDatabaseContentHash(firestoreNormalized);
+            const hasLocalUnflushedWork =
+              hasPersistedPendingSync(preSyncMeta) ||
+              getPendingDriveDeletes(scope).length > 0 ||
+              Date.now() - lastDeletionMsRef.current < 15_000;
             if (!isUntouchedSeedDatabase(firestoreNormalized)) {
-              if (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500) {
+              if (
+                !hasLocalUnflushedWork &&
+                (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500)
+              ) {
                 currentDb = {
                   ...firestoreNormalized,
                   deletedTombstones: mergeTombstoneMaps(
@@ -5291,7 +5434,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           let persistedGuestDb: StudyDatabase | null = null;
           if (guestIdbSnap?.raw && shouldPreferIdbSnapshot('offline_guest', guestIdbSnap, true)) {
             try {
-              persistedGuestDb = normalizeAndMergeDatabase(JSON.parse(guestIdbSnap.raw));
+              persistedGuestDb = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(guestIdbSnap.raw)),
+                'offline_guest',
+              );
             } catch {
               persistedGuestDb = null;
             }
@@ -5365,7 +5511,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
             hasLocalAny = true;
             rescuedGuestEdits = true;
+            if (currentDb.deletedTombstones) {
+              recordDeletedTombstones(scope, [], currentDb.deletedTombstones);
+            }
+            const guestQueuedDeletes = getPendingDriveDeletes('offline_guest');
+            for (const qd of guestQueuedDeletes) {
+              queuePendingDriveDeletes(scope, qd);
+            }
+            clearPendingDriveDeletes('offline_guest');
             clearDeletedTombstones('offline_guest');
+            persistLocalDatabaseForScope(
+              'offline_guest',
+              JSON.stringify(createInitialDatabase()),
+              new Date().toISOString(),
+              { lastLocalEditAt: '', hasPendingCloudSync: false },
+            );
             const mergedIso = new Date(Math.max(candidateGuestMs, Date.now())).toISOString();
             saveSyncMeta(scope, {
               lastMergedGuestEditAt: mergedIso,
@@ -5611,6 +5771,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               sameSessionRenewal ||
               offlineLocalContinuation ||
               firestoreIsNewerThanDrive ||
+              (syncedScopeOnceRef.current === scope && pendingCloudSyncRef.current && hashesDiffer && !cloudOutsideActiveFolder) ||
               (hasPersistedUnsyncedLocal && localHasNewerDeletes && !cloudOutsideActiveFolder)
             ) {
               useCloudSnapshot = false;
@@ -5641,7 +5802,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   isUntouchedSeedDatabase(baseLocalDb)
                     ? (current, total, label) => setRestoreProgress({ current, total, label })
                     : undefined,
-                  { importFromAnyFolder: false, lazyBinaryBlobs: true, knownSyncedFileIds },
+                  {
+                    importFromAnyFolder: false,
+                    lazyBinaryBlobs: true,
+                    knownSyncedFileIds,
+                    dbBaselineMs: Math.max(idbEditMs, firestoreUpdatedMs, cloudMs),
+                  },
                 );
               if (permissionBlockedCount > 0) {
                 setDrivePermissionNeedsPicker({
@@ -5713,6 +5879,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   name: uf.name,
                   action: 'uploaded' as const,
                   driveFileId: uf.id,
+                  syncOrigin: uf.syncOrigin || 'internal',
                 })),
               ];
               recordSyncActivity({
@@ -5816,7 +5983,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   isUntouchedSeedDatabase(baseMergedCloudDb)
                     ? (current, total, label) => setRestoreProgress({ current, total, label })
                     : undefined,
-                  { importFromAnyFolder: false, lazyBinaryBlobs: true, knownSyncedFileIds },
+                  {
+                    importFromAnyFolder: false,
+                    lazyBinaryBlobs: true,
+                    knownSyncedFileIds,
+                    dbBaselineMs: Math.max(cloudMs, firestoreUpdatedMs, idbEditMs),
+                  },
                 );
               if (permissionBlockedCount > 0) {
                 setDrivePermissionNeedsPicker({
@@ -5867,8 +6039,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   : undefined,
               );
               const updatedHash = computeDatabaseContentHash(finalUpdatedDb);
+              let driveSnapshotUploadFailed = false;
+              const cloudNeedsSnapshotPush =
+                orphansImported > 0 ||
+                healedLawsCount > 0 ||
+                hadConcurrentLocalEdits ||
+                updatedHash !== cloudHash;
 
-              if (folderWritable && (orphansImported > 0 || healedLawsCount > 0 || hadConcurrentLocalEdits)) {
+              if (folderWritable && cloudNeedsSnapshotPush) {
                 try {
                   const savedSync = await saveCloudSyncSnapshot(
                     {
@@ -5880,20 +6058,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                       data: finalUpdatedDb,
                     },
                     token,
+                    updatedHash !== cloudHash ? { force: true } : undefined,
                   );
                   addUploadedToLocalSigMaps(savedSync, true);
                 } catch {
-                  // non-fatal background sync error
+                  driveSnapshotUploadFailed = true;
                 }
               }
 
-              lastCloudDbRef.current = finalUpdatedDb;
-              lastCloudHashRef.current = updatedHash;
+              const keepPendingDrive =
+                (!folderWritable && (hadConcurrentLocalEdits || updatedHash !== cloudHash)) ||
+                driveSnapshotUploadFailed;
+              lastCloudDbRef.current = driveSnapshotUploadFailed ? cloudDb : finalUpdatedDb;
+              lastCloudHashRef.current = driveSnapshotUploadFailed ? cloudHash : updatedHash;
               lastBackupDbRef.current = finalUpdatedDb;
               lastBackupHashRef.current = updatedHash;
               lastBackupIsoRef.current = cloudIso;
-              persistCacheState(updatedHash, updatedHash, { hasPendingCloudSync: !folderWritable && hadConcurrentLocalEdits });
-              if (!folderWritable && hadConcurrentLocalEdits) {
+              persistCacheState(updatedHash, updatedHash, { hasPendingCloudSync: keepPendingDrive });
+              if (keepPendingDrive) {
                 pendingCloudSyncRef.current = true;
                 setHasPendingCloudChanges(true);
               }
@@ -5907,6 +6089,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   name: uf.name,
                   action: 'uploaded' as const,
                   driveFileId: uf.id,
+                  syncOrigin: uf.syncOrigin || 'internal',
                 })),
               ];
               recordSyncActivity({
@@ -6025,9 +6208,32 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               affectedFiles: [
                 ...flushedPreDeletedNames.map((name) => ({ name, action: 'trashed' as const })),
                 ...fileEvents,
-                ...uploadedFiles.map((uf) => ({ name: uf.name, action: 'uploaded' as const, driveFileId: uf.id })),
-                ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
-                ...(savedInitialBackupFile ? [{ name: savedInitialBackupFile.name, action: 'uploaded' as const, driveFileId: savedInitialBackupFile.id }] : []),
+                ...uploadedFiles.map((uf) => ({
+                  name: uf.name,
+                  action: 'uploaded' as const,
+                  driveFileId: uf.id,
+                  syncOrigin: uf.syncOrigin || 'internal',
+                })),
+                ...(savedSyncFile
+                  ? [
+                      {
+                        name: savedSyncFile.name,
+                        action: 'uploaded' as const,
+                        driveFileId: savedSyncFile.id,
+                        syncOrigin: savedSyncFile.syncOrigin || 'internal',
+                      },
+                    ]
+                  : []),
+                ...(savedInitialBackupFile
+                  ? [
+                      {
+                        name: savedInitialBackupFile.name,
+                        action: 'uploaded' as const,
+                        driveFileId: savedInitialBackupFile.id,
+                        syncOrigin: savedInitialBackupFile.syncOrigin || 'internal',
+                      },
+                    ]
+                  : []),
               ],
               stats: {
                 trashed: flushedPreDeletedCount,
@@ -6168,8 +6374,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const mergedCloudDb: StudyDatabase = currentDb;
       const mergedHash = computeDatabaseContentHash(mergedCloudDb);
 
+      const forceSnapshot =
+        flushedDeleteIds.length > 0 ||
+        Date.now() - lastDeletionMsRef.current < 120_000 ||
+        syncedScopeOnceRef.current === scope;
+
       const savedSync =
-        lastCloudHashRef.current !== mergedHash
+        lastCloudHashRef.current !== mergedHash || flushedDeleteIds.length > 0
           ? await saveCloudSyncSnapshot(
               {
                 version: 2,
@@ -6180,6 +6391,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 data: mergedCloudDb,
               },
               token,
+              forceSnapshot ? { force: true } : undefined,
             )
           : null;
 
@@ -6225,19 +6437,80 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     } catch (err: any) {
       const errMsg = String(err?.message || '');
       if (errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE')) {
-        pendingCloudSyncRef.current = false;
-        setHasPendingCloudChanges(false);
-        recordSyncActivity({
-          category: 'drive-sync',
-          operation: 'Conflito na sincronização do Drive',
-          status: 'warning',
-          errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
-          message: 'Alterações mais recentes detectadas no Drive; envio bloqueado para evitar sobrescrita.',
-        });
-        toast(
-          'Alterações mais recentes encontradas no Google Drive. Evitando sobrescrita do arquivo remoto.',
-          true,
-        );
+        // Reconcile remote snapshot with local tombstones & force push so local deletions are never discarded
+        let reconciledOk = false;
+        try {
+          const latestCloud = await downloadLatestCloudSync(token, {
+            expectedEmail: googleUser?.email || undefined,
+            bypassCache: true,
+          });
+          let reconciledDb = currentDb;
+          if (latestCloud?.payload) {
+            let remoteDb = normalizeAndMergeDatabase(latestCloud.payload);
+            if (latestCloud.incrementalDeltas?.length) {
+              for (const incDelta of latestCloud.incrementalDeltas) {
+                remoteDb = applyIncrementalDeltaToDatabase(remoteDb, incDelta);
+              }
+            }
+            const mergedTombstones = mergeTombstoneMaps(
+              remoteDb.deletedTombstones,
+              currentDb.deletedTombstones,
+            );
+            reconciledDb = applyTombstonesToMergedDatabase(
+              {
+                ...currentDb,
+                deletedTombstones: mergedTombstones,
+              },
+              scope,
+            );
+          }
+          const reconciledIso = new Date().toISOString();
+          const reconciledHash = computeDatabaseContentHash(reconciledDb);
+          const forcedSync = await saveCloudSyncSnapshot(
+            {
+              version: 2,
+              app: 'Central de Estudos',
+              updatedAt: reconciledIso,
+              contentHash: reconciledHash,
+              userEmail: googleUser?.email || undefined,
+              data: reconciledDb,
+            },
+            token,
+            { force: true },
+          );
+          lastCloudDbRef.current = reconciledDb;
+          lastCloudHashRef.current = reconciledHash;
+          recordUploadedFilesInCacheMeta(scope, {
+            backupFiles: forcedSync ? [forcedSync] : [],
+            extraPatch: {
+              lastCloudSyncAt: reconciledIso,
+              lastCloudContentHash: reconciledHash,
+              hasPendingCloudSync: false,
+            },
+          });
+          setLastCloudSyncAt(reconciledIso);
+          pendingCloudSyncRef.current = false;
+          setHasPendingCloudChanges(false);
+          reconciledOk = true;
+        } catch {
+          reconciledOk = false;
+        }
+        if (!reconciledOk) {
+          pendingCloudSyncRef.current = true;
+          setHasPendingCloudChanges(true);
+          saveSyncMeta(scope, { hasPendingCloudSync: true });
+          recordSyncActivity({
+            category: 'drive-sync',
+            operation: 'Conflito na sincronização do Drive',
+            status: 'warning',
+            errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
+            message: 'Alterações mais recentes detectadas no Drive; nova tentativa mantida na fila.',
+          });
+          toast(
+            'Alterações mais recentes encontradas no Google Drive. Nova tentativa automática permanece na fila.',
+            true,
+          );
+        }
       } else {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
@@ -6657,7 +6930,10 @@ function isEmailAuthorized(email?: string | null): boolean {
             }
             if (!shouldPreferIdbSnapshot(newScope, idbSnap, lsHas)) return;
             try {
-              const idbParsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+              const idbParsed = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+                newScope,
+              );
               isRestoringRef.current = true;
               skipPersistDbRef.current = idbParsed;
               lastPersistedDbRef.current = idbParsed;
@@ -6783,7 +7059,10 @@ function isEmailAuthorized(email?: string | null): boolean {
             }
             if (!shouldPreferIdbSnapshot(newScope, idbSnap, lsHas)) return;
             try {
-              const idbParsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+              const idbParsed = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+                newScope,
+              );
               isRestoringRef.current = true;
               skipPersistDbRef.current = idbParsed;
               lastPersistedDbRef.current = idbParsed;
@@ -7206,7 +7485,10 @@ function isEmailAuthorized(email?: string | null): boolean {
           try {
             const idbSnap = await loadScopedDatabaseJson(newScope);
             if (idbSnap?.raw && shouldPreferIdbSnapshot(newScope, idbSnap, hadScopedLocal)) {
-              nextDb = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+              nextDb = applyTombstonesToMergedDatabase(
+                normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+                newScope,
+              );
               hadScopedLocal = true;
             }
           } catch {
@@ -7360,7 +7642,10 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
         if (!shouldPreferIdbSnapshot(newScope, idbSnap, lsHas)) return;
         try {
-          const idbParsed = normalizeAndMergeDatabase(JSON.parse(idbSnap.raw));
+          const idbParsed = applyTombstonesToMergedDatabase(
+            normalizeAndMergeDatabase(JSON.parse(idbSnap.raw)),
+            newScope,
+          );
           isRestoringRef.current = true;
           skipPersistDbRef.current = idbParsed;
           lastPersistedDbRef.current = idbParsed;
@@ -7620,7 +7905,11 @@ function isEmailAuthorized(email?: string | null): boolean {
             comp.name,
             activeToken,
             comp.subfolder,
-            comp.driveFile ? { existingFileId: comp.driveFile.id } : undefined,
+            {
+              ...(comp.driveFile ? { existingFileId: comp.driveFile.id } : {}),
+              moduleTag: comp.moduleLabel,
+              sourceAction: comp.status === 'local-newer' ? 'manual-update' : 'manual-upload',
+            },
           );
           uploadedDriveFiles.push(uploadedFile);
           synced += 1;
@@ -7648,7 +7937,10 @@ function isEmailAuthorized(email?: string | null): boolean {
           continue;
         }
         try {
-          const uploadedFile = await uploadFileToDrive(item.blob, targetName, activeToken);
+          const uploadedFile = await uploadFileToDrive(item.blob, targetName, activeToken, undefined, {
+            moduleTag: 'LocalBlob',
+            sourceAction: 'manual-upload',
+          });
           existingNamesLower.add(targetName.toLowerCase());
           uploadedDriveFiles.push(uploadedFile);
           synced += 1;
@@ -7711,8 +8003,22 @@ function isEmailAuthorized(email?: string | null): boolean {
             ? `${synced} arquivo(s) enviado(s)/atualizado(s) no Drive; ${skipped} já atualizado(s).`
             : `Todos os ${skipped} arquivo(s) locais já estão atualizados no Google Drive.`,
         affectedFiles: [
-          ...uploadedDriveFiles.map((uf) => ({ name: uf.name, action: 'uploaded' as const, driveFileId: uf.id })),
-          ...(savedSyncFile ? [{ name: savedSyncFile.name, action: 'uploaded' as const, driveFileId: savedSyncFile.id }] : []),
+          ...uploadedDriveFiles.map((uf) => ({
+            name: uf.name,
+            action: 'uploaded' as const,
+            driveFileId: uf.id,
+            syncOrigin: uf.syncOrigin || 'internal',
+          })),
+          ...(savedSyncFile
+            ? [
+                {
+                  name: savedSyncFile.name,
+                  action: 'uploaded' as const,
+                  driveFileId: savedSyncFile.id,
+                  syncOrigin: savedSyncFile.syncOrigin || 'internal',
+                },
+              ]
+            : []),
           ...failedFileEvents,
         ],
         stats: { uploaded: synced + (savedSyncFile ? 1 : 0) },
@@ -8385,13 +8691,6 @@ function isEmailAuthorized(email?: string | null): boolean {
             : undefined);
 
         if (!match) return null;
-        if (isDriveFilePermissionBlocked(match.id)) {
-          toast(
-            'Este arquivo foi enviado ao Google Drive fora do app. Use "Selecionar arquivos no Drive" em Backup e Restauração para autorizar o acesso.',
-            true,
-          );
-          return null;
-        }
         const blob = await downloadDriveFileBlob(match.id, activeToken, match.mimeType);
         await saveFileBlob(blobKey, blob, activeScopeRef.current);
         return blob;
@@ -8401,7 +8700,7 @@ function isEmailAuthorized(email?: string | null): boolean {
           setDriveTokenReady(false);
         } else if (msg.includes('PICKER_FILE_PERMISSION')) {
           toast(
-            'Permissão necessária pelo Google Drive: use "Selecionar arquivos no Drive" em Backup e Restauração para autorizar este arquivo.',
+            'Este arquivo foi enviado ao Google Drive fora do app. Use "Selecionar arquivo no Drive" para autorizar o acesso.',
             true,
           );
         }
@@ -8445,7 +8744,11 @@ function isEmailAuthorized(email?: string | null): boolean {
       setDriveTokenReady(true);
 
       try {
-        const uploaded = await uploadFileToDrive(fileOrBlob, filename, token, subfolderName);
+        const moduleTag = Array.isArray(subfolderName) ? subfolderName[0] : subfolderName;
+        const uploaded = await uploadFileToDrive(fileOrBlob, filename, token, subfolderName, {
+          moduleTag,
+          sourceAction: 'auto-upload',
+        });
         const updatedMeta = recordUploadedFilesInCacheMeta(activeScopeRef.current, {
           driveFiles: [uploaded],
         });
@@ -8454,13 +8757,14 @@ function isEmailAuthorized(email?: string | null): boolean {
           category: 'drive-upload',
           operation: 'Arquivo enviado ao Google Drive',
           status: 'success',
-          message: `Arquivo "${filename}" enviado e sincronizado no Google Drive.`,
+          message: `Arquivo "${filename}" enviado e etiquetado para sincronização no Google Drive.`,
           affectedFiles: [
             {
               name: uploaded.name || filename,
               action: 'uploaded',
               driveFileId: uploaded.id,
               module: Array.isArray(subfolderName) ? subfolderName.join(' / ') : subfolderName,
+              syncOrigin: uploaded.syncOrigin || 'internal',
             },
           ],
           stats: { uploaded: 1 },
@@ -8543,6 +8847,11 @@ function isEmailAuthorized(email?: string | null): boolean {
         removeFileIdsFromCacheMeta(scope, [target.driveFile.id]);
         dismissedConflictIdsRef.current.delete(conflictId);
         setDriveSyncConflicts((prev) => prev.filter((c) => c.id !== conflictId));
+        lastDeletionMsRef.current = Date.now();
+        pendingCloudSyncRef.current = true;
+        setHasPendingCloudChanges(true);
+        saveSyncMeta(scope, { hasPendingCloudSync: true });
+        void flushCloudSyncNow();
 
         recordSyncActivity(
           {
@@ -8556,6 +8865,7 @@ function isEmailAuthorized(email?: string | null): boolean {
                 action: 'trashed',
                 module: target.moduleLabel,
                 driveFileId: target.driveFile.id,
+                syncOrigin: target.syncOrigin,
               },
             ],
             stats: { trashed: 1 },
@@ -8573,7 +8883,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         setResolvingDriveConflictId((prev) => (prev === conflictId ? null : prev));
       }
     },
-    [ensureDriveToken, recordSyncActivity, toast],
+    [ensureDriveToken, flushCloudSyncNow, recordSyncActivity, toast],
   );
 
   const resolveDriveConflictRestoreLocal = useCallback(
@@ -8647,6 +8957,7 @@ function isEmailAuthorized(email?: string | null): boolean {
                 action: 'restored',
                 module: target.moduleLabel,
                 driveFileId: target.driveFile.id,
+                syncOrigin: target.syncOrigin,
               },
             ],
             stats: { restored: Math.max(1, res.filesRestored + res.orphansImported) },
@@ -11398,14 +11709,13 @@ function isEmailAuthorized(email?: string | null): boolean {
       setDb((prev) => {
         const nextMap = { ...(prev.weeklySchedules || {}) };
         delete nextMap[cleanKey];
-        const next: StudyDatabase = {
+        return {
           ...prev,
           weeklySchedules: nextMap,
         };
-        dbRef.current = next;
-        pendingCloudSyncRef.current = true;
-        return next;
       });
+      lastDeletionMsRef.current = Date.now();
+      pendingCloudSyncRef.current = true;
       void deleteFileBlob(`schedule_week_${cleanKey}`);
       toast('Arquivo semanal removido da lista.');
     },
@@ -11499,15 +11809,12 @@ function isEmailAuthorized(email?: string | null): boolean {
             : undefined;
 
         if (existingTargetWeek) {
-          const next: StudyDatabase = {
+          return {
             ...prev,
             schedule: existingTargetWeek.schedule,
             scheduleDayDates: existingTargetWeek.scheduleDayDates,
             weeklySchedules: mapWithPrev,
           };
-          dbRef.current = next;
-          pendingCloudSyncRef.current = true;
-          return next;
         }
 
         const nextDayDates: Partial<Record<WeekdayName, string>> = {};
@@ -11528,7 +11835,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         });
 
         const targetMeta = buildScheduleWeekMetadata(cleanWeekKey, nextDayDates);
-        const next: StudyDatabase = {
+        return {
           ...prev,
           schedule: nextSchedule,
           scheduleDayDates: targetMeta.dayDates,
@@ -11545,9 +11852,6 @@ function isEmailAuthorized(email?: string | null): boolean {
             },
           },
         };
-        dbRef.current = next;
-        pendingCloudSyncRef.current = true;
-        return next;
       });
       scheduleAutoScheduleTxtSync(cleanWeekKey);
       if (!options?.silent) {
@@ -11617,6 +11921,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         const nextSchedule = { ...prev.schedule, [day]: nextDay };
         return buildUpdatedWeeklyScheduleState(prev, nextSchedule, prev.scheduleDayDates);
       });
+      lastDeletionMsRef.current = Date.now();
       scheduleAutoScheduleTxtSync();
     },
     [scheduleAutoScheduleTxtSync],
@@ -11969,7 +12274,7 @@ function isEmailAuthorized(email?: string | null): boolean {
             ...prev.laws,
             [resolvedKey]: {
               name: resolvedKey,
-              items: [...existing.items, ...parsedItems],
+              items: sortLawItemsInOrder([...existing.items, ...parsedItems]),
               pdfs: [...existing.pdfs, fileEntry],
             },
           },
@@ -12070,7 +12375,7 @@ function isEmailAuthorized(email?: string | null): boolean {
             ...prev.laws,
             [folder]: {
               ...cur,
-              items: mergedRecovered,
+              items: sortLawItemsInOrder(mergedRecovered),
             },
           },
         };
@@ -12131,7 +12436,7 @@ function isEmailAuthorized(email?: string | null): boolean {
               ...prev.laws,
               [folderKey]: {
                 ...cur,
-                items: recoveredItems,
+                items: sortLawItemsInOrder(recoveredItems),
               },
             },
           };
@@ -12198,6 +12503,41 @@ function isEmailAuthorized(email?: string | null): boolean {
     [deleteOrQueueDriveFiles, toast],
   );
 
+  const deleteLawPdf = useCallback(
+    async (folder: string, pdfId: string) => {
+      const folderData = dbRef.current.laws[folder];
+      const target = folderData?.pdfs?.find((p) => p.id === pdfId);
+      if (!target) return;
+
+      if (target.blobKey) {
+        await deleteFileBlob(target.blobKey);
+      }
+
+      deleteOrQueueDriveFiles({
+        fileIds: target.blobKey?.startsWith('drive_') ? [target.blobKey] : undefined,
+        names: [`LEI - ${target.name}`, target.name],
+        subfolderHints: ['Lei Seca', visibleName(folder)].filter(Boolean),
+      });
+
+      setDb((prev) => {
+        const cur = prev.laws[folder];
+        if (!cur) return prev;
+        return {
+          ...prev,
+          laws: {
+            ...prev.laws,
+            [folder]: {
+              ...cur,
+              pdfs: (cur.pdfs || []).filter((p) => p.id !== pdfId),
+            },
+          },
+        };
+      });
+      toast(`Arquivo "${visibleName(target.name)}" excluído da legislação.`);
+    },
+    [deleteOrQueueDriveFiles, toast],
+  );
+
   const addManualLawItem = useCallback(
     (folder: string, dispositivo: string, texto: string, dica: string, grau: IncidenceGrade) => {
       if (!dispositivo.trim() || !texto.trim()) {
@@ -12222,7 +12562,7 @@ function isEmailAuthorized(email?: string | null): boolean {
           ...prev,
           laws: {
             ...prev.laws,
-            [folder]: { ...existing, items: [...existing.items, newItem] },
+            [folder]: { ...existing, items: sortLawItemsInOrder([...existing.items, newItem]) },
           },
         };
       });
@@ -12282,7 +12622,7 @@ function isEmailAuthorized(email?: string | null): boolean {
             ...prev.laws,
             [folder]: {
               ...current,
-              items: nextItems,
+              items: sortLawItemsInOrder(nextItems),
             },
           },
         };
@@ -13514,6 +13854,45 @@ function isEmailAuthorized(email?: string | null): boolean {
     [autoSyncFileToDrive, db.essays, toast],
   );
 
+  const deleteEssay = useCallback(
+    async (essayId: string) => {
+      const target = dbRef.current.essays.find((e) => e.id === essayId);
+      if (!target) return;
+
+      if (target.original_blobKey) {
+        await deleteFileBlob(target.original_blobKey);
+      }
+      if (target.corrigido_blobKey) {
+        await deleteFileBlob(target.corrigido_blobKey);
+      }
+
+      const fileIds: string[] = [];
+      const names: string[] = [];
+      if (target.original_blobKey?.startsWith('drive_')) fileIds.push(target.original_blobKey);
+      if (target.corrigido_blobKey?.startsWith('drive_')) fileIds.push(target.corrigido_blobKey);
+      if (target.original_arquivo) {
+        names.push(`DISCURSIVA - ${target.original_arquivo}`, target.original_arquivo);
+      }
+      if (target.corrigido_arquivo) {
+        names.push(`CORRECAO - ${target.corrigido_arquivo}`, target.corrigido_arquivo);
+      }
+      if (fileIds.length > 0 || names.length > 0) {
+        deleteOrQueueDriveFiles({
+          fileIds: fileIds.length > 0 ? fileIds : undefined,
+          names: names.length > 0 ? names : undefined,
+          subfolderHints: ['Discursivas'],
+        });
+      }
+
+      setDb((prev) => ({
+        ...prev,
+        essays: prev.essays.filter((e) => e.id !== essayId),
+      }));
+      toast(`Redação "${visibleName(target.titulo)}" excluída.`);
+    },
+    [deleteOrQueueDriveFiles, toast],
+  );
+
   // Critical Points
   const addCriticalPoint = useCallback(
     (data: string, materia: string, titulo: string, texto: string) => {
@@ -13714,17 +14093,19 @@ function isEmailAuthorized(email?: string | null): boolean {
       await saveFileBlob(blobKey, file);
       const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
       await autoSyncFileToDrive(file, file.name, folderLabel ? ['Lei Seca', folderLabel] : 'Lei Seca');
-      const items: LawItem[] = devices.map((d, idx) => ({
-        id: `${folder}_formatada.txt::${idx}`,
-        arquivo: `${folder}_formatada.txt`,
-        dispositivo: d.dispositivo,
-        grau: 'Não Classificado',
-        texto: d.texto,
-        dica: '',
-        observacao: '',
-        artigo_base: d.artigo_base,
-        tipo_dispositivo: d.tipo_dispositivo,
-      }));
+      const items: LawItem[] = sortLawItemsInOrder(
+        devices.map((d, idx) => ({
+          id: `${folder}_formatada.txt::${idx}`,
+          arquivo: `${folder}_formatada.txt`,
+          dispositivo: d.dispositivo,
+          grau: 'Não Classificado',
+          texto: d.texto,
+          dica: '',
+          observacao: '',
+          artigo_base: d.artigo_base,
+          tipo_dispositivo: d.tipo_dispositivo,
+        })),
+      );
       const newPdfEntry: LawPdfEntry = {
         id: uid(12),
         name: file.name,
@@ -14138,6 +14519,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         uploadLawFile,
         reprocessLawFolder,
         deleteLawFolder,
+        deleteLawPdf,
         addManualLawItem,
         updateLawItem,
         deleteLawItem,
@@ -14173,6 +14555,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         deleteProofCorrection,
         submitEssay,
         updateEssayCorrection,
+        deleteEssay,
         addCriticalPoint,
         deleteCriticalPoint,
         importQuestionsTxt,

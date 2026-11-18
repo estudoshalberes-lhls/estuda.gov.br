@@ -1265,27 +1265,37 @@ export function parseScheduleText(text: string): Array<{ day: WeekdayName; topic
   return topics;
 }
 
+const LEGAL_PREPOSITION_OR_REF_RE =
+  /^(?:art|arts|artigo|artigos|do|da|de|dos|das|no|na|nos|nas|ao|à|aos|às|pelo|pela|pelos|pelas|pro|pra|com|em|por|para|entre|sobre|sob|ante|até|apos|após|contra|desde|perante|conforme|segundo|mediante|salvo|exceto|ou|e|o|a|os|as|seu|sua|seus|suas|este|esta|estes|estas|esse|essa|esses|essas|aquele|aquela|aqueles|aquelas|vide|cf|cfr|cit|cujo|cuja|cujos|cujas|que|como|quanto|disposto|previsto|previstos|prevista|previstas|referido|referidos|referida|referidas|mencionado|mencionados|observado|observados|ressalvado|ressalvados|indicado|indicados|descrito|descritos|estabelecido|estabelecidos|caput|inciso|incisos|alínea|alinea|parágrafo|paragrafo|termos|forma)$/i;
+
 export function cleanAndStructureLawText(rawText: string): string {
   if (!rawText) return '';
 
   let text = rawText
     .replace(/\r\n/g, '\n')
     .replace(/\r/g, '\n')
+    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '')
     .replace(/[\u00a0\u2007\u202f]/g, ' ');
 
-  // Split mid-line when a genuine device header follows sentence-ending punctuation or an incidence grade
-  // (e.g., glued PDF text or legacy glued items), never after prepositions like "do", "no", "na", "ao", "o", etc.
-  const afterBoundary = '(?<=[.;:)!?>]|MUITO\\s+ALT[AO]|\\bALT[AO]|\\bM[ÉE]DI[AO]|\\bBAIX[AO])';
+  // Normalize stray spaces/dots between article/paragraph number and ordinal symbol (e.g. "Art. 1.º", "Art. 2 º", "§ 1.º")
+  text = text
+    .replace(/\b(Art|ART)\.?\s*(\d{1,4})\.\s*([º°ª])(?=\s|$|[-–—.,;:a-zA-Z])/g, '$1. $2$3')
+    .replace(/\b(Art|ART)\.?\s*(\d{1,4})\s+([º°ª])(?=\s|$|[-–—.,;:a-zA-Z])/g, '$1. $2$3')
+    .replace(/(§)\s*(\d{1,4})\.\s*([º°ª])/g, '$1 $2$3')
+    .replace(/(§)\s*(\d{1,4})\s+([º°ª])/g, '$1 $2$3');
+
+  // Split mid-line when a genuine device header follows sentence-ending punctuation, closing quotes/brackets, tabs, pipes, or an incidence grade
+  const afterBoundary = '(?<=[.;:)!?>”"»\\]\\t|]|MUITO\\s+ALT[AO]|\\bALT[AO]|\\bM[ÉE]DI[AO]|\\bBAIX[AO])';
   const gluedArticlePattern = new RegExp(
-    `${afterBoundary}[ \\t]+(?=(?:Art(?:igo)?|ART(?:IGO)?)\\.?\\s*\\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*(?:\\s|[.:\\-–—]))`,
+    `${afterBoundary}[ \\t]*(?=(?:Art(?:igo)?|ART(?:IGO)?)\\.?\\s*\\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*(?:\\s|[.:\\-–—]|$))`,
     'g',
   );
   const gluedParagraphPattern = new RegExp(
-    `${afterBoundary}[ \\t]+(?=(?:§\\s*(?:\\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico)|Par[áa]grafo\\s+(?:\\d{1,4}|[úu]nico))\\b)`,
+    `${afterBoundary}[ \\t]*(?=(?:§\\s*(?:\\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico)|Par[áa]grafo\\s+(?:\\d{1,4}|[úu]nico))\\b)`,
     'gi',
   );
   const gluedIncisoPattern = new RegExp(
-    `(?<=[.;:)>]|MUITO\\s+ALT[AO]|\\bALT[AO]|\\bM[ÉE]DI[AO]|\\bBAIX[AO])[ \\t]+(?=[IVXLCDM]{1,8}[ \\t]*[-–—.)][ \\t]+)`,
+    `(?<=[.;:)>”"»\\]]|MUITO\\s+ALT[AO]|\\bALT[AO]|\\bM[ÉE]DI[AO]|\\bBAIX[AO])[ \\t]+(?=[IVXLCDM]{1,8}[ \\t]*[-–—.)][ \\t]+)`,
     'g',
   );
   const afterGradeBoundary = '(?<=MUITO\\s+ALT[AO]|\\bALT[AO]|\\bM[ÉE]DI[AO]|\\bBAIX[AO])';
@@ -1315,14 +1325,37 @@ export function cleanAndStructureLawText(rawText: string): string {
     .replace(gluedStandaloneRubricaPattern, '\n')
     .replace(gluedRubricaAfterGradePattern, '\n');
 
+  // Split unpunctuated mid-line glued articles (e.g. from PDF page/table merges lacking period) when clearly NOT a cross-reference
+  text = text.replace(
+    /([^\s\n]+)[ \t]+((?:Art|ART)\.?\s*\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)(?=[ \t]*[:.\-–—]?[ \t]*(?:[A-ZÁÀÂÃÉÊÍÓÔÕÚÇ(“"§]|$))/g,
+    (full, prevWord: string, artHeader: string, offset: number, src: string) => {
+      const cleanedPrev = prevWord.replace(/^["“(]+|[.,;:)"”']+$/g, '');
+      if (!cleanedPrev || LEGAL_PREPOSITION_OR_REF_RE.test(cleanedPrev)) {
+        return full;
+      }
+      const afterSlice = src.slice(offset + full.length, offset + full.length + 32).trimStart();
+      if (/^(?:da|do|de|dos|das|no|na|nos|nas|desta|deste|dessa|desse|e|ou|a|o)\b/i.test(afterSlice)) {
+        return full;
+      }
+      if (/^(?:CAP[ÍI]TULO|T[ÍI]TULO|SE[ÇC][ÃA]O|LIVRO|PARTE)$/i.test(cleanedPrev)) {
+        return `${prevWord}\n${artHeader}`;
+      }
+      if (/^[a-záàâãéêíóôõúç0-9)\]]+$/.test(prevWord)) {
+        return `${prevWord}\n${artHeader}`;
+      }
+      return full;
+    },
+  );
+
   const lines = text
     .split('\n')
-    .map((l) => l.trim())
+    .map((l) => l.trim().replace(/^[•▪▫►◦]+\s*(?=(?:Art|ART|§|Par[áa]grafo|Inciso|Al[íi]nea|[IVXLCDM]{1,8}\s*[-–—.)]|[a-z]\)))/i, ''))
     .filter((l) => Boolean(l) && !l.startsWith('#'))
     .map((line) =>
       line
         .replace(/^(?:Artigo|ARTIGO)\s+(\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/, 'Art. $1')
         .replace(/^ART\.\s*(\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/, 'Art. $1')
+        .replace(/^Art\s+(\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/i, 'Art. $1')
         .replace(/^Art\.\s*([1-9])(?![º°ªo0-9-])/, 'Art. $1º')
         .replace(/^Par[áa]grafo\s+[úu]nico\b/i, 'Parágrafo único')
         .replace(/^Par[áa]grafo\s+(\d+)(?:[º°ªo])?/i, '§ $1º')
@@ -1424,6 +1457,375 @@ export function formatSequentialDeviceLabel(dispositivo: string, artigoBase?: st
   return label;
 }
 
+interface ParsedArticleSortKey {
+  sectionGroup: 0 | 1 | 2; // 0 = Preâmbulo, 1 = Art. N, 2 = unnumbered fallback
+  num: number;
+  suffixTokens: Array<{ isNum: boolean; num: number; str: string }>;
+  subKind: 0 | 1 | 2; // 0 = Rubrica, 1 = Caput, 2 = Child (§ / Inciso / Alínea / Pena / Dispositivo)
+}
+
+function parseArticleSortKey(item: {
+  dispositivo?: string;
+  artigo_base?: string;
+  tipo_dispositivo?: string;
+}): ParsedArticleSortKey {
+  const disp = String(item.dispositivo || '').trim();
+  const tipo = String(item.tipo_dispositivo || '').trim();
+  if (tipo === 'Preâmbulo' || /^pre[âa]mbulo$/i.test(disp)) {
+    return { sectionGroup: 0, num: -1, suffixTokens: [], subKind: 1 };
+  }
+
+  const artSource = String(item.artigo_base || disp || '').trim();
+  const m = artSource.match(/^Art(?:igo)?\.?\s*(\d{1,5})(?:\.\s*[º°ª]|[º°ªo])?((?:-[A-Za-z0-9]+)*)/i);
+  if (!m) {
+    return { sectionGroup: 2, num: Number.MAX_SAFE_INTEGER, suffixTokens: [], subKind: 2 };
+  }
+
+  const num = parseInt(m[1], 10);
+  const rawSuffix = (m[2] || '').trim();
+  const suffixTokens = rawSuffix
+    .split('-')
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => {
+      if (/^\d+$/.test(p)) {
+        return { isNum: true, num: parseInt(p, 10), str: '' };
+      }
+      return { isNum: false, num: 0, str: p.toUpperCase() };
+    });
+
+  let subKind: 0 | 1 | 2 = 2;
+  if (tipo === 'Rubrica' || /^rubrica$/i.test(disp)) {
+    subKind = 0;
+  } else if (
+    tipo === 'Artigo (caput)' ||
+    /^Art(?:igo)?\.?\s*\d{1,5}(?:\.\s*[º°ª]|[º°ªo])?(?:-[A-Za-z0-9]+)*\.?$/i.test(disp)
+  ) {
+    subKind = 1;
+  }
+
+  return { sectionGroup: 1, num, suffixTokens, subKind };
+}
+
+export function compareLawItemsCanonicalOrder(
+  a: { dispositivo?: string; artigo_base?: string; tipo_dispositivo?: string },
+  b: { dispositivo?: string; artigo_base?: string; tipo_dispositivo?: string },
+  idxA = 0,
+  idxB = 0,
+): number {
+  const ka = parseArticleSortKey(a);
+  const kb = parseArticleSortKey(b);
+
+  if (ka.sectionGroup !== kb.sectionGroup) {
+    return ka.sectionGroup - kb.sectionGroup;
+  }
+
+  if (ka.sectionGroup === 1) {
+    if (ka.num !== kb.num) {
+      return ka.num - kb.num;
+    }
+
+    const minLen = Math.min(ka.suffixTokens.length, kb.suffixTokens.length);
+    for (let i = 0; i < minLen; i++) {
+      const ta = ka.suffixTokens[i];
+      const tb = kb.suffixTokens[i];
+      if (ta.isNum !== tb.isNum) {
+        return ta.isNum ? -1 : 1;
+      }
+      if (ta.isNum) {
+        if (ta.num !== tb.num) return ta.num - tb.num;
+      } else {
+        if (ta.str.length !== tb.str.length) return ta.str.length - tb.str.length;
+        if (ta.str !== tb.str) return ta.str < tb.str ? -1 : 1;
+      }
+    }
+    if (ka.suffixTokens.length !== kb.suffixTokens.length) {
+      return ka.suffixTokens.length - kb.suffixTokens.length;
+    }
+
+    if (ka.subKind !== kb.subKind) {
+      return ka.subKind - kb.subKind;
+    }
+  }
+
+  return idxA - idxB;
+}
+
+export function sortLawItemsInOrder<T extends { dispositivo?: string; artigo_base?: string; tipo_dispositivo?: string }>(
+  items: T[],
+): T[] {
+  if (!Array.isArray(items) || items.length <= 1) return Array.isArray(items) ? [...items] : [];
+  return items
+    .map((item, idx) => ({ item, idx }))
+    .sort((a, b) => compareLawItemsCanonicalOrder(a.item, b.item, a.idx, b.idx))
+    .map((entry) => entry.item);
+}
+
+export function formatCanonicalArticleLabel(
+  num: number,
+  suffixTokens: Array<{ isNum: boolean; num: number; str: string }> = [],
+): string {
+  const base = num >= 1 && num <= 9 ? `Art. ${num}º` : `Art. ${num}`;
+  if (!suffixTokens.length) return base;
+  const suffix = suffixTokens
+    .map((t) => (t.isNum ? String(t.num) : t.str))
+    .join('-');
+  return `${base}-${suffix}`;
+}
+
+export function resolveCanonicalArticleIdentity(input: {
+  dispositivo?: string;
+  artigo_base?: string;
+  tipo_dispositivo?: string;
+}): {
+  canonicalKey: string;
+  canonicalLabel: string;
+  articleNumber: number | null;
+  sectionGroup: 0 | 1 | 2;
+} {
+  const disp = String(input.dispositivo || '').trim();
+  const base = String(input.artigo_base || '').trim();
+  const keyInfo = parseArticleSortKey(input);
+
+  if (keyInfo.sectionGroup === 0) {
+    return {
+      canonicalKey: 'preambulo',
+      canonicalLabel: 'Preâmbulo',
+      articleNumber: null,
+      sectionGroup: 0,
+    };
+  }
+
+  if (keyInfo.sectionGroup === 1) {
+    const suffixKey = keyInfo.suffixTokens
+      .map((t) => (t.isNum ? String(t.num) : t.str.toLowerCase()))
+      .join('-');
+    return {
+      canonicalKey: suffixKey ? `art-${keyInfo.num}-${suffixKey}` : `art-${keyInfo.num}`,
+      canonicalLabel: formatCanonicalArticleLabel(keyInfo.num, keyInfo.suffixTokens),
+      articleNumber: keyInfo.num,
+      sectionGroup: 1,
+    };
+  }
+
+  const fallbackLabel = (base || disp || 'Outros').trim();
+  const fallbackSlug = fallbackLabel
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return {
+    canonicalKey: `other-${fallbackSlug || 'item'}`,
+    canonicalLabel: fallbackLabel,
+    articleNumber: null,
+    sectionGroup: 2,
+  };
+}
+
+export function resolveCanonicalArticleKeyFromQuery(rawQuery: string): string {
+  const trimmed = String(rawQuery || '').trim();
+  if (!trimmed) return '';
+  if (/^pre[âa]mbulo$/i.test(trimmed)) return 'preambulo';
+  const cleaned = trimmed
+    .replace(/^law-(?:cont|dev)-art-/i, '')
+    .replace(/^art-/i, 'Art. ');
+  const m = cleaned.match(/^(?:art(?:igo)?\.?\s*)?(\d{1,5})(?:\.\s*[º°ª]|[º°ªo])?((?:-[a-z0-9]+)*)/i);
+  if (m) {
+    const num = parseInt(m[1], 10);
+    const suffix = (m[2] || '').toLowerCase();
+    return `art-${num}${suffix}`;
+  }
+  return resolveCanonicalArticleIdentity({ dispositivo: trimmed }).canonicalKey;
+}
+
+export interface IndexedLawItemMeta {
+  docSeqIndex: number;
+  articleSeqIndex: number;
+  canonicalKey: string;
+  canonicalLabel: string;
+  articleNumber: number | null;
+}
+
+export interface IndexedLawArticleGroup<T> {
+  canonicalKey: string;
+  canonicalLabel: string;
+  articleSeqIndex: number;
+  articleNumber: number | null;
+  items: T[];
+}
+
+export interface SequentialLawIndex<T> {
+  orderedItems: T[];
+  articleGroups: IndexedLawArticleGroup<T>[];
+  itemMetaById: Map<string, IndexedLawItemMeta>;
+  groupByCanonicalKey: Map<string, IndexedLawArticleGroup<T>>;
+  missingArticleNumbers: number[];
+  minArticleNumber: number | null;
+  maxArticleNumber: number | null;
+  totalArticles: number;
+  hadOutOfOrderInput: boolean;
+}
+
+export function buildSequentialLawIndex<
+  T extends { id?: string; dispositivo?: string; artigo_base?: string; tipo_dispositivo?: string },
+>(items: T[]): SequentialLawIndex<T> {
+  if (!Array.isArray(items) || items.length === 0) {
+    return {
+      orderedItems: [],
+      articleGroups: [],
+      itemMetaById: new Map(),
+      groupByCanonicalKey: new Map(),
+      missingArticleNumbers: [],
+      minArticleNumber: null,
+      maxArticleNumber: null,
+      totalArticles: 0,
+      hadOutOfOrderInput: false,
+    };
+  }
+
+  const orderedItems = sortLawItemsInOrder(items);
+  let hadOutOfOrderInput = false;
+  for (let i = 0; i < items.length; i++) {
+    if (orderedItems[i] !== items[i]) {
+      hadOutOfOrderInput = true;
+      break;
+    }
+  }
+
+  const articleGroups: IndexedLawArticleGroup<T>[] = [];
+  const groupByCanonicalKey = new Map<string, IndexedLawArticleGroup<T>>();
+  const itemMetaById = new Map<string, IndexedLawItemMeta>();
+  const presentIntegerNumbers = new Set<number>();
+  let minArticleNumber: number | null = null;
+  let maxArticleNumber: number | null = null;
+  let articleCounter = 0;
+
+  orderedItems.forEach((item, idx) => {
+    const identity = resolveCanonicalArticleIdentity(item);
+    let group = groupByCanonicalKey.get(identity.canonicalKey);
+    if (!group) {
+      if (identity.sectionGroup === 1) {
+        articleCounter += 1;
+      }
+      group = {
+        canonicalKey: identity.canonicalKey,
+        canonicalLabel: identity.canonicalLabel,
+        articleSeqIndex: identity.sectionGroup === 0 ? 0 : articleCounter || articleGroups.length + 1,
+        articleNumber: identity.articleNumber,
+        items: [],
+      };
+      groupByCanonicalKey.set(identity.canonicalKey, group);
+      articleGroups.push(group);
+    }
+
+    group.items.push(item);
+
+    if (identity.articleNumber !== null && Number.isFinite(identity.articleNumber)) {
+      presentIntegerNumbers.add(identity.articleNumber);
+      minArticleNumber =
+        minArticleNumber === null
+          ? identity.articleNumber
+          : Math.min(minArticleNumber, identity.articleNumber);
+      maxArticleNumber =
+        maxArticleNumber === null
+          ? identity.articleNumber
+          : Math.max(maxArticleNumber, identity.articleNumber);
+    }
+
+    const meta: IndexedLawItemMeta = {
+      docSeqIndex: idx + 1,
+      articleSeqIndex: group.articleSeqIndex,
+      canonicalKey: group.canonicalKey,
+      canonicalLabel: group.canonicalLabel,
+      articleNumber: group.articleNumber,
+    };
+
+    if (item.id) {
+      itemMetaById.set(item.id, meta);
+    }
+  });
+
+  const missingArticleNumbers: number[] = [];
+  if (
+    minArticleNumber !== null &&
+    maxArticleNumber !== null &&
+    maxArticleNumber > minArticleNumber &&
+    maxArticleNumber - minArticleNumber <= 2500
+  ) {
+    for (let n = minArticleNumber; n <= maxArticleNumber; n++) {
+      if (!presentIntegerNumbers.has(n)) {
+        missingArticleNumbers.push(n);
+      }
+    }
+  }
+
+  return {
+    orderedItems,
+    articleGroups,
+    itemMetaById,
+    groupByCanonicalKey,
+    missingArticleNumbers,
+    minArticleNumber,
+    maxArticleNumber,
+    totalArticles: articleGroups.filter((g) => g.articleNumber !== null).length,
+    hadOutOfOrderInput,
+  };
+}
+
+function normalizeArticleHeaderLabel(rawHeader: string): string {
+  return rawHeader
+    .replace(/\s+/g, ' ')
+    .replace(/^ART\.?\s*/i, (m) => (m === m.toUpperCase() || m.startsWith('A') ? 'Art. ' : m))
+    .replace(/^Art\.?\s*(\d{1,4})\.\s*([º°ª])/i, 'Art. $1$2')
+    .replace(/^Art\.?\s*(\d{1,4})\s+([º°ª])/i, 'Art. $1$2')
+    .replace(/^Art\s+(\d)/i, 'Art. $1')
+    .replace(/^Art\.\s*([1-9])(?![º°ªo0-9-])/, 'Art. $1º')
+    .replace(/\.$/, '')
+    .trim();
+}
+
+function isLikelyCrossReferenceArticleLine(
+  artHeader: string,
+  artBody: string,
+  currentBodyLines: string[],
+  hasArticle: boolean,
+  lastArticleNum: number | null,
+): boolean {
+  if (!hasArticle) return false;
+  const trimmedBody = artBody.trim();
+  const numMatch = artHeader.match(/(\d{1,5})/);
+  const candNum = numMatch ? parseInt(numMatch[1], 10) : null;
+
+  const nonEmptyBody = currentBodyLines.map((l) => l.trim()).filter(Boolean);
+  const lastBodyLine = nonEmptyBody[nonEmptyBody.length - 1] || '';
+  const prevLastWord = lastBodyLine.split(/\s+/).pop() || '';
+  const prevLastWordClean = prevLastWord.replace(/^["“(]+|[.,;:)"”']+$/g, '');
+
+  const prevEndsWithPrepositionOrConnector =
+    Boolean(lastBodyLine) &&
+    (/[,\-–—(]$/.test(lastBodyLine) || LEGAL_PREPOSITION_OR_REF_RE.test(prevLastWordClean));
+
+  const bodyStartsWithCitationPhrase =
+    /^(?:da|do|de|dos|das|no|na|nos|nas|ao|à|aos|às|desta|deste|dessa|desse|daquela|daquele|e|ou|a|o|em|com|por|para|caput|inciso|incisos|al[íi]nea|§)\b/i.test(
+      trimmedBody,
+    ) || /^,\s*(?:caput|inciso|incisos|al[íi]nea|§|do|da|de|desta|deste)\b/i.test(trimmedBody);
+
+  // If the previous line explicitly ended with an unclosed preposition ("nos termos do\nArt. 37 da CF")
+  // or the body after Art. N immediately reads like a citation ("Art. 5º da Constituição", "Art. 10 desta Lei")
+  // while the previous sentence didn't end cleanly or the article number jumps backwards/out-of-sequence:
+  if (prevEndsWithPrepositionOrConnector && (bodyStartsWithCitationPhrase || candNum !== (lastArticleNum ?? 0) + 1)) {
+    return true;
+  }
+
+  if (bodyStartsWithCitationPhrase && candNum !== null && lastArticleNum !== null && candNum !== lastArticleNum + 1) {
+    return true;
+  }
+
+  return false;
+}
+
 export function splitLawDevices(rawText: string): Array<{
   dispositivo: string;
   artigo_base: string;
@@ -1436,9 +1838,9 @@ export function splitLawDevices(rawText: string): Array<{
   if (!structuredText) return [];
 
   const lines = structuredText.split('\n');
-  const articleStartRe = /^(Art\.?\s*\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)(?:\s*[:.\-–—]\s*|\s+|$)(.*)$/;
+  const articleStartRe = /^((?:Art|ART)\.?\s*\d{1,4}(?:\.\s*[º°ª]|[º°ªo])?(?:-[A-Za-z0-9]+)*)(?:\s*[:.\-–—]\s*|\s+|$)(.*)$/;
   const paragraphStartRe =
-    /^(§\s*(?:\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico)|Par[áa]grafo\s+(?:\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico))(?:\s*[:.\-–—]\s*|\s+|$)(.*)$/i;
+    /^(§\s*(?:\d{1,4}(?:\.\s*[º°ª]|[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico)|Par[áa]grafo\s+(?:\d{1,4}(?:[º°ªo])?(?:-[A-Za-z0-9]+)*|[úu]nico))(?:\s*[:.\-–—]\s*|\s+|$)(.*)$/i;
   const incisoStartRe =
     /^(?:Inciso\s+([IVXLCDM]{1,8})|([IVXLCDM]{1,8})(?=\s*[-–—.)]\s*|\s*$))(?:\s*[:.\-–—.)]\s*|\s+|$)(.*)$/;
   const alineaStartRe =
@@ -1462,11 +1864,24 @@ export function splitLawDevices(rawText: string): Array<{
   let currentType = '';
   let currentBodyLines: string[] = [];
   let hasArticle = false;
+  let lastArticleNum: number | null = null;
 
-  const flushCurrent = () => {
+  const flushCurrent = (fallbackIfEmptyCaput = false) => {
     if (!currentDevice) return;
     const rawBody = currentBodyLines.join(' ').trim();
-    if (!rawBody) return;
+    if (!rawBody) {
+      if (fallbackIfEmptyCaput && currentType === 'Artigo (caput)') {
+        segments.push({
+          dispositivo: currentDevice,
+          artigo_base: currentArticle,
+          tipo_dispositivo: currentType,
+          texto: '(Caput sem texto próprio)',
+          grau: 'Não Classificado',
+          dica: '',
+        });
+      }
+      return;
+    }
 
     if (rawBody.includes('|||')) {
       const pipeSegments = rawBody
@@ -1530,10 +1945,23 @@ export function splitLawDevices(rawText: string): Array<{
     if (!line) continue;
 
     const artMatch = line.match(articleStartRe);
-    if (artMatch) {
-      flushCurrent();
+    if (
+      artMatch &&
+      !isLikelyCrossReferenceArticleLine(
+        artMatch[1],
+        artMatch[2],
+        currentBodyLines,
+        hasArticle,
+        lastArticleNum,
+      )
+    ) {
+      flushCurrent(false);
       hasArticle = true;
-      currentArticle = artMatch[1].replace(/\s+/g, ' ').replace(/\.$/, '').trim();
+      currentArticle = normalizeArticleHeaderLabel(artMatch[1]);
+      const artNumMatch = currentArticle.match(/(\d{1,5})/);
+      if (artNumMatch) {
+        lastArticleNum = parseInt(artNumMatch[1], 10);
+      }
       currentDevice = currentArticle;
       currentType = 'Artigo (caput)';
       currentBodyLines = [artMatch[2].trim()];
@@ -1543,8 +1971,12 @@ export function splitLawDevices(rawText: string): Array<{
     if (hasArticle) {
       const paraMatch = line.match(paragraphStartRe);
       if (paraMatch) {
-        flushCurrent();
-        currentDevice = paraMatch[1].replace(/\s+/g, ' ').replace(/\.$/, '').trim();
+        flushCurrent(true);
+        currentDevice = paraMatch[1]
+          .replace(/\s+/g, ' ')
+          .replace(/(§\s*\d{1,4})\.\s*([º°ª])/, '$1$2')
+          .replace(/\.$/, '')
+          .trim();
         currentType = 'Parágrafo';
         currentBodyLines = [paraMatch[2].trim()];
         continue;
@@ -1554,7 +1986,7 @@ export function splitLawDevices(rawText: string): Array<{
       if (incMatch) {
         const roman = (incMatch[1] || incMatch[2] || '').toUpperCase();
         if (roman) {
-          flushCurrent();
+          flushCurrent(true);
           currentDevice = `Inciso ${roman}`;
           currentType = 'Inciso';
           currentBodyLines = [incMatch[3].trim()];
@@ -1566,7 +1998,7 @@ export function splitLawDevices(rawText: string): Array<{
       if (aliMatch) {
         const letter = (aliMatch[1] || aliMatch[2] || '').toLowerCase();
         if (letter) {
-          flushCurrent();
+          flushCurrent(true);
           currentDevice = `Alínea ${letter})`;
           currentType = 'Alínea';
           currentBodyLines = [aliMatch[3].trim()];
@@ -1576,7 +2008,7 @@ export function splitLawDevices(rawText: string): Array<{
 
       const penaMatch = line.match(penaStartRe);
       if (penaMatch) {
-        flushCurrent();
+        flushCurrent(true);
         currentDevice = 'Pena';
         currentType = 'Pena';
         currentBodyLines = [penaMatch[2].trim()];
@@ -1589,7 +2021,7 @@ export function splitLawDevices(rawText: string): Array<{
         (lastBodyLine && trailingGradeCheckRe.test(lastBodyLine)) ||
         standaloneRubricaRe.test(line)
       ) {
-        flushCurrent();
+        flushCurrent(false);
         currentDevice = 'Rubrica';
         currentType = 'Rubrica';
         currentBodyLines = [line];
@@ -1604,7 +2036,7 @@ export function splitLawDevices(rawText: string): Array<{
     }
   }
 
-  flushCurrent();
+  flushCurrent(false);
 
   if (!hasArticle) return [];
 
@@ -1633,7 +2065,7 @@ export function splitLawDevices(rawText: string): Array<{
     }
   }
 
-  return segments;
+  return sortLawItemsInOrder(segments);
 }
 
 export function parseLawTextToItems(fileName: string, rawText: string): LawItem[] {
@@ -1645,20 +2077,22 @@ export function parseLawTextToItems(fileName: string, rawText: string): LawItem[
   }
   const devices = splitLawDevices(rawText);
   if (devices.length) {
-    return devices.map((d, index) => {
-      const artBaseMatch = d.dispositivo.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/i);
-      return {
-        id: `${fileName}::${index}::${uid(6)}`,
-        arquivo: fileName,
-        dispositivo: d.dispositivo,
-        grau: d.grau || 'Não Classificado',
-        texto: d.texto,
-        dica: d.dica || '',
-        observacao: '',
-        artigo_base: artBaseMatch ? artBaseMatch[1] : d.artigo_base || '',
-        tipo_dispositivo: d.tipo_dispositivo || 'Dispositivo',
-      };
-    });
+    return sortLawItemsInOrder(
+      devices.map((d, index) => {
+        const artBaseMatch = d.dispositivo.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/i);
+        return {
+          id: `${fileName}::${index}::${uid(6)}`,
+          arquivo: fileName,
+          dispositivo: d.dispositivo,
+          grau: d.grau || 'Não Classificado',
+          texto: d.texto,
+          dica: d.dica || '',
+          observacao: '',
+          artigo_base: artBaseMatch ? artBaseMatch[1] : d.artigo_base || '',
+          tipo_dispositivo: d.tipo_dispositivo || 'Dispositivo',
+        };
+      }),
+    );
   }
 
   const lines = rawText
@@ -1666,64 +2100,66 @@ export function parseLawTextToItems(fileName: string, rawText: string): LawItem[
     .map((l) => l.trim())
     .filter(Boolean);
 
-  return lines.map((line, index) => {
-    const parts = parsePipeLine(line, 3);
-    let device = '';
-    let grade: IncidenceGrade = 'Não Classificado';
-    let content = '';
-    let tip = '';
+  return sortLawItemsInOrder(
+    lines.map((line, index) => {
+      const parts = parsePipeLine(line, 3);
+      let device = '';
+      let grade: IncidenceGrade = 'Não Classificado';
+      let content = '';
+      let tip = '';
 
-    if (parts) {
-      device = parts[0];
-      const maybeGrade = parts[1] as IncidenceGrade;
-      const detectedInPart1 = detectAndCleanIncidenceGrade(parts[1]);
-      grade = INCIDENCE_GRADES.includes(maybeGrade)
-        ? maybeGrade
-        : detectedInPart1.grade;
+      if (parts) {
+        device = parts[0];
+        const maybeGrade = parts[1] as IncidenceGrade;
+        const detectedInPart1 = detectAndCleanIncidenceGrade(parts[1]);
+        grade = INCIDENCE_GRADES.includes(maybeGrade)
+          ? maybeGrade
+          : detectedInPart1.grade;
 
-      const contentCleaned = detectAndCleanIncidenceGrade(parts[2]);
-      if (grade === 'Não Classificado' && contentCleaned.grade !== 'Não Classificado') {
-        grade = contentCleaned.grade;
+        const contentCleaned = detectAndCleanIncidenceGrade(parts[2]);
+        if (grade === 'Não Classificado' && contentCleaned.grade !== 'Não Classificado') {
+          grade = contentCleaned.grade;
+        }
+        content = contentCleaned.cleanText || parts[2];
+        tip = parts.slice(3).join(' | ');
+      } else {
+        const artMatch = line.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)\s*[:.\-–—]?\s*(.*)$/i);
+        device = artMatch ? artMatch[1].trim() : lines.length === 1 ? displayBaseName(fileName) : `Dispositivo ${index + 1}`;
+        const rawBody = artMatch && artMatch[2].trim() ? artMatch[2].trim() : line;
+        const detected = detectAndCleanIncidenceGrade(rawBody);
+        grade = detected.grade;
+        content = detected.cleanText || rawBody;
       }
-      content = contentCleaned.cleanText || parts[2];
-      tip = parts.slice(3).join(' | ');
-    } else {
-      const artMatch = line.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)\s*[:.\-–—]?\s*(.*)$/i);
-      device = artMatch ? artMatch[1].trim() : lines.length === 1 ? displayBaseName(fileName) : `Dispositivo ${index + 1}`;
-      const rawBody = artMatch && artMatch[2].trim() ? artMatch[2].trim() : line;
-      const detected = detectAndCleanIncidenceGrade(rawBody);
-      grade = detected.grade;
-      content = detected.cleanText || rawBody;
-    }
 
-    const artBaseMatch = device.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/i);
-    const tipo =
-      device.toLowerCase() === 'preâmbulo'
-        ? 'Preâmbulo'
-        : /§|Parágrafo/i.test(device)
-          ? 'Parágrafo'
-          : /\binciso\b/i.test(device)
-            ? 'Inciso'
-            : /\bal[íi]nea\b|^[a-z]\)$/i.test(device)
-              ? 'Alínea'
-              : /^pena$/i.test(device)
-                ? 'Pena'
-                : /^Art(?:igo)?\.?\s*\d+/i.test(device)
-                  ? 'Artigo (caput)'
-                  : 'Dispositivo';
+      const artBaseMatch = device.match(/^(Art(?:igo)?\.?\s*\d+(?:[º°ªo])?(?:-[A-Za-z0-9]+)*)/i);
+      const tipo =
+        device.toLowerCase() === 'preâmbulo'
+          ? 'Preâmbulo'
+          : /§|Parágrafo/i.test(device)
+            ? 'Parágrafo'
+            : /\binciso\b/i.test(device)
+              ? 'Inciso'
+              : /\bal[íi]nea\b|^[a-z]\)$/i.test(device)
+                ? 'Alínea'
+                : /^pena$/i.test(device)
+                  ? 'Pena'
+                  : /^Art(?:igo)?\.?\s*\d+/i.test(device)
+                    ? 'Artigo (caput)'
+                    : 'Dispositivo';
 
-    return {
-      id: `${fileName}::${index}::${uid(6)}`,
-      arquivo: fileName,
-      dispositivo: device,
-      grau: grade,
-      texto: content,
-      dica: tip,
-      observacao: '',
-      artigo_base: artBaseMatch ? artBaseMatch[1] : '',
-      tipo_dispositivo: tipo,
-    };
-  });
+      return {
+        id: `${fileName}::${index}::${uid(6)}`,
+        arquivo: fileName,
+        dispositivo: device,
+        grau: grade,
+        texto: content,
+        dica: tip,
+        observacao: '',
+        artigo_base: artBaseMatch ? artBaseMatch[1] : '',
+        tipo_dispositivo: tipo,
+      };
+    }),
+  );
 }
 
 function gradeToKeyword(grade?: IncidenceGrade): string {
@@ -1895,7 +2331,7 @@ export function healAndNormalizeLawItems(items: LawItem[]): LawItem[] {
     }
   }
 
-  return healed;
+  return sortLawItemsInOrder(healed);
 }
 
 export interface ParsedEditalTopic {

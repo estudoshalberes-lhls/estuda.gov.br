@@ -19,12 +19,15 @@ export type AffectedFileAction =
   | 'queued-delete'
   | 'failed';
 
+export type SyncFileOrigin = 'internal' | 'external' | 'external-modified';
+
 export interface SyncAffectedFile {
   name: string;
   action: AffectedFileAction;
   module?: string;
   driveFileId?: string;
   detail?: string;
+  syncOrigin?: SyncFileOrigin;
 }
 
 export interface SyncActivityLogStats {
@@ -85,6 +88,7 @@ function sanitizeAffectedFiles(files?: SyncAffectedFile[]): SyncAffectedFile[] {
       ...(item.module ? { module: item.module } : {}),
       ...(item.driveFileId ? { driveFileId: item.driveFileId } : {}),
       ...(item.detail ? { detail: item.detail } : {}),
+      ...(item.syncOrigin ? { syncOrigin: item.syncOrigin } : {}),
     });
     if (cleaned.length >= MAX_AFFECTED_FILES_PER_LOG) break;
   }

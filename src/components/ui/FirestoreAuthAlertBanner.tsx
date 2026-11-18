@@ -8,25 +8,37 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
     validateFirestoreConnectionNow,
     dismissFirestoreConnectionAlert,
     connectGoogleDrive,
+    driveConnected,
+    driveTokenReady,
+    isRenewingDriveToken,
+    hasPendingCloudChanges,
     setActivePage,
   } = useStudy();
   const [checking, setChecking] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
 
-  const { status, code, message, lastCheckedAt, consecutiveFailures, dismissed } =
+  const { status, code, message, lastCheckedAt, consecutiveFailures, oauthDriveExpired, dismissed } =
     firestoreConnectionMonitor;
+
+  const isDriveOAuthPending =
+    driveConnected &&
+    !driveTokenReady &&
+    !isRenewingDriveToken &&
+    (oauthDriveExpired || hasPendingCloudChanges);
 
   const shouldDisplay =
     !dismissed &&
     (status === 'expired' ||
       status === 'inconsistent' ||
+      isDriveOAuthPending ||
       (status === 'warning' && consecutiveFailures >= 2));
 
   if (!shouldDisplay) {
     return null;
   }
 
-  const isOAuthDriveExpired = code === 'oauth/drive-token-expired';
+  const isOAuthDriveExpired = code === 'oauth/drive-token-expired' || (isDriveOAuthPending && status === 'healthy');
+  const displayCode = isOAuthDriveExpired && !code ? 'oauth/drive-token-expired' : code;
   const isCritical = status === 'expired' || status === 'inconsistent';
   const title = isOAuthDriveExpired
     ? 'Sessão do Google Drive Expirada'
@@ -35,6 +47,10 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
       : status === 'inconsistent'
         ? 'Inconsistência de Autenticação no Firebase'
         : 'Instabilidade na Conexão com o Firestore';
+
+  const displayMessage = isOAuthDriveExpired
+    ? 'O Firebase Firestore está ativo, mas o token OAuth do Google Drive expirou ou não está presente nesta janela. Clique em "Reconectar conta Google" para reativar backups e exclusões no Drive.'
+    : message || 'Não foi possível confirmar a autenticação com o Firebase Firestore.';
 
   const handleReconnect = async () => {
     setReconnecting(true);
@@ -83,9 +99,9 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
               >
                 {title}
               </strong>
-              {code && (
+              {displayCode && (
                 <span className="font-mono-num text-[10.5px] px-1.5 py-0.5 rounded bg-[var(--panel)] border border-[var(--line)] text-[var(--muted)]">
-                  {code}
+                  {displayCode}
                 </span>
               )}
               {lastCheckedAt && (
@@ -95,8 +111,7 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
               )}
             </div>
             <p className="m-0 mt-1 text-[12px] text-[var(--text)] leading-relaxed">
-              {message ||
-                'Não foi possível confirmar a autenticação com o Firebase Firestore.'}
+              {displayMessage}
             </p>
           </div>
         </div>

@@ -30,6 +30,7 @@ import {
   localDateIso,
   normalizeSearch,
   parseMultiArticleSpec,
+  sortLawItemsInOrder,
   visibleName,
 } from '../lib/parsers';
 import { exportIncidenceMatrixPdf } from '../lib/pdfExport';
@@ -326,7 +327,7 @@ export const IncidenceMatrixPage: React.FC = () => {
     if (!folderData) return [];
     const seen = new Set<string>();
     const list: string[] = [];
-    folderData.items.forEach((item) => {
+    sortLawItemsInOrder(folderData.items).forEach((item) => {
       const key = (item.artigo_base || item.dispositivo || 'Outros').trim();
       if (key && !seen.has(key)) {
         seen.add(key);
@@ -416,50 +417,52 @@ export const IncidenceMatrixPage: React.FC = () => {
     const todayIso = localDateIso();
     const todayMs = new Date(`${todayIso}T00:00:00`).getTime();
 
-    return folderData.items.filter((item) => {
-      if (gradeFilter !== 'Todas' && item.grau !== gradeFilter) return false;
+    return sortLawItemsInOrder(
+      folderData.items.filter((item) => {
+        if (gradeFilter !== 'Todas' && item.grau !== gradeFilter) return false;
 
-      if (editalFilterContestId !== 'all') {
-        const links = itemToLinksMap.get(item.id) || [];
-        if (editalFilterContestId === '__any__') {
-          if (!links.length) return false;
-        } else if (!links.some((l) => l.contestId === editalFilterContestId)) {
-          return false;
+        if (editalFilterContestId !== 'all') {
+          const links = itemToLinksMap.get(item.id) || [];
+          if (editalFilterContestId === '__any__') {
+            if (!links.length) return false;
+          } else if (!links.some((l) => l.contestId === editalFilterContestId)) {
+            return false;
+          }
         }
-      }
 
-      if (readStatusFilter !== 'all') {
-        const latest = [...(item.leituras || [])]
-          .sort((a, b) => b.data.localeCompare(a.data))[0]?.data;
-        if (readStatusFilter === 'today' && latest !== todayIso) return false;
-        if (
-          readStatusFilter === 'stale-7' ||
-          readStatusFilter === 'stale-15' ||
-          readStatusFilter === 'stale-30'
-        ) {
-          if (!latest) return false;
-          const threshold =
-            readStatusFilter === 'stale-7' ? 7 : readStatusFilter === 'stale-15' ? 15 : 30;
-          const diffDays = Math.round(
-            (todayMs - new Date(`${latest}T00:00:00`).getTime()) / 86400000,
-          );
-          if (!Number.isFinite(diffDays) || diffDays < threshold) return false;
+        if (readStatusFilter !== 'all') {
+          const latest = [...(item.leituras || [])]
+            .sort((a, b) => b.data.localeCompare(a.data))[0]?.data;
+          if (readStatusFilter === 'today' && latest !== todayIso) return false;
+          if (
+            readStatusFilter === 'stale-7' ||
+            readStatusFilter === 'stale-15' ||
+            readStatusFilter === 'stale-30'
+          ) {
+            if (!latest) return false;
+            const threshold =
+              readStatusFilter === 'stale-7' ? 7 : readStatusFilter === 'stale-15' ? 15 : 30;
+            const diffDays = Math.round(
+              (todayMs - new Date(`${latest}T00:00:00`).getTime()) / 86400000,
+            );
+            if (!Number.isFinite(diffDays) || diffDays < threshold) return false;
+          }
         }
-      }
 
-      if (hasTypedMulti || hasSelectedChips) {
-        const itemGroupKey = (item.artigo_base || item.dispositivo || 'Outros').trim();
-        const matchesChips = hasSelectedChips && selectedArticleSet.has(itemGroupKey);
-        const matchesTyped = hasTypedMulti && itemMatchesMultiArticleSpec(item, multiArticleSpec);
-        if (!matchesChips && !matchesTyped) return false;
-      }
+        if (hasTypedMulti || hasSelectedChips) {
+          const itemGroupKey = (item.artigo_base || item.dispositivo || 'Outros').trim();
+          const matchesChips = hasSelectedChips && selectedArticleSet.has(itemGroupKey);
+          const matchesTyped = hasTypedMulti && itemMatchesMultiArticleSpec(item, multiArticleSpec);
+          if (!matchesChips && !matchesTyped) return false;
+        }
 
-      if (term) {
-        const hay = normalizeSearch(`${item.dispositivo} ${item.texto} ${item.dica} ${item.observacao}`);
-        if (!hay.includes(term)) return false;
-      }
-      return true;
-    });
+        if (term) {
+          const hay = normalizeSearch(`${item.dispositivo} ${item.texto} ${item.dica} ${item.observacao}`);
+          if (!hay.includes(term)) return false;
+        }
+        return true;
+      }),
+    );
   }, [
     folderData,
     gradeFilter,

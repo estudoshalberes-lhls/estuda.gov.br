@@ -12,7 +12,11 @@ import {
   Sparkles,
   Type,
 } from 'lucide-react';
-import { localDateIso, normalizeSearch } from '../../lib/parsers';
+import {
+  buildSequentialLawIndex,
+  localDateIso,
+  resolveCanonicalArticleKeyFromQuery,
+} from '../../lib/parsers';
 import { LawItem } from '../../types/study';
 
 export type LawFontSizeKey = 'sm' | 'md' | 'lg' | 'xl';
@@ -319,52 +323,46 @@ export const ArticleJumpBar: React.FC<ArticleJumpBarProps> = ({
   const [expanded, setExpanded] = useState(false);
 
   const articles = useMemo(() => {
-    const map = new Map<
-      string,
-      {
-        key: string;
-        total: number;
-        read: number;
-        highIncidence: boolean;
-        staleDays: number | null;
-      }
-    >();
+    const seqIndex = buildSequentialLawIndex(items);
     const todayIso = localDateIso();
     const todayMs = new Date(`${todayIso}T00:00:00`).getTime();
 
-    for (const item of items) {
-      const key = (item.artigo_base || item.dispositivo || 'Outros').trim();
-      if (!key) continue;
-      const existing = map.get(key) || {
-        key,
-        total: 0,
-        read: 0,
-        highIncidence: false,
-        staleDays: null,
-      };
-      existing.total += 1;
-      const hasReadDate = (item.leituras?.length || 0) > 0;
-      if (readSet.has(item.id) || hasReadDate) {
-        existing.read += 1;
-      }
-      if (item.grau === 'Muito Alto' || item.grau === 'Alto') {
-        existing.highIncidence = true;
-      }
-      const latestDate = [...(item.leituras || [])].sort((a, b) =>
-        b.data.localeCompare(a.data),
-      )[0]?.data;
-      if (latestDate) {
-        const diff = Math.round(
-          (todayMs - new Date(`${latestDate}T00:00:00`).getTime()) / 86400000,
-        );
-        if (Number.isFinite(diff)) {
-          existing.staleDays =
-            existing.staleDays === null ? diff : Math.min(existing.staleDays, diff);
+    return seqIndex.articleGroups.map((group) => {
+      let read = 0;
+      let highIncidence = false;
+      let staleDays: number | null = null;
+
+      for (const item of group.items) {
+        const hasReadDate = (item.leituras?.length || 0) > 0;
+        if (readSet.has(item.id) || hasReadDate) {
+          read += 1;
+        }
+        if (item.grau === 'Muito Alto' || item.grau === 'Alto') {
+          highIncidence = true;
+        }
+        const latestDate = [...(item.leituras || [])].sort((a, b) =>
+          b.data.localeCompare(a.data),
+        )[0]?.data;
+        if (latestDate) {
+          const diff = Math.round(
+            (todayMs - new Date(`${latestDate}T00:00:00`).getTime()) / 86400000,
+          );
+          if (Number.isFinite(diff)) {
+            staleDays = staleDays === null ? diff : Math.min(staleDays, diff);
+          }
         }
       }
-      map.set(key, existing);
-    }
-    return Array.from(map.values());
+
+      return {
+        canonicalKey: group.canonicalKey,
+        key: group.canonicalLabel,
+        seqIndex: group.articleSeqIndex,
+        total: group.items.length,
+        read,
+        highIncidence,
+        staleDays,
+      };
+    });
   }, [items, readSet]);
 
   if (articles.length <= 1) return null;
@@ -413,12 +411,14 @@ export const ArticleJumpBar: React.FC<ArticleJumpBarProps> = ({
         {visibleArticles.map((art) => {
           const allRead = art.read >= art.total && art.total > 0;
           const isStale = art.staleDays !== null && art.staleDays >= 15;
-          const isLastPos =
-            lastReadPosition &&
-            normalizeSearch(lastReadPosition) === normalizeSearch(art.key);
-          const isActive =
-            activeArticleKey &&
-            normalizeSearch(activeArticleKey) === normalizeSearch(art.key);
+          const lastPosCanonical = lastReadPosition
+            ? resolveCanonicalArticleKeyFromQuery(lastReadPosition)
+            : '';
+          const activeCanonical = activeArticleKey
+            ? resolveCanonicalArticleKeyFromQuery(activeArticleKey)
+            : '';
+          const isLastPos = Boolean(lastPosCanonical && lastPosCanonical === art.canonicalKey);
+          const isActive = Boolean(activeCanonical && activeCanonical === art.canonicalKey);
 
           let borderAndBg =
             'border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] hover:border-[var(--accent)]';
@@ -435,10 +435,10 @@ export const ArticleJumpBar: React.FC<ArticleJumpBarProps> = ({
 
           return (
             <button
-              key={art.key}
+              key={art.canonicalKey}
               type="button"
               onClick={() => onSelectArticle(art.key)}
-              title={`${art.key} · ${art.read}/${art.total} lidos${
+              title={`${art.seqIndex > 0 ? `#${art.seqIndex} · ` : ''}${art.key} · ${art.read}/${art.total} lidos${
                 art.highIncidence ? ' · Alta Incidência' : ''
               }${isStale ? ` · Sem revisão há ${art.staleDays}d` : ''}`}
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-bold transition-colors ${borderAndBg}`}

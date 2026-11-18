@@ -1,8 +1,10 @@
 import { StudyDatabase } from '../types/study';
 import {
+  classifyDriveFileSyncOrigin,
   CLOUD_SYNC_FILENAME,
   DriveDeleteTarget,
   DriveFileInfo,
+  DriveFileSyncOrigin,
   getKnownStudyDriveFolderNames,
   getPendingDriveDeletes,
   getPreferredStudyFolder,
@@ -51,6 +53,9 @@ export interface FileTimestampComparison {
   driveIso?: string;
   status: Exclude<TimestampComparisonStatus, 'deleted-conflict'>;
   driveFile?: DriveFileInfo;
+  syncOrigin?: DriveFileSyncOrigin;
+  syncTagPresent?: boolean;
+  syncTagSyncedAtMs?: number;
 }
 
 export interface DeletedDriveConflict {
@@ -64,6 +69,10 @@ export interface DeletedDriveConflict {
   newerSide: 'drive' | 'local-delete' | 'unknown';
   tombstoneCompositeKeys: string[];
   fromPendingQueue: boolean;
+  syncOrigin: DriveFileSyncOrigin;
+  syncTagPresent: boolean;
+  syncTagSyncedAtMs: number;
+  syncOriginReason: string;
 }
 
 export interface TimestampSyncComparisonReport {
@@ -75,6 +84,9 @@ export interface TimestampSyncComparisonReport {
   localOnly: FileTimestampComparison[];
   inSync: FileTimestampComparison[];
   deletedConflicts: DeletedDriveConflict[];
+  internalTaggedCount: number;
+  externalFilesCount: number;
+  externalModifiedCount: number;
 }
 
 const TIMESTAMP_TOLERANCE_MS = 15_000;
@@ -445,6 +457,7 @@ export function compareLocalAndDriveFileTimestamps(
     const driveIso = match.modifiedTime || match.createdTime;
     const driveParsed = parseTimestampMs(driveIso);
     const rel = compareFileTimestampPair(desc.localIso, driveIso);
+    const tagInfo = classifyDriveFileSyncOrigin(match);
 
     const entry: FileTimestampComparison = {
       blobKey: desc.blobKey,
@@ -459,6 +472,9 @@ export function compareLocalAndDriveFileTimestamps(
       driveIso,
       status: rel,
       driveFile: match,
+      syncOrigin: tagInfo.origin,
+      syncTagPresent: tagInfo.tagPresent,
+      syncTagSyncedAtMs: tagInfo.syncedAtMs,
     };
 
     if (rel === 'local-newer') localNewer.push(entry);
@@ -502,9 +518,16 @@ export function compareLocalAndDriveFileTimestamps(
     );
     const deletedAtMs = Math.max(tombstoneMatch.latestDeletedAtMs, pendingQueuedMs);
     const driveModifiedMs = parseTimestampMs(df.modifiedTime || df.createdTime).ms;
+    const tagInfo = classifyDriveFileSyncOrigin(df);
 
     let newerSide: DeletedDriveConflict['newerSide'] = 'unknown';
-    if (driveModifiedMs > 0 && deletedAtMs > 0) {
+    if (tagInfo.origin === 'internal' && tagInfo.syncedAtMs > 0 && deletedAtMs > 0) {
+      // File has an intact internal app sync-tag and was NOT externally modified on Drive:
+      // compare against the app's own stamped sync time (ceAt) so Drive indexing/metadata drift
+      // never misclassifies a stale deleted internal copy as newer than the local deletion.
+      newerSide =
+        tagInfo.syncedAtMs > deletedAtMs + 60_000 ? 'drive' : 'local-delete';
+    } else if (driveModifiedMs > 0 && deletedAtMs > 0) {
       newerSide =
         driveModifiedMs > deletedAtMs + TIMESTAMP_TOLERANCE_MS
           ? 'drive'
@@ -524,7 +547,21 @@ export function compareLocalAndDriveFileTimestamps(
       newerSide,
       tombstoneCompositeKeys: tombstoneMatch.matchedKeys,
       fromPendingQueue: matchedPending.length > 0,
+      syncOrigin: tagInfo.origin,
+      syncTagPresent: tagInfo.tagPresent,
+      syncTagSyncedAtMs: tagInfo.syncedAtMs,
+      syncOriginReason: tagInfo.syncReason,
     });
+  }
+
+  let internalTaggedCount = 0;
+  let externalFilesCount = 0;
+  let externalModifiedCount = 0;
+  for (const df of activeDriveFiles) {
+    const tagInfo = classifyDriveFileSyncOrigin(df);
+    if (tagInfo.origin === 'internal') internalTaggedCount += 1;
+    else if (tagInfo.origin === 'external-modified') externalModifiedCount += 1;
+    else externalFilesCount += 1;
   }
 
   return {
@@ -536,5 +573,8 @@ export function compareLocalAndDriveFileTimestamps(
     localOnly,
     inSync,
     deletedConflicts,
+    internalTaggedCount,
+    externalFilesCount,
+    externalModifiedCount,
   };
 }

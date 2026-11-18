@@ -1075,6 +1075,28 @@ export const BackupPage: React.FC = () => {
                             >
                               {isInActive ? 'Pasta ativa' : 'Outra pasta'}
                             </span>
+                            {item.syncOrigin === 'internal' ? (
+                              <span
+                                className="px-1.5 py-0.5 rounded border border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] text-[10px] font-bold"
+                                title="Arquivo criado ou atualizado internamente pelo app (etiqueta de sincronização)"
+                              >
+                                Etiqueta: App
+                              </span>
+                            ) : item.syncOrigin === 'external-modified' ? (
+                              <span
+                                className="px-1.5 py-0.5 rounded border border-[var(--warning)]/35 bg-[var(--warning)]/15 text-[var(--warning)] text-[10px] font-bold"
+                                title="Modificado externamente no Google Drive após o último envio do app"
+                              >
+                                Alterado fora do app
+                              </span>
+                            ) : (
+                              <span
+                                className="px-1.5 py-0.5 rounded border border-[var(--accent)]/30 bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-bold"
+                                title="Arquivo enviado externamente ao Google Drive ou sem etiqueta interna"
+                              >
+                                Externo
+                              </span>
+                            )}
                           </div>
                           <span className="block text-[11px] text-[var(--muted)] break-words">
                             {item.folderPath ? `${item.folderPath} · ` : ''}Atualizado em {formattedDate}

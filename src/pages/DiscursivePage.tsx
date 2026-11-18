@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Download, Eye, FileUp, MessageSquarePlus, Sparkles } from 'lucide-react';
+import { Download, Eye, FileUp, MessageSquarePlus, Sparkles, Trash2 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { reviewEssayWithAi } from '../lib/aiApi';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
@@ -17,7 +17,7 @@ interface PreviewTarget {
 }
 
 export const DiscursivePage: React.FC = () => {
-  const { db, moduleVisibility, submitEssay, updateEssayCorrection, toast } = useStudy();
+  const { db, moduleVisibility, submitEssay, updateEssayCorrection, deleteEssay, requestConfirm, toast } = useStudy();
   const hideUpload = moduleVisibility('Discursiva').hide_upload;
 
   const [titulo, setTitulo] = useState('');
@@ -273,6 +273,33 @@ export const DiscursivePage: React.FC = () => {
                     >
                       <MessageSquarePlus className="w-3.5 h-3.5" />
                       {isEditing ? 'Fechar editor' : 'Correção / feedback'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void requestConfirm({
+                          title: `Excluir "${visibleName(essay.titulo)}"?`,
+                          description:
+                            'A redação e seus arquivos anexos serão removidos do aplicativo e enviados para a lixeira do Google Drive.',
+                          confirmLabel: 'Excluir redação',
+                          danger: true,
+                        }).then(async (ok) => {
+                          if (!ok) return;
+                          await deleteEssay(essay.id);
+                          if (
+                            preview &&
+                            (preview.blobKey === essay.original_blobKey ||
+                              preview.blobKey === essay.corrigido_blobKey)
+                          ) {
+                            setPreview(null);
+                          }
+                          if (editingId === essay.id) setEditingId(null);
+                        });
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Excluir
                     </button>
                   </div>
                 </div>

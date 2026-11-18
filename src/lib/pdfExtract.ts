@@ -13,6 +13,229 @@ async function getPdfJs(): Promise<typeof import('pdfjs-dist')> {
   return pdfJsLoaderPromise;
 }
 
+interface PositionedTextSpan {
+  str: string;
+  x: number;
+  y: number;
+  width: number;
+  fontSize: number;
+  order: number;
+}
+
+interface VisualLine {
+  y: number;
+  minX: number;
+  maxX: number;
+  text: string;
+}
+
+function assembleVisualLines(spans: PositionedTextSpan[]): VisualLine[] {
+  if (!spans.length) return [];
+
+  const sorted = [...spans].sort((a, b) => {
+    const dy = b.y - a.y;
+    if (Math.abs(dy) > 0.5) return dy;
+    const dx = a.x - b.x;
+    if (Math.abs(dx) > 0.5) return dx;
+    return a.order - b.order;
+  });
+
+  const bands: Array<{ anchorY: number; tol: number; items: PositionedTextSpan[] }> = [];
+
+  for (const span of sorted) {
+    const tol = Math.max(3.5, Math.min(7.5, span.fontSize * 0.48));
+    let targetBand: (typeof bands)[number] | null = null;
+    for (let i = bands.length - 1; i >= 0 && i >= bands.length - 6; i--) {
+      const b = bands[i];
+      if (Math.abs(span.y - b.anchorY) <= Math.max(b.tol, tol)) {
+        targetBand = b;
+        break;
+      }
+    }
+    if (targetBand) {
+      targetBand.items.push(span);
+    } else {
+      bands.push({ anchorY: span.y, tol, items: [span] });
+    }
+  }
+
+  bands.sort((a, b) => b.anchorY - a.anchorY);
+
+  const result: VisualLine[] = [];
+  for (const band of bands) {
+    const row = [...band.items].sort((a, b) => {
+      const dx = a.x - b.x;
+      if (Math.abs(dx) > 0.4) return dx;
+      return a.order - b.order;
+    });
+
+    let lineText = '';
+    let prevEndX: number | null = null;
+    let prevFontSize = 10;
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = 0;
+
+    for (const item of row) {
+      const raw = item.str.replace(/[\u200B-\u200D\uFEFF\u00AD]/g, '');
+      if (!raw) continue;
+
+      if (!raw.trim()) {
+        if (lineText && !lineText.endsWith(' ')) {
+          lineText += ' ';
+        }
+        prevEndX = Math.max(prevEndX ?? 0, item.x + item.width);
+        continue;
+      }
+
+      minX = Math.min(minX, item.x);
+      maxX = Math.max(maxX, item.x + item.width);
+
+      if (!lineText) {
+        lineText = raw.trimStart();
+      } else if (lineText.endsWith(' ') || raw.startsWith(' ')) {
+        lineText += raw;
+      } else {
+        const refSize = Math.max(6, Math.min(prevFontSize, item.fontSize));
+        const gap = prevEndX !== null ? item.x - prevEndX : refSize;
+        if (gap > Math.max(1.6, refSize * 0.16)) {
+          lineText += ` ${raw}`;
+        } else {
+          lineText += raw;
+        }
+      }
+
+      prevEndX = item.x + item.width;
+      prevFontSize = item.fontSize;
+    }
+
+    const cleaned = lineText.replace(/[ \t]{2,}/g, ' ').trim();
+    if (cleaned) {
+      result.push({
+        y: band.anchorY,
+        minX: Number.isFinite(minX) ? minX : 0,
+        maxX,
+        text: cleaned,
+      });
+    }
+  }
+
+  return result;
+}
+
+function medianNumber(values: number[]): number {
+  if (!values.length) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 === 0 ? (s[mid - 1] + s[mid]) / 2 : s[mid];
+}
+
+function extractOrderedPageLines(spans: PositionedTextSpan[]): string[] {
+  if (!spans.length) return [];
+
+  const nonSpace = spans.filter((s) => s.str.trim().length > 0);
+  if (nonSpace.length < 24) {
+    return assembleVisualLines(spans).map((l) => l.text);
+  }
+
+  let pageMinX = Number.POSITIVE_INFINITY;
+  let pageMaxX = Number.NEGATIVE_INFINITY;
+  let pageMinY = Number.POSITIVE_INFINITY;
+  let pageMaxY = Number.NEGATIVE_INFINITY;
+  for (const s of nonSpace) {
+    pageMinX = Math.min(pageMinX, s.x);
+    pageMaxX = Math.max(pageMaxX, s.x + s.width);
+    pageMinY = Math.min(pageMinY, s.y);
+    pageMaxY = Math.max(pageMaxY, s.y);
+  }
+
+  const pageWidth = pageMaxX - pageMinX;
+  const pageHeight = pageMaxY - pageMinY;
+  if (pageWidth < 180 || pageHeight < 100) {
+    return assembleVisualLines(spans).map((l) => l.text);
+  }
+
+  // Ignore top/bottom ~6% bands when detecting a central vertical gutter (running page headers/footers may span width)
+  const topBannerThresholdY = pageMaxY - pageHeight * 0.07;
+  const bottomFooterThresholdY = pageMinY + pageHeight * 0.07;
+  const bodySpans = nonSpace.filter(
+    (s) => s.y < topBannerThresholdY && s.y > bottomFooterThresholdY,
+  );
+
+  if (bodySpans.length >= 20) {
+    let bestSplitX: number | null = null;
+    let bestCrossing = Number.POSITIVE_INFINITY;
+
+    for (let frac = 0.42; frac <= 0.58; frac += 0.02) {
+      const candX = pageMinX + pageWidth * frac;
+      let crossing = 0;
+      let leftCount = 0;
+      let rightCount = 0;
+      for (const s of bodySpans) {
+        const sEnd = s.x + s.width;
+        if (s.x < candX - 4 && sEnd > candX + 4) {
+          crossing++;
+        } else if (sEnd <= candX + 4) {
+          leftCount++;
+        } else {
+          rightCount++;
+        }
+      }
+      if (leftCount >= 10 && rightCount >= 10 && crossing < bestCrossing) {
+        bestCrossing = crossing;
+        bestSplitX = candX;
+      }
+    }
+
+    if (bestSplitX !== null && bestCrossing <= Math.max(1, Math.floor(bodySpans.length * 0.015))) {
+      const leftBodySpans = spans.filter(
+        (s) => s.y < topBannerThresholdY && s.y > bottomFooterThresholdY && s.x + s.width <= bestSplitX! + 4,
+      );
+      const rightBodySpans = spans.filter(
+        (s) => s.y < topBannerThresholdY && s.y > bottomFooterThresholdY && s.x >= bestSplitX! - 4,
+      );
+
+      const leftLines = assembleVisualLines(leftBodySpans);
+      const rightLines = assembleVisualLines(rightBodySpans);
+
+      const leftMedianLen = medianNumber(leftLines.map((l) => l.text.length));
+      const rightMedianLen = medianNumber(rightLines.map((l) => l.text.length));
+      const leftSubstantial = leftLines.filter((l) => l.text.length >= 24).length;
+      const rightSubstantial = rightLines.filter((l) => l.text.length >= 24).length;
+      const leftWidthRatio = (bestSplitX - pageMinX) / pageWidth;
+
+      if (
+        leftLines.length >= 6 &&
+        rightLines.length >= 6 &&
+        leftSubstantial >= 4 &&
+        rightSubstantial >= 4 &&
+        leftMedianLen >= 22 &&
+        rightMedianLen >= 22 &&
+        leftWidthRatio >= 0.3
+      ) {
+        const topSpans = spans.filter((s) => s.y >= topBannerThresholdY);
+        const bottomSpans = spans.filter((s) => s.y <= bottomFooterThresholdY);
+        const centerSpans = spans.filter(
+          (s) =>
+            s.y < topBannerThresholdY &&
+            s.y > bottomFooterThresholdY &&
+            s.x < bestSplitX! - 4 &&
+            s.x + s.width > bestSplitX! + 4,
+        );
+        const topAndWideLines = assembleVisualLines([...topSpans, ...centerSpans]).map((l) => l.text);
+        const bottomLines = assembleVisualLines(bottomSpans).map((l) => l.text);
+        return [
+          ...topAndWideLines,
+          ...leftLines.map((l) => l.text),
+          ...rightLines.map((l) => l.text),
+          ...bottomLines,
+        ];
+      }
+    }
+  }
+
+  return assembleVisualLines(spans).map((l) => l.text);
+}
+
 export async function extractTextFromPdfFile(file: File | Blob, kind = 'documento'): Promise<string> {
   const pdfjsLib = await getPdfJs();
   const buffer = await file.arrayBuffer();
@@ -28,29 +251,36 @@ export async function extractTextFromPdfFile(file: File | Blob, kind = 'document
   for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex++) {
     const page = await pdf.getPage(pageIndex);
     const content = await page.getTextContent();
-    let line = '';
-    let lastY: number | null = null;
-    const lines: string[] = [];
+    const spans: PositionedTextSpan[] = [];
+    let fallbackLines: string[] = [];
+    let hasAllCoords = true;
 
-    for (const item of content.items) {
+    for (let idx = 0; idx < content.items.length; idx++) {
+      const item = content.items[idx];
       if (!('str' in item)) continue;
-      const textItem = item as { str: string; transform?: number[]; hasEOL?: boolean };
-      const currentY = Array.isArray(textItem.transform) ? Math.round(textItem.transform[5]) : null;
-      if (lastY !== null && currentY !== null && Math.abs(currentY - lastY) > 4) {
-        if (line.trim()) lines.push(line.trim());
-        line = textItem.str;
+      const textItem = item as { str: string; transform?: number[]; width?: number; height?: number; hasEOL?: boolean };
+      if (!textItem.str) continue;
+      if (Array.isArray(textItem.transform) && textItem.transform.length >= 6) {
+        const a = textItem.transform[0] || 0;
+        const b = textItem.transform[1] || 0;
+        const d = textItem.transform[3] || 0;
+        const x = textItem.transform[4];
+        const y = textItem.transform[5];
+        const fontSize = Math.max(6, Math.hypot(a, b) || Math.abs(d) || textItem.height || 10);
+        const width =
+          typeof textItem.width === 'number' && Number.isFinite(textItem.width)
+            ? Math.max(0, textItem.width)
+            : textItem.str.length * fontSize * 0.45;
+        spans.push({ str: textItem.str, x, y, width, fontSize, order: idx });
       } else {
-        line = line ? `${line}${line.endsWith(' ') || textItem.str.startsWith(' ') ? '' : ' '}${textItem.str}` : textItem.str;
-      }
-      if (textItem.hasEOL) {
-        if (line.trim()) lines.push(line.trim());
-        line = '';
-        lastY = null;
-      } else {
-        lastY = currentY;
+        hasAllCoords = false;
+        fallbackLines.push(textItem.str);
       }
     }
-    if (line.trim()) lines.push(line.trim());
+
+    const lines = hasAllCoords && spans.length > 0
+      ? extractOrderedPageLines(spans)
+      : fallbackLines.map((l) => l.trim()).filter(Boolean);
     pageTexts.push(lines.join('\n'));
   }
 

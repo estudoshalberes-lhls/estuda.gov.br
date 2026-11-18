@@ -6,6 +6,8 @@ import {
   Folder,
   HardDriveDownload,
   RotateCcw,
+  ShieldCheck,
+  Tag,
   Trash2,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
@@ -43,6 +45,36 @@ function getNewerBadge(conflict: DeletedDriveConflict): { label: string; classNa
   return {
     label: 'Divergência de sincronização',
     className: 'bg-[var(--panel-raised)] text-[var(--muted)] border-[var(--line-strong)]',
+  };
+}
+
+function getSyncTagBadge(conflict: DeletedDriveConflict): {
+  label: string;
+  hint: string;
+  className: string;
+  isInternal: boolean;
+} {
+  if (conflict.syncOrigin === 'internal') {
+    return {
+      label: 'Etiqueta: Criado no app',
+      hint: 'Etiqueta interna confirmada — esta cópia foi salva pelo aplicativo antes da exclusão local.',
+      className: 'bg-[var(--good)]/12 text-[var(--good)] border-[var(--good)]/30',
+      isInternal: true,
+    };
+  }
+  if (conflict.syncOrigin === 'external-modified') {
+    return {
+      label: 'Modificado externamente',
+      hint: 'Possui etiqueta do app, porém foi modificado fora dele no Google Drive após a sincronização.',
+      className: 'bg-[var(--warning)]/15 text-[var(--warning)] border-[var(--warning)]/35',
+      isInternal: false,
+    };
+  }
+  return {
+    label: 'Externo (sem etiqueta)',
+    hint: 'Arquivo enviado diretamente no Google Drive ou anterior ao rastreamento por etiqueta de sincronização.',
+    className: 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent)]/30',
+    isInternal: false,
   };
 }
 
@@ -126,6 +158,7 @@ export const DriveSyncConflictDialog: React.FC = () => {
           {driveSyncConflicts.map((conflict) => {
             const isItemBusy = resolvingDriveConflictId === conflict.id || batchRunning !== null;
             const newerBadge = getNewerBadge(conflict);
+            const syncTagBadge = getSyncTagBadge(conflict);
 
             return (
               <div
@@ -147,6 +180,17 @@ export const DriveSyncConflictDialog: React.FC = () => {
                           {conflict.folderName}
                         </span>
                       )}
+                      <span
+                        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded border text-[10px] font-bold ${syncTagBadge.className}`}
+                        title={conflict.syncOriginReason || syncTagBadge.hint}
+                      >
+                        {syncTagBadge.isInternal ? (
+                          <ShieldCheck className="w-3 h-3 shrink-0" />
+                        ) : (
+                          <Tag className="w-3 h-3 shrink-0" />
+                        )}
+                        {syncTagBadge.label}
+                      </span>
                     </div>
                   </div>
                   <span
@@ -155,6 +199,10 @@ export const DriveSyncConflictDialog: React.FC = () => {
                     {newerBadge.label}
                   </span>
                 </div>
+
+                <p className="m-0 text-[11px] text-[var(--muted)] leading-snug">
+                  {syncTagBadge.hint}
+                </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-[11.5px]">
                   <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-2.5 py-1.5 flex items-center gap-2 min-w-0">

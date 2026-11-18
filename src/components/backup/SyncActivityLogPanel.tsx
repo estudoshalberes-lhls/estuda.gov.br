@@ -19,6 +19,7 @@ import {
   SyncActivityCategory,
   SyncActivityLogEntry,
   SyncActivityStatus,
+  SyncFileOrigin,
 } from '../../lib/syncActivityLog';
 import { Panel } from '../ui/PageHeader';
 
@@ -64,6 +65,24 @@ const FILE_ACTION_META: Record<
   failed: {
     label: 'Falha',
     className: 'bg-[var(--bad)]/15 text-[var(--bad)] border-[var(--bad)]/35',
+  },
+};
+
+const FILE_ORIGIN_META: Record<
+  SyncFileOrigin,
+  { label: string; className: string }
+> = {
+  internal: {
+    label: 'Etiqueta: App',
+    className: 'bg-[var(--panel-raised)] text-[var(--muted)] border-[var(--line-strong)]',
+  },
+  external: {
+    label: 'Externo',
+    className: 'bg-[var(--accent-soft)] text-[var(--accent)] border-[var(--accent)]/30',
+  },
+  'external-modified': {
+    label: 'Alterado fora do app',
+    className: 'bg-[var(--warning)]/15 text-[var(--warning)] border-[var(--warning)]/35',
   },
 };
 
@@ -212,6 +231,13 @@ const LogEntryCard: React.FC<{ entry: SyncActivityLogEntry }> = ({ entry }) => {
                     {file.detail && (
                       <span className="text-[10.5px] text-[var(--muted)] break-all">
                         {file.detail}
+                      </span>
+                    )}
+                    {file.syncOrigin && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded border text-[10px] font-bold ${FILE_ORIGIN_META[file.syncOrigin].className}`}
+                      >
+                        {FILE_ORIGIN_META[file.syncOrigin].label}
                       </span>
                     )}
                     <span

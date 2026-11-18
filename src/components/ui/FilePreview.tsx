@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { CloudDownload, Download, FileText, X } from 'lucide-react';
+import { CloudDownload, Download, FileText, FolderOpen, X } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../../lib/fileStorage';
 import { visibleName } from '../../lib/parsers';
@@ -22,6 +22,7 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
   const {
     driveConnected,
     recoverFileFromDrive,
+    pickDriveFolderOrFiles,
     toast,
   } = useStudy();
   const [url, setUrl] = useState<string>('');
@@ -29,6 +30,7 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
   const [blobRef, setBlobRef] = useState<Blob | null>(null);
   const [loading, setLoading] = useState(true);
   const [recovering, setRecovering] = useState(false);
+  const [authorizingDrive, setAuthorizingDrive] = useState(false);
 
   const lower = filename.toLowerCase();
   const isPdf = lower.endsWith('.pdf') || mimeType === 'application/pdf';
@@ -86,13 +88,27 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
     try {
       const recovered = await recoverFileFromDrive(blobKey, filename);
       if (!recovered) {
-        toast('Arquivo não encontrado na pasta do Google Drive.', true);
         return;
       }
       await bindBlob(recovered, () => true);
       toast('Arquivo restaurado do Google Drive!');
     } finally {
       setRecovering(false);
+    }
+  };
+
+  const handleAuthorizeDriveFile = async () => {
+    setAuthorizingDrive(true);
+    try {
+      const res = await pickDriveFolderOrFiles({ mode: 'files-only' });
+      if (!res) return;
+      const blob = await getFileBlob(blobKey) || (await recoverFileFromDrive(blobKey, filename));
+      if (blob) {
+        await bindBlob(blob, () => true);
+        toast('Arquivo autorizado e carregado do Google Drive!');
+      }
+    } finally {
+      setAuthorizingDrive(false);
     }
   };
 
@@ -149,15 +165,26 @@ export const FilePreview: React.FC<FilePreviewProps> = ({
           </span>
           <div className="flex flex-wrap items-center justify-center gap-2">
             {driveConnected && (
-              <button
-                type="button"
-                onClick={() => void handleManualRecover()}
-                disabled={recovering}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60"
-              >
-                <CloudDownload className="w-3.5 h-3.5" />
-                {recovering ? 'Buscando no Google Drive…' : 'Restaurar do Google Drive'}
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => void handleManualRecover()}
+                  disabled={recovering || authorizingDrive}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60"
+                >
+                  <CloudDownload className="w-3.5 h-3.5" />
+                  {recovering ? 'Buscando no Google Drive…' : 'Restaurar do Google Drive'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleAuthorizeDriveFile()}
+                  disabled={recovering || authorizingDrive}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  {authorizingDrive ? 'Abrindo seletor…' : 'Selecionar arquivo no Drive'}
+                </button>
+              </>
             )}
           </div>
         </div>

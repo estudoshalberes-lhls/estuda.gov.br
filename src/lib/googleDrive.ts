@@ -172,14 +172,13 @@ function persistDriveAccessToken(
   const uid = user?.uid || auth.currentUser?.uid || '';
   const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
   if (email) rememberLastGoogleEmail(email);
-  // Segurança: nunca persiste tokens OAuth em localStorage permanente; mantém apenas em memória e sessionStorage da aba atual até expirar
+  const payload = JSON.stringify({ token, expiresAt, uid });
   try {
-    localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(DRIVE_TOKEN_CACHE_KEY, payload);
+    }
     if (typeof window !== 'undefined' && window.sessionStorage) {
-      window.sessionStorage.setItem(
-        DRIVE_SESSION_TOKEN_KEY,
-        JSON.stringify({ token, expiresAt, uid }),
-      );
+      window.sessionStorage.setItem(DRIVE_SESSION_TOKEN_KEY, payload);
     }
   } catch {
     // ignore storage errors
@@ -188,37 +187,42 @@ function persistDriveAccessToken(
 }
 
 function restorePersistedDriveAccessToken(user?: User | null): string | null {
-  try {
-    localStorage.removeItem(DRIVE_TOKEN_CACHE_KEY);
-  } catch {
-    // ignore storage errors
-  }
   if (cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)) {
     return cachedAccessToken;
   }
-  try {
-    if (typeof window !== 'undefined' && window.sessionStorage) {
-      const raw = window.sessionStorage.getItem(DRIVE_SESSION_TOKEN_KEY);
-      if (raw) {
-        const parsed = JSON.parse(raw) as { token?: string; expiresAt?: number; uid?: string };
-        const activeUid = user?.uid || auth.currentUser?.uid || '';
-        const uidMatches = !parsed.uid || !activeUid || parsed.uid === activeUid;
-        if (
-          uidMatches &&
-          typeof parsed.token === 'string' &&
-          parsed.token.trim().length > 0 &&
-          typeof parsed.expiresAt === 'number' &&
-          Date.now() < parsed.expiresAt - 60_000
-        ) {
-          cachedAccessToken = parsed.token;
-          cachedAccessTokenExpiresAt = parsed.expiresAt;
-          return cachedAccessToken;
-        }
-        window.sessionStorage.removeItem(DRIVE_SESSION_TOKEN_KEY);
+  const activeUid = user?.uid || auth.currentUser?.uid || '';
+  const readValidFromStorage = (storage: Storage | undefined, key: string): string | null => {
+    if (!storage) return null;
+    try {
+      const raw = storage.getItem(key);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as { token?: string; expiresAt?: number; uid?: string };
+      const uidMatches = !parsed.uid || !activeUid || parsed.uid === activeUid;
+      if (
+        uidMatches &&
+        typeof parsed.token === 'string' &&
+        parsed.token.trim().length > 0 &&
+        typeof parsed.expiresAt === 'number' &&
+        Date.now() < parsed.expiresAt - 60_000
+      ) {
+        cachedAccessToken = parsed.token;
+        cachedAccessTokenExpiresAt = parsed.expiresAt;
+        return cachedAccessToken;
       }
+      if (typeof parsed.expiresAt === 'number' && Date.now() >= parsed.expiresAt - 60_000) {
+        storage.removeItem(key);
+      }
+    } catch {
+      // ignore storage errors
     }
-  } catch {
-    // ignore sessionStorage errors
+    return null;
+  };
+
+  if (typeof window !== 'undefined') {
+    return (
+      readValidFromStorage(window.sessionStorage, DRIVE_SESSION_TOKEN_KEY) ||
+      readValidFromStorage(window.localStorage, DRIVE_TOKEN_CACHE_KEY)
+    );
   }
   return null;
 }
@@ -439,6 +443,172 @@ export async function refreshDriveAccessTokenSilently(_options?: {
   return null;
 }
 
+export const DRIVE_SYNC_TAG_VALUE = 'ce-v1';
+export type DriveFileSyncOrigin = 'internal' | 'external' | 'external-modified';
+
+export interface DriveFileSyncTagClassification {
+  origin: DriveFileSyncOrigin;
+  tagPresent: boolean;
+  syncedAtMs: number;
+  driveModifiedMs: number;
+  externalDeltaMs: number;
+  deviceId?: string;
+  moduleTag?: string;
+  sourceAction?: string;
+  syncReason: string;
+}
+
+const SYNC_DEVICE_ID_STORAGE_KEY = 'ce_sync_device_id_v1';
+const DRIVE_CLOCK_OFFSET_STORAGE_KEY = 'ce_drive_clock_offset_v1';
+const INTERNAL_CREATION_TOLERANCE_MS = 30_000;
+const EXTERNAL_MODIFICATION_TOLERANCE_MS = 120_000;
+let memorySyncDeviceId: string | null = null;
+let memoryDriveClockOffsetMs: number | null = null;
+
+function getOrCreateSyncDeviceId(): string {
+  if (memorySyncDeviceId) return memorySyncDeviceId;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const existing = window.localStorage.getItem(SYNC_DEVICE_ID_STORAGE_KEY);
+      if (existing && /^[a-z0-9_-]{6,24}$/i.test(existing)) {
+        memorySyncDeviceId = existing;
+        return existing;
+      }
+      const generated = `ce_${Math.random().toString(36).slice(2, 10)}`;
+      window.localStorage.setItem(SYNC_DEVICE_ID_STORAGE_KEY, generated);
+      memorySyncDeviceId = generated;
+      return generated;
+    }
+  } catch {
+    // ignore storage failures
+  }
+  memorySyncDeviceId = `ce_${Math.random().toString(36).slice(2, 10)}`;
+  return memorySyncDeviceId;
+}
+
+function getDriveClockOffsetMs(): number {
+  if (memoryDriveClockOffsetMs !== null) return memoryDriveClockOffsetMs;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      const raw = window.localStorage.getItem(DRIVE_CLOCK_OFFSET_STORAGE_KEY);
+      if (raw !== null) {
+        const parsed = Number(raw);
+        if (Number.isFinite(parsed) && Math.abs(parsed) <= 7 * 24 * 60 * 60 * 1000) {
+          memoryDriveClockOffsetMs = parsed;
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // ignore storage failures
+  }
+  memoryDriveClockOffsetMs = 0;
+  return 0;
+}
+
+function calibrateDriveClockOffsetFromServerIso(serverIso: string | undefined, sentLocalMs: number): void {
+  if (!serverIso || !sentLocalMs) return;
+  const serverMs = Date.parse(serverIso);
+  if (!Number.isFinite(serverMs) || serverMs <= 0) return;
+  const offset = serverMs - sentLocalMs;
+  if (Math.abs(offset) > 7 * 24 * 60 * 60 * 1000) return;
+  memoryDriveClockOffsetMs = offset;
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      window.localStorage.setItem(DRIVE_CLOCK_OFFSET_STORAGE_KEY, String(Math.round(offset)));
+    }
+  } catch {
+    // ignore storage failures
+  }
+}
+
+export function buildInternalDriveAppProperties(options?: {
+  moduleTag?: string;
+  sourceAction?: string;
+  timestampMs?: number;
+}): Record<string, string> {
+  const alignedMs = Math.round((options?.timestampMs || Date.now()) + getDriveClockOffsetMs());
+  const props: Record<string, string> = {
+    ceTag: DRIVE_SYNC_TAG_VALUE,
+    ceSrc: 'app',
+    ceAt: String(alignedMs),
+    ceDev: getOrCreateSyncDeviceId().slice(0, 24),
+  };
+  if (options?.moduleTag) {
+    const cleanMod = String(options.moduleTag)
+      .replace(/[^\x20-\x7E]/g, '')
+      .trim()
+      .slice(0, 48);
+    if (cleanMod) props.ceMod = cleanMod;
+  }
+  if (options?.sourceAction) {
+    const cleanAct = String(options.sourceAction)
+      .replace(/[^\x20-\x7E]/g, '')
+      .trim()
+      .slice(0, 24);
+    if (cleanAct) props.ceAct = cleanAct;
+  }
+  return props;
+}
+
+export function classifyDriveFileSyncOrigin(
+  df: Pick<DriveFileInfo, 'appProperties' | 'createdTime' | 'modifiedTime'>,
+): DriveFileSyncTagClassification {
+  const props = df.appProperties || {};
+  const createdMs = Date.parse(df.createdTime || '') || 0;
+  const driveModifiedMs = Date.parse(df.modifiedTime || df.createdTime || '') || 0;
+  const tagPresent = props.ceTag === DRIVE_SYNC_TAG_VALUE;
+
+  if (!tagPresent) {
+    return {
+      origin: 'external',
+      tagPresent: false,
+      syncedAtMs: 0,
+      driveModifiedMs,
+      externalDeltaMs: 0,
+      syncReason: 'Sem etiqueta de sincronização interna (enviado externamente ao Drive)',
+    };
+  }
+
+  const parsedCeAt = Number(props.ceAt || 0);
+  const syncedAtMs =
+    Number.isFinite(parsedCeAt) && parsedCeAt > 0 ? parsedCeAt : createdMs || driveModifiedMs;
+  const untouchedSinceCreation =
+    createdMs > 0 &&
+    driveModifiedMs > 0 &&
+    Math.abs(driveModifiedMs - createdMs) <= INTERNAL_CREATION_TOLERANCE_MS;
+  const externalDeltaMs =
+    syncedAtMs > 0 && driveModifiedMs > 0 ? Math.max(0, driveModifiedMs - syncedAtMs) : 0;
+  const modifiedExternallyAfterSync =
+    !untouchedSinceCreation &&
+    syncedAtMs > 0 &&
+    driveModifiedMs > syncedAtMs + EXTERNAL_MODIFICATION_TOLERANCE_MS;
+
+  return {
+    origin: modifiedExternallyAfterSync ? 'external-modified' : 'internal',
+    tagPresent: true,
+    syncedAtMs,
+    driveModifiedMs,
+    externalDeltaMs,
+    deviceId: props.ceDev || undefined,
+    moduleTag: props.ceMod || undefined,
+    sourceAction: props.ceAct || undefined,
+    syncReason: modifiedExternallyAfterSync
+      ? 'Etiqueta presente, porém modificado externamente no Drive após a última sincronização do app'
+      : 'Etiqueta interna verificada (criado/atualizado pelo app)',
+  };
+}
+
+export function enrichDriveFileWithSyncTag(file: DriveFileInfo): DriveFileInfo {
+  const info = classifyDriveFileSyncOrigin(file);
+  return {
+    ...file,
+    syncOrigin: info.origin,
+    syncTagPresent: info.tagPresent,
+    syncedAtMs: info.syncedAtMs,
+  };
+}
+
 export interface DriveFileInfo {
   id: string;
   name: string;
@@ -453,6 +623,10 @@ export interface DriveFileInfo {
   folderPath?: string;
   isInStudyFolder?: boolean;
   isInActiveFolder?: boolean;
+  appProperties?: Record<string, string>;
+  syncOrigin?: DriveFileSyncOrigin;
+  syncTagPresent?: boolean;
+  syncedAtMs?: number;
 }
 
 export interface DriveFolderSummary {
@@ -765,6 +939,7 @@ export const googleSignIn = async (options?: {
 
     rememberLastGoogleEmail(result.user.email);
     if (accessToken) {
+      clearDrivePermissionBlockedFiles();
       persistDriveAccessToken(accessToken, Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS, result.user);
     }
 
@@ -1455,7 +1630,7 @@ export async function uploadFileToDrive(
   filename: string,
   token?: string,
   subfolderName?: string | string[],
-  options?: { existingFileId?: string },
+  options?: { existingFileId?: string; moduleTag?: string; sourceAction?: string },
 ): Promise<DriveFileInfo> {
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -1475,7 +1650,8 @@ export async function uploadFileToDrive(
       const escapedName = filename.replace(/'/g, "\\'");
       const searchRes = await fetchDriveFilesList(activeToken, {
         q: `'${targetFolderId}' in parents and name = '${escapedName}' and trashed = false`,
-        fields: 'files(id,name,modifiedTime)',
+        fields: 'files(id,name,modifiedTime,appProperties)',
+        fallbackFields: 'files(id,name,modifiedTime)',
         pageSize: 5,
       });
       if (searchRes.ok) {
@@ -1487,9 +1663,20 @@ export async function uploadFileToDrive(
     }
   }
 
+  const sentLocalMs = Date.now();
+  const resolvedSubfolderLabel = Array.isArray(subfolderName)
+    ? subfolderName[0]
+    : subfolderName;
+  const appProperties = buildInternalDriveAppProperties({
+    moduleTag: options?.moduleTag || resolvedSubfolderLabel,
+    sourceAction: options?.sourceAction || (existingFileId ? 'update' : 'upload'),
+    timestampMs: sentLocalMs,
+  });
+
   const metadata: Record<string, any> = {
     name: filename,
     description: `Arquivo sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+    appProperties,
   };
   if (!existingFileId) {
     metadata.parents = [targetFolderId];
@@ -1519,8 +1706,8 @@ export async function uploadFileToDrive(
   fullPayload.set(part3, part1.length + part2.length + buffer.byteLength);
 
   const uploadUrl = existingFileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`
-    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents';
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties';
 
   const { res } = await authorizedDriveFetch(
     uploadUrl,
@@ -1539,7 +1726,9 @@ export async function uploadFileToDrive(
     await throwDriveResponseError(res, 'Falha no upload para o Google Drive');
   }
 
-  return (await res.json()) as DriveFileInfo;
+  const saved = (await res.json()) as DriveFileInfo;
+  calibrateDriveClockOffsetFromServerIso(saved.modifiedTime || saved.createdTime, sentLocalMs);
+  return enrichDriveFileWithSyncTag(saved);
 }
 
 /**
@@ -1551,6 +1740,7 @@ export async function upsertTextFileInDriveSubFolder(
   filename: string,
   subfolderName: string | string[],
   token?: string,
+  options?: { moduleTag?: string },
 ): Promise<DriveFileInfo> {
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -1563,7 +1753,8 @@ export async function upsertTextFileInDriveSubFolder(
   const escapedName = filename.replace(/'/g, "\\'");
   const searchRes = await fetchDriveFilesList(activeToken, {
     q: `'${targetFolderId}' in parents and name = '${escapedName}' and trashed = false`,
-    fields: 'files(id,name,modifiedTime)',
+    fields: 'files(id,name,modifiedTime,appProperties)',
+    fallbackFields: 'files(id,name,modifiedTime)',
     pageSize: 5,
   });
 
@@ -1577,10 +1768,21 @@ export async function upsertTextFileInDriveSubFolder(
   const delimiter = `\r\n--${boundary}\r\n`;
   const closeDelimiter = `\r\n--${boundary}--`;
 
+  const sentLocalMs = Date.now();
+  const resolvedSubfolderLabel = Array.isArray(subfolderName)
+    ? subfolderName[0]
+    : subfolderName;
+  const appProperties = buildInternalDriveAppProperties({
+    moduleTag: options?.moduleTag || resolvedSubfolderLabel,
+    sourceAction: existingFileId ? 'txt-update' : 'txt-upload',
+    timestampMs: sentLocalMs,
+  });
+
   const metadata: Record<string, any> = {
     name: filename,
     mimeType: 'text/plain',
     description: `Arquivo TXT sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+    appProperties,
   };
   if (!existingFileId) {
     metadata.parents = [targetFolderId];
@@ -1593,8 +1795,8 @@ export async function upsertTextFileInDriveSubFolder(
   const multipartBody = metadataPart + mediaPart;
 
   const url = existingFileId
-    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`
-    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents';
+    ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(existingFileId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties`
+    : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties';
 
   const { res } = await authorizedDriveFetch(
     url,
@@ -1614,7 +1816,49 @@ export async function upsertTextFileInDriveSubFolder(
     await throwDriveResponseError(res, `Falha ao salvar arquivo TXT "${filename}" no Google Drive`);
   }
 
-  return (await res.json()) as DriveFileInfo;
+  const saved = (await res.json()) as DriveFileInfo;
+  calibrateDriveClockOffsetFromServerIso(saved.modifiedTime || saved.createdTime, sentLocalMs);
+  return enrichDriveFileWithSyncTag(saved);
+}
+
+/**
+ * Stamps or refreshes the internal sync-tag metadata on an existing Google Drive file without changing its content.
+ */
+export async function stampDriveFileSyncTag(
+  fileId: string,
+  token?: string,
+  moduleTag?: string,
+): Promise<DriveFileInfo | null> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken || !fileId) return null;
+
+  const sentLocalMs = Date.now();
+  const appProperties = buildInternalDriveAppProperties({
+    moduleTag,
+    sourceAction: 'tag-stamp',
+    timestampMs: sentLocalMs,
+  });
+
+  try {
+    const { res } = await authorizedDriveFetch(
+      `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(fileId)}?supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties`,
+      (t) => ({
+        method: 'PATCH',
+        headers: {
+          Authorization: `Bearer ${t}`,
+          'Content-Type': 'application/json; charset=UTF-8',
+        },
+        body: JSON.stringify({ appProperties }),
+      }),
+      activeToken,
+    );
+    if (!res.ok) return null;
+    const saved = (await res.json()) as DriveFileInfo;
+    calibrateDriveClockOffsetFromServerIso(saved.modifiedTime || saved.createdTime, sentLocalMs);
+    return enrichDriveFileWithSyncTag(saved);
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1649,13 +1893,15 @@ export async function listAllStudyFilesInDrive(
       const canonicalCat = parentId ? graph.canonicalCategoryByFolderId.get(parentId) : undefined;
       const ancestorFolderIds = parentId ? graph.ancestorIdsByFolderId.get(parentId) || [parentId] : [];
 
-      allFiles.push({
-        ...f,
-        ancestorFolderIds,
-        subfolderName: canonicalCat || parentFolder?.name,
-        folderPath,
-        isInStudyFolder,
-      });
+      allFiles.push(
+        enrichDriveFileWithSyncTag({
+          ...f,
+          ancestorFolderIds,
+          subfolderName: canonicalCat || parentFolder?.name,
+          folderPath,
+          isInStudyFolder,
+        }),
+      );
     });
   };
 
@@ -1664,7 +1910,7 @@ export async function listAllStudyFilesInDrive(
   do {
     const res = await fetchDriveFilesList(activeToken, {
       q: filesQuery,
-      fields: 'nextPageToken,files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+      fields: 'nextPageToken,files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties)',
       fallbackFields: 'nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
       orderBy: 'modifiedTime desc',
       pageSize: 100,
@@ -1695,7 +1941,7 @@ export async function listAllStudyFilesInDrive(
     for (const folderId of targetFolderIds) {
       const folderRes = await fetchDriveFilesList(activeToken, {
         q: `'${folderId}' in parents and mimeType != 'application/vnd.google-apps.folder' and trashed = false`,
-        fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+        fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties)',
         fallbackFields: 'files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
         pageSize: 100,
       });
@@ -1879,7 +2125,7 @@ export async function saveCloudSyncSnapshot(
     `'${backupsFolderId}' in parents and name = '${CLOUD_SYNC_FILENAME}' and trashed = false`,
   );
   const { res: searchRes, usedToken } = await authorizedDriveFetch(
-    `https://www.googleapis.com/drive/v3/files?q=${searchQuery}&fields=files(id,name,modifiedTime)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=modifiedTime desc&pageSize=10`,
+    `https://www.googleapis.com/drive/v3/files?q=${searchQuery}&fields=files(id,name,modifiedTime,appProperties)&includeItemsFromAllDrives=true&supportsAllDrives=true&orderBy=modifiedTime desc&pageSize=10`,
     (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
     activeToken,
   );
@@ -1899,15 +2145,33 @@ export async function saveCloudSyncSnapshot(
           'DRIVE_CONFLICT_NEWER_REMOTE: O arquivo de sincronização no Google Drive é mais recente que o snapshot local.',
         );
       }
+
+      const sentLocalMs = Date.now();
+      const boundary = '-------314159265358979323846SyncPatch';
+      const delimiter = `\r\n--${boundary}\r\n`;
+      const closeDelimiter = `\r\n--${boundary}--`;
+      const patchMetadata = {
+        name: CLOUD_SYNC_FILENAME,
+        description: `Snapshot sincronizado pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+        appProperties: buildInternalDriveAppProperties({
+          moduleTag: 'Backups',
+          sourceAction: 'cloud-sync',
+          timestampMs: sentLocalMs,
+        }),
+      };
+      const multipartBody =
+        `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(patchMetadata)}` +
+        `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${jsonString}${closeDelimiter}`;
+
       const { res: patchRes, usedToken: patchToken } = await authorizedDriveFetch(
-        `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents`,
+        `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties`,
         (t) => ({
           method: 'PATCH',
           headers: {
             Authorization: `Bearer ${t}`,
-            'Content-Type': 'application/json; charset=UTF-8',
+            'Content-Type': `multipart/related; boundary=${boundary}`,
           },
-          body: blob,
+          body: multipartBody,
         }),
         usedToken,
       );
@@ -1918,7 +2182,12 @@ export async function saveCloudSyncSnapshot(
             void deleteFileFromDrive(dup.id, patchToken).catch(() => {});
           }
         }
-        return (await patchRes.json()) as DriveFileInfo;
+        const savedPatch = (await patchRes.json()) as DriveFileInfo;
+        calibrateDriveClockOffsetFromServerIso(
+          savedPatch.modifiedTime || savedPatch.createdTime,
+          sentLocalMs,
+        );
+        return enrichDriveFileWithSyncTag(savedPatch);
       }
       if (patchRes.status === 401) {
         await throwDriveResponseError(patchRes, 'Sessão expirada ao sincronizar Drive');
@@ -1928,7 +2197,10 @@ export async function saveCloudSyncSnapshot(
     await throwDriveResponseError(searchRes, 'Sessão expirada ao buscar sincronização no Drive');
   }
 
-  return await uploadFileToDrive(blob, CLOUD_SYNC_FILENAME, usedToken, 'Backups');
+  return await uploadFileToDrive(blob, CLOUD_SYNC_FILENAME, usedToken, 'Backups', {
+    moduleTag: 'Backups',
+    sourceAction: 'cloud-sync',
+  });
 }
 
 /**
@@ -1947,7 +2219,10 @@ export async function saveDatabaseBackupToDrive(
   const isIncremental = isIncrementalBackupPayload(dbSnapshot);
   const prefix = isIncremental ? 'backup_incremental_central_estudos' : 'backup_central_estudos';
   const filename = `${prefix}_${dateStr}_${timeStr}.json`;
-  return await uploadFileToDrive(blob, filename, token, 'Backups');
+  return await uploadFileToDrive(blob, filename, token, 'Backups', {
+    moduleTag: 'Backups',
+    sourceAction: isIncremental ? 'inc-backup' : 'base-backup',
+  });
 }
 
 /**
@@ -1966,7 +2241,7 @@ export async function listDatabaseBackupsFromDrive(
   const [res, graph] = await Promise.all([
     fetchDriveFilesList(activeToken, {
       q: query,
-      fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+      fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties)',
       fallbackFields: 'files(id,name,mimeType,size,createdTime,modifiedTime,parents)',
       orderBy: 'modifiedTime desc',
       pageSize: 100,
@@ -1997,13 +2272,13 @@ export async function listDatabaseBackupsFromDrive(
         (f.parents?.includes(activeId) || ancestorFolderIds.includes(activeId)),
     );
 
-    return {
+    return enrichDriveFileWithSyncTag({
       ...f,
       folderPath,
       ancestorFolderIds,
       isInStudyFolder,
       isInActiveFolder,
-    };
+    });
   });
 
   const filtered =
@@ -2073,7 +2348,8 @@ export function buildDriveSignatureMap(files: DriveFileInfo[]): Record<string, s
   for (const f of files) {
     if (!f?.id) continue;
     const parent = f.parents?.[0] || '';
-    map[f.id] = `${f.modifiedTime || f.createdTime || ''}:${f.size || ''}:${parent}`;
+    const syncMarker = f.appProperties?.ceTag === DRIVE_SYNC_TAG_VALUE ? 'ce' : 'ext';
+    map[f.id] = `${f.modifiedTime || f.createdTime || ''}:${f.size || ''}:${parent}:${syncMarker}`;
   }
   return map;
 }
@@ -2417,6 +2693,7 @@ export async function downloadDriveFileBlob(
     await throwDriveResponseError(res, 'Falha ao baixar arquivo do Google Drive');
   }
 
+  clearDrivePermissionBlockedFiles([fileId]);
   const blob = await res.blob();
   if (!blob.type && fallbackMime && !isWorkspaceDoc) {
     return new Blob([blob], { type: fallbackMime });
@@ -3010,11 +3287,10 @@ export async function openDrivePicker(options?: {
             files.push(item);
           }
         }
-        if (folders.length > 0 || files.length > 0) {
-          clearDrivePermissionBlockedFiles([
-            ...folders.map((f) => f.id),
-            ...files.map((f) => f.id),
-          ]);
+        if (folders.length > 0) {
+          clearDrivePermissionBlockedFiles();
+        } else if (files.length > 0) {
+          clearDrivePermissionBlockedFiles(files.map((f) => f.id));
         }
         resolve({ folders, files });
       } else if (data.action === pickerNs.Action.CANCEL) {

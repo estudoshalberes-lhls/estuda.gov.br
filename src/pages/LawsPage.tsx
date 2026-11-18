@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   BookOpenCheck,
   CalendarCheck2,
   CalendarPlus,
@@ -11,11 +12,13 @@ import {
   Highlighter,
   Link2,
   ListChecks,
+  ListOrdered,
   Newspaper,
   Play,
   RefreshCw,
   Search,
   Sparkles,
+  Trash2,
   Undo2,
   Volume2,
   X,
@@ -23,6 +26,8 @@ import {
 import { useStudy } from '../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import {
+  buildSequentialLawIndex,
+  formatCanonicalArticleLabel,
   formatIsoDateBr,
   formatSequentialDeviceLabel,
   formatUploadSize,
@@ -31,6 +36,8 @@ import {
   localDateIso,
   normalizeSearch,
   parseMultiArticleSpec,
+  resolveCanonicalArticleIdentity,
+  resolveCanonicalArticleKeyFromQuery,
   visibleName,
 } from '../lib/parsers';
 import { HIGHLIGHT_COLOR_RGB, exportLawWithHighlightsPdf, buildHighlightedSegments } from '../lib/pdfExport';
@@ -67,6 +74,8 @@ export const LawsPage: React.FC = () => {
     addLawItemReadDate,
     setLawLastPosition,
     reprocessLawFolder,
+    deleteLawPdf,
+    requestConfirm,
     toast,
   } = useStudy();
   const [reprocessingLaw, setReprocessingLaw] = useState(false);
@@ -112,21 +121,90 @@ export const LawsPage: React.FC = () => {
   const [assocContestId, setAssocContestId] = useState<string>('');
   const [assocPointId, setAssocPointId] = useState<string>('');
   const [assocScope, setAssocScope] = useState<'article' | 'device'>('article');
+  const [showGapDetails, setShowGapDetails] = useState(false);
+  const [pendingJumpTarget, setPendingJumpTarget] = useState<{
+    canonicalKey: string;
+    label: string;
+    nonce: number;
+  } | null>(null);
+
+  // Strict sequential index rebuilt deterministically on every folder change or async store update
+  const sequentialIndex = useMemo(
+    () => buildSequentialLawIndex(folderData?.items || []),
+    [folderData?.items],
+  );
+
+  useEffect(() => {
+    setShowGapDetails(false);
+  }, [activeFolder]);
 
   const handleJumpToArticle = (articleKey: string) => {
+    const canonicalKey = resolveCanonicalArticleKeyFromQuery(articleKey);
+    const matchedGroup = canonicalKey
+      ? sequentialIndex.groupByCanonicalKey.get(canonicalKey)
+      : undefined;
+    const resolvedLabel = matchedGroup?.canonicalLabel || articleKey;
+
     if (activeFolder) {
-      setLawLastPosition(activeFolder, articleKey);
+      setLawLastPosition(activeFolder, resolvedLabel);
     }
-    const prefix = readerTab === 'continuous' ? 'law-cont-art' : 'law-dev-art';
-    const anchorId = buildArticleAnchorId(prefix, articleKey);
-    const el = document.getElementById(anchorId);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    } else {
-      setSearch(articleKey);
-      setFocusSearchTerm(articleKey);
+
+    if (readerTab === 'devices' && checklistFilter !== 'all' && matchedGroup) {
+      const hasVisibleInChecklist = matchedGroup.items.some((it) => {
+        const isRead = readSet.has(it.id);
+        return checklistFilter === 'read' ? isRead : !isRead;
+      });
+      if (!hasVisibleInChecklist) {
+        setChecklistFilter('all');
+      }
     }
+
+    if (filterOnlyMatches) {
+      setFilterOnlyMatches(false);
+    }
+    if (editalFilterContestId !== 'all') {
+      setEditalFilterContestId('all');
+    }
+
+    if (readerTab === 'continuous' && !showMatrixGuidesInContinuous) {
+      setFocusSearchTerm(resolvedLabel);
+      return;
+    }
+
+    setPendingJumpTarget({
+      canonicalKey: canonicalKey || resolveCanonicalArticleIdentity({ dispositivo: articleKey }).canonicalKey,
+      label: resolvedLabel,
+      nonce: Date.now(),
+    });
   };
+
+  useEffect(() => {
+    if (!pendingJumpTarget) return;
+    let cancelled = false;
+    let raf2 = 0;
+    const raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        if (cancelled) return;
+        const prefix = readerTab === 'continuous' ? 'law-cont-art' : 'law-dev-art';
+        const anchorId = buildArticleAnchorId(prefix, pendingJumpTarget.canonicalKey);
+        const el =
+          document.getElementById(anchorId) ||
+          document.getElementById(buildArticleAnchorId(prefix, pendingJumpTarget.label));
+        if (el) {
+          el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          setPendingJumpTarget(null);
+        } else if (sequentialIndex.orderedItems.length > 0) {
+          setFocusSearchTerm(pendingJumpTarget.label);
+          setPendingJumpTarget(null);
+        }
+      });
+    });
+    return () => {
+      cancelled = true;
+      window.cancelAnimationFrame(raf1);
+      if (raf2) window.cancelAnimationFrame(raf2);
+    };
+  }, [pendingJumpTarget, readerTab, checklistFilter, filterOnlyMatches, sequentialIndex.orderedItems.length]);
 
   useEffect(() => {
     if (!lawDeepLink) return;
@@ -152,14 +230,15 @@ export const LawsPage: React.FC = () => {
       const spec = parseMultiArticleSpec(focusSearchTerm);
       const firstArtKey = Array.from(spec.exactKeys)[0];
       if (firstArtKey) {
-        const anchorEl = document.getElementById(
-          buildArticleAnchorId('law-cont-art', `Art. ${firstArtKey}`),
-        );
+        const canonical = resolveCanonicalArticleKeyFromQuery(firstArtKey);
+        const anchorEl =
+          document.getElementById(buildArticleAnchorId('law-cont-art', canonical)) ||
+          document.getElementById(buildArticleAnchorId('law-cont-art', `Art. ${firstArtKey}`));
         anchorEl?.scrollIntoView({ behavior: 'smooth', block: 'center' });
       }
     }, 120);
     return () => window.clearTimeout(t);
-  }, [focusSearchTerm, activeFolder, readerTab]);
+  }, [focusSearchTerm, activeFolder, readerTab, sequentialIndex.orderedItems.length]);
 
   const highlights = db.lawHighlights[activeFolder] || [];
   const readSet = useMemo(
@@ -189,7 +268,7 @@ export const LawsPage: React.FC = () => {
   const lawReviewOverdue = lastReadMeta.diffDays !== null && lastReadMeta.diffDays >= 15;
 
   const readingStats = useMemo(() => {
-    const items = folderData?.items || [];
+    const items = sequentialIndex.orderedItems;
     const total = items.length;
     const read = items.filter((it) => readSet.has(it.id)).length;
     const priorityItems = items.filter(
@@ -206,7 +285,7 @@ export const LawsPage: React.FC = () => {
         ? Math.round((priorityRead / priorityItems.length) * 100)
         : 0,
     };
-  }, [folderData, readSet]);
+  }, [sequentialIndex.orderedItems, readSet]);
 
   const activeFolderLinks = useMemo(() => {
     const list: Array<{
@@ -246,8 +325,8 @@ export const LawsPage: React.FC = () => {
 
   const itemToLinksMap = useMemo(() => {
     const map = new Map<string, typeof activeFolderLinks>();
-    if (!folderData || !activeFolderLinks.length) return map;
-    for (const item of folderData.items) {
+    if (!sequentialIndex.orderedItems.length || !activeFolderLinks.length) return map;
+    for (const item of sequentialIndex.orderedItems) {
       const matched = activeFolderLinks.filter((lk) => {
         if (lk.spec.exactKeys.size > 0) {
           return itemMatchesMultiArticleSpec(item, lk.spec);
@@ -260,7 +339,7 @@ export const LawsPage: React.FC = () => {
       }
     }
     return map;
-  }, [folderData, activeFolderLinks]);
+  }, [sequentialIndex.orderedItems, activeFolderLinks]);
 
   const resolvedAssocContest = useMemo(() => {
     if (!db.contests.length) return null;
@@ -306,11 +385,11 @@ export const LawsPage: React.FC = () => {
   };
 
   const matchedIds = useMemo(() => {
-    if (!folderData) return new Set<string>();
+    if (!sequentialIndex.orderedItems.length) return new Set<string>();
     const term = normalizeSearch(search);
     if (!term) return new Set<string>();
     return new Set(
-      folderData.items
+      sequentialIndex.orderedItems
         .filter((item) => {
           if (searchSpec.exactKeys.size > 0) {
             return itemMatchesMultiArticleSpec(item, searchSpec);
@@ -321,13 +400,13 @@ export const LawsPage: React.FC = () => {
         })
         .map((item) => item.id),
     );
-  }, [folderData, search, searchSpec]);
+  }, [sequentialIndex.orderedItems, search, searchSpec]);
 
   const filteredItems = useMemo(() => {
-    if (!folderData) return [];
+    if (!sequentialIndex.orderedItems.length) return [];
     const term = normalizeSearch(search);
     const shouldApplySearchFilter = Boolean(term) && (filterOnlyMatches || focusSearchTerm !== search);
-    return folderData.items.filter((item) => {
+    return sequentialIndex.orderedItems.filter((item) => {
       if (editalFilterContestId !== 'all') {
         const links = itemToLinksMap.get(item.id) || [];
         if (editalFilterContestId === '__any__') {
@@ -342,7 +421,7 @@ export const LawsPage: React.FC = () => {
       return true;
     });
   }, [
-    folderData,
+    sequentialIndex.orderedItems,
     search,
     searchSpec,
     filterOnlyMatches,
@@ -384,7 +463,8 @@ export const LawsPage: React.FC = () => {
     let text = '';
     let lastArtigoBase = '';
     filteredItems.forEach((item, index) => {
-      const currentBase = item.artigo_base || item.dispositivo;
+      const meta = sequentialIndex.itemMetaById.get(item.id);
+      const currentBase = meta?.canonicalKey || (item.artigo_base || item.dispositivo);
       const displayDevice = formatSequentialDeviceLabel(item.dispositivo, item.artigo_base);
       const isParagraph =
         item.tipo_dispositivo === 'Parágrafo' ||
@@ -406,35 +486,46 @@ export const LawsPage: React.FC = () => {
       lastArtigoBase = currentBase;
     });
     return text;
-  }, [filteredItems]);
+  }, [filteredItems, sequentialIndex.itemMetaById]);
 
   const groupedContinuousArticles = useMemo(() => {
-    const groups: Array<{
-      uid: string;
-      key: string;
-      isFirstAnchor: boolean;
-      items: typeof filteredItems;
-    }> = [];
-    const seenKeys = new Set<string>();
+    const groupsMap = new Map<
+      string,
+      {
+        uid: string;
+        canonicalKey: string;
+        key: string;
+        seqIndex: number;
+        isFirstAnchor: boolean;
+        items: typeof filteredItems;
+      }
+    >();
+
     for (let idx = 0; idx < filteredItems.length; idx++) {
       const item = filteredItems[idx];
-      const key = (item.artigo_base || item.dispositivo || 'Outros').trim();
-      const last = groups[groups.length - 1];
-      if (last && last.key === key) {
-        last.items.push(item);
+      const meta = sequentialIndex.itemMetaById.get(item.id);
+      const identity = meta || resolveCanonicalArticleIdentity(item);
+      const canonicalKey = identity.canonicalKey;
+      const key = identity.canonicalLabel;
+      const seqIndex = meta ? meta.articleSeqIndex : 0;
+
+      const existing = groupsMap.get(canonicalKey);
+      if (existing) {
+        existing.items.push(item);
       } else {
-        const isFirstAnchor = !seenKeys.has(key);
-        seenKeys.add(key);
-        groups.push({
-          uid: `${key}::${groups.length}::${item.id || idx}`,
+        groupsMap.set(canonicalKey, {
+          uid: `${canonicalKey}::${item.id || idx}`,
+          canonicalKey,
           key,
-          isFirstAnchor,
+          seqIndex,
+          isFirstAnchor: true,
           items: [item],
         });
       }
     }
-    return groups;
-  }, [filteredItems]);
+
+    return Array.from(groupsMap.values());
+  }, [filteredItems, sequentialIndex.itemMetaById]);
 
   const highlightedSegments = useMemo(
     () => buildHighlightedSegments(continuousText, highlights),
@@ -822,29 +913,34 @@ export const LawsPage: React.FC = () => {
               title="Arquivo(s) originais da norma (na íntegra)"
               className="mb-4"
               action={
-                folderData.items.length === 0 ? (
-                  <button
-                    type="button"
-                    disabled={reprocessingLaw}
-                    onClick={async () => {
-                      if (!activeFolder) return;
-                      setReprocessingLaw(true);
-                      try {
-                        await reprocessLawFolder(activeFolder);
-                      } catch (err) {
-                        toast((err as Error).message, true);
-                      } finally {
-                        setReprocessingLaw(false);
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-55 whitespace-nowrap"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${reprocessingLaw ? 'animate-spin' : ''}`} />
-                    {reprocessingLaw
-                      ? 'Extraindo dispositivos…'
-                      : `Extrair dispositivos do arquivo (${folderData.pdfs.length})`}
-                  </button>
-                ) : undefined
+                <button
+                  type="button"
+                  disabled={reprocessingLaw}
+                  onClick={async () => {
+                    if (!activeFolder) return;
+                    setReprocessingLaw(true);
+                    try {
+                      await reprocessLawFolder(activeFolder);
+                    } catch (err) {
+                      toast((err as Error).message, true);
+                    } finally {
+                      setReprocessingLaw(false);
+                    }
+                  }}
+                  title="Reprocessar o(s) arquivo(s) anexado(s) para extrair dispositivos e garantir a ordem Art. 1º, Art. 2º, Art. 3º... mantendo suas anotações e leituras."
+                  className={
+                    folderData.items.length === 0
+                      ? 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-55 whitespace-nowrap'
+                      : 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[11.5px] font-bold hover:border-[var(--accent)] disabled:opacity-55 whitespace-nowrap'
+                  }
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${reprocessingLaw ? 'animate-spin' : ''}`} />
+                  {reprocessingLaw
+                    ? 'Extraindo dispositivos…'
+                    : folderData.items.length === 0
+                      ? `Extrair dispositivos do arquivo (${folderData.pdfs.length})`
+                      : 'Reprocessar e ordenar'}
+                </button>
               }
             >
               <div className="flex flex-wrap gap-2">
@@ -879,6 +975,30 @@ export const LawsPage: React.FC = () => {
                       <Download className="w-3 h-3" />
                       Baixar
                     </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!activeFolder) return;
+                        void requestConfirm({
+                          title: `Excluir "${visibleName(p.name)}"?`,
+                          description:
+                            'O arquivo original será removido desta legislação e enviado à lixeira do Google Drive.',
+                          confirmLabel: 'Excluir arquivo',
+                          danger: true,
+                        }).then(async (ok) => {
+                          if (!ok) return;
+                          await deleteLawPdf(activeFolder, p.id);
+                          if (previewPdf?.blobKey === p.blobKey) {
+                            setPreviewPdf(null);
+                          }
+                        });
+                      }}
+                      aria-label={`Excluir ${visibleName(p.name)}`}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--bad)] hover:border-[var(--bad)]"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Excluir
+                    </button>
                   </div>
                 ))}
               </div>
@@ -904,8 +1024,80 @@ export const LawsPage: React.FC = () => {
             onResumeLastPosition={handleJumpToArticle}
           />
 
+          {sequentialIndex.orderedItems.length > 0 && (
+            <div className="mb-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-3 py-2">
+              <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
+                <div className="flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                  <span className="inline-flex items-center gap-1.5 font-bold text-[var(--text)]">
+                    <ListOrdered className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    Indexação sequencial rigorosa:
+                  </span>
+                  {sequentialIndex.minArticleNumber !== null && sequentialIndex.maxArticleNumber !== null ? (
+                    <span className="font-semibold text-[var(--text)]">
+                      {formatCanonicalArticleLabel(sequentialIndex.minArticleNumber)} →{' '}
+                      {formatCanonicalArticleLabel(sequentialIndex.maxArticleNumber)}
+                    </span>
+                  ) : null}
+                  <span>
+                    {sequentialIndex.totalArticles > 0
+                      ? `${sequentialIndex.totalArticles} artigo(s) · ${sequentialIndex.orderedItems.length} dispositivo(s)`
+                      : `${sequentialIndex.orderedItems.length} dispositivo(s)`}
+                  </span>
+                </div>
+
+                {sequentialIndex.missingArticleNumbers.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowGapDetails((v) => !v)}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--warning)]/50 bg-[var(--warning)]/12 text-[11px] font-bold text-[var(--warning)] hover:border-[var(--warning)]"
+                    >
+                      <AlertTriangle className="w-3 h-3" />
+                      {sequentialIndex.missingArticleNumbers.length} lacuna(s) na sequência
+                    </button>
+                    {folderData?.pdfs?.length ? (
+                      <button
+                        type="button"
+                        disabled={reprocessingLaw}
+                        onClick={async () => {
+                          if (!activeFolder) return;
+                          setReprocessingLaw(true);
+                          try {
+                            await reprocessLawFolder(activeFolder);
+                          } catch (err) {
+                            toast((err as Error).message, true);
+                          } finally {
+                            setReprocessingLaw(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[11px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white disabled:opacity-55"
+                      >
+                        <RefreshCw className={`w-3 h-3 ${reprocessingLaw ? 'animate-spin' : ''}`} />
+                        {reprocessingLaw ? 'Reprocessando…' : 'Reprocessar PDF'}
+                      </button>
+                    ) : null}
+                  </div>
+                )}
+              </div>
+
+              {showGapDetails && sequentialIndex.missingArticleNumbers.length > 0 && (
+                <div className="mt-2 pt-2 border-t border-[var(--line)]/60 text-[11px] text-[var(--muted)]">
+                  <strong className="text-[var(--text)]">Numeração ausente no intervalo extraído:</strong>{' '}
+                  {sequentialIndex.missingArticleNumbers
+                    .slice(0, 40)
+                    .map((n) => formatCanonicalArticleLabel(n))
+                    .join(', ')}
+                  {sequentialIndex.missingArticleNumbers.length > 40
+                    ? ` e mais ${sequentialIndex.missingArticleNumbers.length - 40} artigo(s)`
+                    : ''}
+                  . (Pode indicar artigos revogados/vetados não presentes no arquivo ou salto de leitura no PDF.)
+                </div>
+              )}
+            </div>
+          )}
+
           <ArticleJumpBar
-            items={folderData?.items || []}
+            items={sequentialIndex.orderedItems}
             readSet={readSet}
             lastReadPosition={db.lawLastReadPosition?.[activeFolder]}
             activeArticleKey={
@@ -1174,7 +1366,7 @@ export const LawsPage: React.FC = () => {
                             key={group.uid}
                             id={
                               group.isFirstAnchor
-                                ? buildArticleAnchorId('law-cont-art', group.key)
+                                ? buildArticleAnchorId('law-cont-art', group.canonicalKey)
                                 : undefined
                             }
                             onClick={() => setLawLastPosition(activeFolder, group.key)}
@@ -1189,6 +1381,14 @@ export const LawsPage: React.FC = () => {
                               contentEditable={false}
                             >
                               <div className="flex flex-wrap items-center gap-2">
+                                {group.seqIndex > 0 && (
+                                  <span
+                                    title={`Posição sequencial no documento: #${group.seqIndex}`}
+                                    className="px-1.5 py-0.5 rounded bg-[var(--panel-soft)] border border-[var(--line)] text-[10px] font-mono-num font-bold text-[var(--muted)]"
+                                  >
+                                    #{group.seqIndex}
+                                  </span>
+                                )}
                                 <span className="text-[12.5px] font-extrabold text-[var(--accent)]">
                                   {group.key}
                                 </span>
@@ -1512,12 +1712,16 @@ export const LawsPage: React.FC = () => {
                     const isMatched = matchedIds.has(item.id);
                     const itemEditalLinks = itemToLinksMap.get(item.id) || [];
                     const isLinkingThis = linkingItemId === item.id;
-                    const articleTarget = (item.artigo_base || item.dispositivo || '').trim();
+                    const itemMeta = sequentialIndex.itemMetaById.get(item.id);
+                    const canonicalKey =
+                      itemMeta?.canonicalKey || resolveCanonicalArticleIdentity(item).canonicalKey;
+                    const articleTarget =
+                      itemMeta?.canonicalLabel || (item.artigo_base || item.dispositivo || '').trim();
                     const deviceTarget = formatSequentialDeviceLabel(item.dispositivo, item.artigo_base);
                     const latestReadDate = [...(item.leituras || [])].sort((a, b) =>
                       b.data.localeCompare(a.data),
                     )[0]?.data;
-                    const anchorCandidate = buildArticleAnchorId('law-dev-art', articleTarget);
+                    const anchorCandidate = buildArticleAnchorId('law-dev-art', canonicalKey);
                     const assignAnchor = !seenChecklistArticleAnchors.has(anchorCandidate);
                     if (assignAnchor) seenChecklistArticleAnchors.add(anchorCandidate);
 
@@ -1542,6 +1746,14 @@ export const LawsPage: React.FC = () => {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-wrap items-center gap-2 mb-1">
+                              {itemMeta && (
+                                <span
+                                  title={`Dispositivo #${itemMeta.docSeqIndex} do documento`}
+                                  className="px-1.5 py-0.5 rounded bg-[var(--panel)] border border-[var(--line)] text-[10px] font-mono-num font-bold text-[var(--muted)]"
+                                >
+                                  #{itemMeta.docSeqIndex}
+                                </span>
+                              )}
                               <strong className="text-[13px] font-bold text-[var(--text)]">
                                 {deviceTarget}
                               </strong>
