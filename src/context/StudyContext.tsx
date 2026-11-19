@@ -169,7 +169,9 @@ import {
   API_URL as GAS_DEFAULT_API_URL,
   GasSession,
   clearGasSession,
+  gasCheckHealth,
   gasInspectRemoteVersion,
+  gasListAuditLogs,
   gasListConflicts,
   gasLogin,
   gasLogout,
@@ -179,12 +181,32 @@ import {
   gasResolveConflict,
   gasSetStudyFolder,
   gasSetupDailyBackupTrigger,
+  gasVerifyChecksumBeforeWrite,
   getConfiguredGasApiUrl,
   getGasSession,
   isGasSessionActive,
   setConfiguredGasApiUrl,
+  subscribeGasActiveSyncEvents,
   subscribeGasSession,
+  updateGasSessionMetadata,
 } from '../lib/appsScriptBackend';
+import {
+  GAS_QUEUE_NOTIFY_AFTER_ATTEMPTS,
+  GasAuditLogEntry,
+  GasQueuedOperation,
+  clearFailedGasQueueItems as clearFailedGasQueueItemsStore,
+  configureGasOperationQueueCallbacks,
+  getLocalGasAuditLogs,
+  isGasQueueConnectionOnline,
+  isGasQueueProcessing,
+  loadGasOperationQueue,
+  notifyGasConnectionRestored,
+  processGasOperationQueue,
+  removeGasQueueItem as removeGasQueueItemStore,
+  setGasQueueConnectionOnline,
+  subscribeGasOperationQueue,
+  subscribeLocalGasAuditLogs,
+} from '../lib/gasOperationQueue';
 import {
   SyncConflictHistoryEntry,
   VersionComparisonReport,
@@ -600,6 +622,51 @@ export interface LawDeepLink {
   nonce: number;
 }
 
+export type GasConnectionStatus =
+  | 'online'
+  | 'offline'
+  | 'checking'
+  | 'session-expired'
+  | 'disconnected';
+
+export interface GasConnectionHealth {
+  status: GasConnectionStatus;
+  lastCheckedAt: string | null;
+  lastOnlineAt: string | null;
+  latencyMs: number | null;
+  consecutiveFailures: number;
+  errorMessage: string | null;
+  serverVersion: number | null;
+  scriptVersion: string | null;
+  folderName: string | null;
+  isReconnecting: boolean;
+}
+
+export type ActiveSyncGuardStatus =
+  | 'idle'
+  | 'checking'
+  | 'in-sync'
+  | 'local-ahead'
+  | 'blocked-conflict'
+  | 'offline-queued'
+  | 'error';
+
+export interface ActiveSyncState {
+  status: ActiveSyncGuardStatus;
+  localChecksum: string;
+  baseChecksum: string | null;
+  remoteChecksum: string | null;
+  localBaseVersion: number;
+  remoteVersion: number | null;
+  remoteDevice: string | null;
+  remoteUpdatedAt: string | null;
+  lastCheckedAt: string | null;
+  lastGuardOutcome: 'allowed' | 'blocked' | 'queued' | null;
+  blockedReason: string | null;
+  writesProtectedCount: number;
+  controlSheetTable: string;
+}
+
 interface StudyContextValue {
   db: StudyDatabase;
   activePage: ModuleName;
@@ -999,6 +1066,13 @@ interface StudyContextValue {
   gasSession: GasSession | null;
   gasConnected: boolean;
   gasApiUrl: string;
+  gasConnectionHealth: GasConnectionHealth;
+  checkGasConnectionNow: (options?: { silent?: boolean }) => Promise<GasConnectionHealth>;
+  forceReconnectAppsScript: (credentials?: {
+    username?: string;
+    password?: string;
+    customApiUrl?: string;
+  }) => Promise<{ ok: boolean; needsLogin?: boolean; message: string }>;
   setGasApiUrl: (url: string) => void;
   connectAppsScript: (
     username: string,
@@ -1015,6 +1089,30 @@ interface StudyContextValue {
   }>;
   setAppsScriptStudyFolder: (folderIdOrUrl: string) => Promise<boolean>;
   setupAppsScriptDailyBackup: () => Promise<boolean>;
+  // Fila de Operações (Queue LocalStorage + Backoff Exponencial) & Auditoria de Sincronização
+  gasOperationQueue: GasQueuedOperation[];
+  gasQueueProcessing: boolean;
+  localGasAuditLogs: GasAuditLogEntry[];
+  processGasQueueNow: (options?: { forceAll?: boolean; onlyItemId?: string }) => Promise<{
+    processed: number;
+    succeeded: number;
+    failed: number;
+    remaining: number;
+  }>;
+  removeGasQueueItem: (id: string) => void;
+  clearFailedGasQueueItems: () => number;
+  fetchGasAuditLogs: (limit?: number) => Promise<{
+    ok: boolean;
+    logs: GasAuditLogEntry[];
+    source: 'drive-json' | 'sheet' | 'unavailable';
+    updatedAt?: string | null;
+    unsupportedByScript?: boolean;
+    error?: string;
+  }>;
+  // Módulo de Sincronização Ativa (Comparação de Checksum e Versão contra Planilha de Controle antes de cada gravação)
+  activeSyncState: ActiveSyncState;
+  verifyActiveSyncChecksumNow: (options?: { silent?: boolean }) => Promise<ActiveSyncState>;
+  triggerActiveSyncPushNow: () => Promise<boolean>;
   // Histórico de Conflitos & Resolução Manual (Local × Drive)
   conflictHistory: SyncConflictHistoryEntry[];
   latestVersionComparison: VersionComparisonReport | null;
@@ -2524,13 +2622,26 @@ async function restoreFilesAndOrphansFromDriveList(
         const isEssay =
           forced === 'auto' && (df.subfolderName === 'Discursivas' || /^DISCURSIVA\s*-\s*/i.test(df.name));
 
-        // When lazyBinaryBlobs is active, binary PDFs/images are cataloged by metadata without downloading the file blob on login
-        const needsBlobForParsing = isTxtOrMd || isLaw;
+        // When lazyBinaryBlobs is active, binary PDFs/images are cataloged by metadata without downloading the file blob upfront.
+        // Text/markdown files and small Law PDFs (<= 3.5 MB) are downloaded immediately for parsing; larger Law PDFs are still cataloged for on-demand opening.
+        const rawSizeBytes = Number(df.size || 0);
+        const needsBlobForParsing =
+          isTxtOrMd || (isLaw && (!options?.lazyBinaryBlobs || (rawSizeBytes > 0 && rawSizeBytes <= 3_500_000)));
         let blob: Blob | null = null;
         if (!options?.lazyBinaryBlobs || needsBlobForParsing) {
           emitProgress(`Importando ${cleanName}`);
-          blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
-          if (!blob) continue;
+          try {
+            blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
+          } catch (dlErr: any) {
+            if (String(dlErr?.message || '').includes('TOKEN_EXPIRED')) throw dlErr;
+            // In lazy mode, if a binary Law PDF fails/times out during parsing download, still catalog it by metadata so it is never lost
+            if (!options?.lazyBinaryBlobs || isTxtOrMd) {
+              throw dlErr;
+            }
+            console.warn(`Download de texto da lei "${cleanName}" falhou; catalogando para abertura sob demanda:`, dlErr);
+            blob = null;
+          }
+          if (!blob && (!options?.lazyBinaryBlobs || isTxtOrMd)) continue;
         }
         const blobKey = `drive_${df.id}`;
         if (blob) {
@@ -3449,6 +3560,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     () => loadSyncMeta(initialScope).lastCacheVerifiedAt || null,
   );
   const [isSyncingDrive, setIsSyncingDrive] = useState<boolean>(false);
+  const isSyncingDriveRef = useRef<boolean>(false);
+  useEffect(() => {
+    isSyncingDriveRef.current = isSyncingDrive;
+  }, [isSyncingDrive]);
   const [hasPendingCloudChanges, setHasPendingCloudChanges] = useState<boolean>(
     () => initialScope !== 'offline_guest' && hasPersistedPendingSync(loadSyncMeta(initialScope)),
   );
@@ -3461,6 +3576,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [authError, setAuthError] = useState<string | null>(null);
   const [syncActivityLogs, setSyncActivityLogs] = useState<SyncActivityLogEntry[]>(() =>
     loadSyncActivityLogs(initialScope),
+  );
+  const [gasOperationQueue, setGasOperationQueue] = useState<GasQueuedOperation[]>(() =>
+    loadGasOperationQueue(),
+  );
+  const [gasQueueProcessing, setGasQueueProcessing] = useState<boolean>(() => isGasQueueProcessing());
+  const [localGasAuditLogs, setLocalGasAuditLogs] = useState<GasAuditLogEntry[]>(() =>
+    getLocalGasAuditLogs(),
   );
   const [driveSyncConflicts, setDriveSyncConflicts] = useState<DeletedDriveConflict[]>([]);
   const [driveConflictErrors, setDriveConflictErrors] = useState<
@@ -3491,10 +3613,147 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [resolvingConflictAction, setResolvingConflictAction] = useState<string | null>(null);
   const gasHydratedTokenRef = useRef<string | null>(null);
   const gasConnected = Boolean(gasSession?.token);
+  const [gasConnectionHealth, setGasConnectionHealth] = useState<GasConnectionHealth>(() => ({
+    status:
+      typeof navigator !== 'undefined' && navigator.onLine === false
+        ? 'offline'
+        : initialGasSession?.token
+          ? 'checking'
+          : 'disconnected',
+    lastCheckedAt: null,
+    lastOnlineAt: initialGasSession?.lastSyncedAt || null,
+    latencyMs: null,
+    consecutiveFailures: 0,
+    errorMessage: null,
+    serverVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : null,
+    scriptVersion: null,
+    folderName: initialGasSession?.folderName || null,
+    isReconnecting: false,
+  }));
+  const gasHealthCheckInFlightRef = useRef<boolean>(false);
+  const lastGasHealthCheckMsRef = useRef<number>(0);
+  const gasConnectionHealthRef = useRef<GasConnectionHealth>(gasConnectionHealth);
+  gasConnectionHealthRef.current = gasConnectionHealth;
+
+  const [activeSyncMeta, setActiveSyncMeta] = useState<Omit<ActiveSyncState, 'localChecksum'>>(() => ({
+    status: initialGasSession?.token ? 'idle' : 'idle',
+    baseChecksum: initialGasSession?.lastContentHash || null,
+    remoteChecksum: initialGasSession?.lastContentHash || null,
+    localBaseVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : 0,
+    remoteVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : null,
+    remoteDevice: null,
+    remoteUpdatedAt: initialGasSession?.lastSyncedAt || null,
+    lastCheckedAt: null,
+    lastGuardOutcome: null,
+    blockedReason: null,
+    writesProtectedCount: 0,
+    controlSheetTable: 'tb_estado',
+  }));
+
+  const currentLocalChecksum = useMemo(() => computeDatabaseContentHash(db), [db]);
+
+  const activeSyncState = useMemo<ActiveSyncState>(() => {
+    const baseChecksum = activeSyncMeta.baseChecksum || gasSession?.lastContentHash || lastCloudHashRef.current || null;
+    const localBaseVersion = typeof gasSession?.serverVersion === 'number' ? gasSession.serverVersion : activeSyncMeta.localBaseVersion;
+    let derivedStatus: ActiveSyncGuardStatus = activeSyncMeta.status;
+
+    if (
+      gasConnectionHealth.status === 'offline' ||
+      (gasOperationQueue.length > 0 && gasOperationQueue.some((it) => it.status === 'waiting-connection'))
+    ) {
+      if (derivedStatus !== 'blocked-conflict' && derivedStatus !== 'checking') {
+        derivedStatus = 'offline-queued';
+      }
+    } else if (derivedStatus === 'in-sync' && activeSyncMeta.remoteChecksum && currentLocalChecksum !== activeSyncMeta.remoteChecksum) {
+      derivedStatus = 'local-ahead';
+    } else if (derivedStatus === 'idle' && gasSession?.token) {
+      if (activeSyncMeta.remoteChecksum && currentLocalChecksum === activeSyncMeta.remoteChecksum) {
+        derivedStatus = 'in-sync';
+      } else if (baseChecksum && currentLocalChecksum !== baseChecksum) {
+        derivedStatus = 'local-ahead';
+      }
+    }
+
+    return {
+      ...activeSyncMeta,
+      status: derivedStatus,
+      localChecksum: currentLocalChecksum,
+      baseChecksum,
+      localBaseVersion,
+    };
+  }, [activeSyncMeta, currentLocalChecksum, gasConnectionHealth.status, gasOperationQueue, gasSession?.lastContentHash, gasSession?.serverVersion, gasSession?.token]);
 
   useEffect(() => {
     return subscribeGasSession((next) => {
       setGasSession(next);
+      if (next) {
+        setActiveSyncMeta((prev) => ({
+          ...prev,
+          baseChecksum: next.lastContentHash || prev.baseChecksum,
+          localBaseVersion: typeof next.serverVersion === 'number' ? next.serverVersion : prev.localBaseVersion,
+        }));
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    return subscribeGasActiveSyncEvents((ev) => {
+      setActiveSyncMeta((prev) => {
+        if (ev.type === 'write-blocked') {
+          return {
+            ...prev,
+            status: 'blocked-conflict',
+            baseChecksum: ev.expectedBaseChecksum ?? prev.baseChecksum,
+            remoteChecksum: ev.remoteChecksum ?? prev.remoteChecksum,
+            localBaseVersion: typeof ev.localBaseVersion === 'number' ? ev.localBaseVersion : prev.localBaseVersion,
+            remoteVersion: typeof ev.remoteVersion === 'number' ? ev.remoteVersion : prev.remoteVersion,
+            remoteDevice: ev.remoteDevice ?? prev.remoteDevice,
+            remoteUpdatedAt: ev.remoteUpdatedAt ?? prev.remoteUpdatedAt,
+            lastCheckedAt: ev.checkedAt,
+            lastGuardOutcome: 'blocked',
+            blockedReason: ev.reason || 'Versão/checksum mais recente detectado na planilha de controle.',
+            writesProtectedCount: prev.writesProtectedCount + 1,
+            controlSheetTable: ev.controlSheetTable || prev.controlSheetTable,
+          };
+        }
+        if (ev.type === 'write-committed') {
+          return {
+            ...prev,
+            status: 'in-sync',
+            baseChecksum: ev.remoteChecksum ?? prev.baseChecksum,
+            remoteChecksum: ev.remoteChecksum ?? prev.remoteChecksum,
+            localBaseVersion: typeof ev.remoteVersion === 'number' ? ev.remoteVersion : prev.localBaseVersion,
+            remoteVersion: typeof ev.remoteVersion === 'number' ? ev.remoteVersion : prev.remoteVersion,
+            remoteDevice: ev.remoteDevice ?? prev.remoteDevice,
+            remoteUpdatedAt: ev.remoteUpdatedAt ?? ev.checkedAt,
+            lastCheckedAt: ev.checkedAt,
+            lastGuardOutcome: 'allowed',
+            blockedReason: null,
+            controlSheetTable: ev.controlSheetTable || prev.controlSheetTable,
+          };
+        }
+        return {
+          ...prev,
+          status:
+            ev.status === 'conflict'
+              ? 'blocked-conflict'
+              : ev.status === 'in-sync'
+                ? 'in-sync'
+                : ev.status === 'local-ahead' || ev.status === 'remote-empty'
+                  ? 'local-ahead'
+                  : prev.status,
+          baseChecksum: ev.expectedBaseChecksum ?? prev.baseChecksum,
+          remoteChecksum: ev.remoteChecksum ?? prev.remoteChecksum,
+          localBaseVersion: typeof ev.localBaseVersion === 'number' ? ev.localBaseVersion : prev.localBaseVersion,
+          remoteVersion: typeof ev.remoteVersion === 'number' ? ev.remoteVersion : prev.remoteVersion,
+          remoteDevice: ev.remoteDevice ?? prev.remoteDevice,
+          remoteUpdatedAt: ev.remoteUpdatedAt ?? prev.remoteUpdatedAt,
+          lastCheckedAt: ev.checkedAt,
+          lastGuardOutcome: ev.status === 'conflict' ? 'blocked' : 'allowed',
+          blockedReason: ev.status === 'conflict' ? ev.reason || null : null,
+          controlSheetTable: ev.controlSheetTable || prev.controlSheetTable,
+        };
+      });
     });
   }, []);
 
@@ -4292,18 +4551,30 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const flushedPreDeletedCount = 0;
           const flushedPreDeletedNames: string[] = [];
 
-          // Fetch Drive file/backup metadata and IndexedDB snapshots in parallel
-          const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta] = await Promise.all([
-            skipSubfolderEnsure || !folderWritable
+          // Fetch Drive file/backup metadata and IndexedDB snapshots
+          const isGasAutoSync = isGasSessionActive();
+          const [, fetchedBackupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta] = await Promise.all([
+            skipSubfolderEnsure || !folderWritable || isGasAutoSync
               ? Promise.resolve({})
               : syncStudySubFoldersInDrive(folder.id, token).catch(() => ({})),
-            listDatabaseBackupsFromDrive(token, { activeFolderId: folder.id }),
+            isGasAutoSync
+              ? Promise.resolve([] as DriveFileInfo[])
+              : listDatabaseBackupsFromDrive(token, { activeFolderId: folder.id }),
             listAllStudyFilesInDrive(token),
             loadScopedDatabaseJson(scope),
             loadScopedSyncMeta<ScopeSyncMeta>(scope),
             loadScopedDatabaseJson('offline_guest'),
             loadScopedSyncMeta<ScopeSyncMeta>('offline_guest'),
           ]);
+          const backupsList = isGasAutoSync
+            ? driveFiles.filter(
+                (df) =>
+                  df.subfolderName === 'Backups' ||
+                  df.name.startsWith('backup_central_estudos') ||
+                  df.name.startsWith('backup_incremental_central_estudos') ||
+                  df.name === CLOUD_SYNC_FILENAME,
+              )
+            : fetchedBackupsList;
 
           let currentDb = applyTombstonesToMergedDatabase(dbRef.current, scope);
           let hasLocalAny = hadLocalDbBeforeLoad || Boolean(idbSnap?.byteLength);
@@ -5280,6 +5551,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           Date.now() - lastDeletionMsRef.current < 120_000 ||
           syncedScopeOnceRef.current === scope;
 
+      const expectedBaseHash =
+        lastCloudHashRef.current || getGasSession()?.lastContentHash || null;
+      const baseServerVersion = getGasSession()?.serverVersion;
+
       const savedSync =
         lastCloudHashRef.current !== mergedHash || flushedDeleteIds.length > 0
           ? await saveCloudSyncSnapshot(
@@ -5292,7 +5567,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 data: mergedCloudDb,
               },
               token,
-              forceSnapshot ? { force: true } : undefined,
+              {
+                ...(forceSnapshot ? { force: true } : {}),
+                expectedContentHash: expectedBaseHash,
+                baseVersion: baseServerVersion,
+              },
             )
           : null;
 
@@ -5478,6 +5757,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             );
           }
         }
+      } else if (err?.queued) {
+        // Operação armazenada na fila local (LocalStorage) com backoff exponencial:
+        // permanece silenciosa nas 3 primeiras tentativas; notificação ocorre somente se persistir > 3 tentativas.
+        pendingCloudSyncRef.current = true;
+        setHasPendingCloudChanges(true);
+        saveSyncMeta(scope, { hasPendingCloudSync: true });
       } else {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
@@ -6123,6 +6408,546 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [],
   );
 
+  const checkGasConnectionNow = useCallback(
+    async (options?: { silent?: boolean }): Promise<GasConnectionHealth> => {
+      if (gasHealthCheckInFlightRef.current) {
+        return gasConnectionHealthRef.current;
+      }
+      if (
+        options?.silent &&
+        (isSyncingDriveRef.current || isRestoringRef.current || Boolean(activeCloudSyncPromiseRef.current))
+      ) {
+        return gasConnectionHealthRef.current;
+      }
+      gasHealthCheckInFlightRef.current = true;
+      lastGasHealthCheckMsRef.current = Date.now();
+
+      setGasConnectionHealth((prev) => ({
+        ...prev,
+        status: prev.status === 'online' ? 'online' : 'checking',
+      }));
+
+      try {
+        const res = await gasCheckHealth();
+        let nextState: GasConnectionHealth = gasConnectionHealthRef.current;
+
+        setGasConnectionHealth((prev) => {
+          const isOnline = res.status === 'online';
+          const failures = isOnline
+            ? 0
+            : res.status === 'disconnected'
+              ? 0
+              : prev.consecutiveFailures + 1;
+          nextState = {
+            status: res.status,
+            lastCheckedAt: res.checkedAt,
+            lastOnlineAt: isOnline ? res.checkedAt : prev.lastOnlineAt,
+            latencyMs: res.latencyMs,
+            consecutiveFailures: failures,
+            errorMessage: res.error || null,
+            serverVersion: res.serverVersion ?? prev.serverVersion,
+            scriptVersion: res.scriptVersion ?? prev.scriptVersion,
+            folderName: res.folderName ?? prev.folderName,
+            isReconnecting: prev.isReconnecting,
+          };
+          return nextState;
+        });
+
+        if (res.status === 'online') {
+          setDriveConnected(true);
+          setDriveTokenReady(true);
+          // Ao restabelecer a conexão, libera e drena automaticamente a fila persistente no LocalStorage
+          if (!isGasQueueConnectionOnline() || loadGasOperationQueue().length > 0) {
+            notifyGasConnectionRestored();
+          } else {
+            setGasQueueConnectionOnline(true);
+          }
+          if (pendingCloudSyncRef.current) {
+            void flushCloudSyncNow();
+          }
+          if (!options?.silent) {
+            toast(`Google Apps Script Online (${res.latencyMs ?? 0} ms)!`);
+          }
+        } else if (res.status === 'session-expired') {
+          setDriveConnected(false);
+          setDriveTokenReady(false);
+          setGasQueueConnectionOnline(false);
+          if (!options?.silent) {
+            toast(res.error || 'Sessão expirada. Reconecte sem atualizar a página.', true);
+          }
+        } else if (res.status === 'offline') {
+          setGasQueueConnectionOnline(false);
+          if (!options?.silent) {
+            toast(res.error || 'Google Apps Script indisponível (Offline).', true);
+          }
+        } else if (res.status === 'disconnected' && !options?.silent) {
+          toast('Servidor online, mas nenhuma conta está conectada.', true);
+        }
+
+        return nextState;
+      } finally {
+        gasHealthCheckInFlightRef.current = false;
+      }
+    },
+    [flushCloudSyncNow, toast],
+  );
+
+  const forceReconnectAppsScript = useCallback(
+    async (credentials?: {
+      username?: string;
+      password?: string;
+      customApiUrl?: string;
+    }): Promise<{ ok: boolean; needsLogin?: boolean; message: string }> => {
+      setGasConnectionHealth((prev) => ({
+        ...prev,
+        isReconnecting: true,
+        status: 'checking',
+        errorMessage: null,
+      }));
+
+      try {
+        // Caso o usuário tenha informado credenciais inline (ex: após sessão expirada ou modo offline)
+        if (credentials?.username && credentials?.password) {
+          const loginRes = await connectAppsScript(
+            credentials.username,
+            credentials.password,
+            credentials.customApiUrl,
+          );
+          if (!loginRes.ok) {
+            const errMsg = loginRes.error || 'Credenciais inválidas ao reconectar.';
+            setGasConnectionHealth((prev) => ({
+              ...prev,
+              isReconnecting: false,
+              status: getGasSession()?.token ? 'offline' : 'session-expired',
+              errorMessage: errMsg,
+              lastCheckedAt: new Date().toISOString(),
+            }));
+            return { ok: false, needsLogin: true, message: errMsg };
+          }
+          const health = await checkGasConnectionNow({ silent: true });
+          setGasConnectionHealth((prev) => ({
+            ...prev,
+            ...health,
+            status: 'online',
+            isReconnecting: false,
+            errorMessage: null,
+          }));
+          return { ok: true, message: 'Reconectado ao Google Apps Script com sucesso!' };
+        }
+
+        const activeSession = getGasSession();
+        if (!activeSession?.token) {
+          const pingRes = await gasCheckHealth();
+          const msg =
+            pingRes.status === 'offline'
+              ? pingRes.error || 'Sem resposta do Google Apps Script.'
+              : 'Informe Usuário e Senha para reconectar sua sessão sem atualizar a página.';
+          setGasConnectionHealth((prev) => ({
+            ...prev,
+            isReconnecting: false,
+            status: pingRes.status === 'offline' ? 'offline' : 'session-expired',
+            latencyMs: pingRes.latencyMs,
+            lastCheckedAt: pingRes.checkedAt,
+            errorMessage: msg,
+          }));
+          return { ok: false, needsLogin: pingRes.status !== 'offline', message: msg };
+        }
+
+        // Reconexão forçada em tempo real (sem recarregar a página)
+        const health = await gasCheckHealth();
+        if (health.status === 'session-expired') {
+          setDriveConnected(false);
+          setDriveTokenReady(false);
+          setGasConnectionHealth((prev) => ({
+            ...prev,
+            isReconnecting: false,
+            status: 'session-expired',
+            latencyMs: health.latencyMs,
+            lastCheckedAt: health.checkedAt,
+            errorMessage: health.error || 'Sessão expirada no servidor. Faça login rápido para reconectar.',
+          }));
+          toast('Sua sessão expirou no servidor. Informe sua senha no painel de conexão para reconectar.', true);
+          return {
+            ok: false,
+            needsLogin: true,
+            message: health.error || 'Sessão expirada no servidor.',
+          };
+        }
+
+        if (health.status !== 'online') {
+          const errMsg = health.error || 'Não foi possível alcançar o Google Apps Script.';
+          setGasConnectionHealth((prev) => ({
+            ...prev,
+            isReconnecting: false,
+            status: 'offline',
+            latencyMs: health.latencyMs,
+            lastCheckedAt: health.checkedAt,
+            consecutiveFailures: prev.consecutiveFailures + 1,
+            errorMessage: errMsg,
+          }));
+          toast(`Falha ao reconectar: ${errMsg}`, true);
+          return { ok: false, message: errMsg };
+        }
+
+        // Re-hidrata estado remoto e dispara envio de alterações/exclusões pendentes sem atualizar a página
+        gasHydratedTokenRef.current = activeSession.token;
+        await hydrateGasScopeAndRemoteState(activeSession);
+        setDriveConnected(true);
+        setDriveTokenReady(true);
+        setGasQueueConnectionOnline(true);
+
+        const scope = activeScopeRef.current;
+        if (scope && scope !== 'offline_guest') {
+          if (loadGasOperationQueue().length > 0) {
+            await processGasOperationQueue({ forceAll: true });
+          }
+          if (pendingCloudSyncRef.current) {
+            await flushCloudSyncNow();
+          }
+          const pendingDeletes = getPendingDriveDeletes(scope);
+          if (pendingDeletes.length > 0) {
+            await flushPendingDriveDeletes(scope).catch(() => {});
+          }
+        }
+
+        const nowIso = new Date().toISOString();
+        setGasConnectionHealth((prev) => ({
+          ...prev,
+          status: 'online',
+          isReconnecting: false,
+          lastCheckedAt: nowIso,
+          lastOnlineAt: nowIso,
+          latencyMs: health.latencyMs,
+          consecutiveFailures: 0,
+          errorMessage: null,
+          serverVersion: health.serverVersion ?? prev.serverVersion,
+          scriptVersion: health.scriptVersion ?? prev.scriptVersion,
+          folderName: health.folderName ?? prev.folderName,
+        }));
+
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: 'Reconexão forçada com Google Apps Script',
+          status: 'success',
+          message: `Conexão revalidada com sucesso (${health.latencyMs ?? 0} ms · v${health.serverVersion ?? activeSession.serverVersion}).`,
+        });
+        toast(`Reconexão concluída! Google Apps Script Online (${health.latencyMs ?? 0} ms).`);
+        return { ok: true, message: 'Reconexão forçada concluída com sucesso!' };
+      } catch (err: any) {
+        const errMsg = err?.message || 'Erro ao forçar reconexão com o Google Apps Script.';
+        setGasConnectionHealth((prev) => ({
+          ...prev,
+          isReconnecting: false,
+          status: 'offline',
+          lastCheckedAt: new Date().toISOString(),
+          consecutiveFailures: prev.consecutiveFailures + 1,
+          errorMessage: errMsg,
+        }));
+        toast(errMsg, true);
+        return { ok: false, message: errMsg };
+      }
+    },
+    [
+      checkGasConnectionNow,
+      connectAppsScript,
+      flushCloudSyncNow,
+      hydrateGasScopeAndRemoteState,
+      recordSyncActivity,
+      toast,
+    ],
+  );
+
+  useEffect(() => {
+    const unsubQueue = subscribeGasOperationQueue((items, processing) => {
+      setGasOperationQueue(items);
+      setGasQueueProcessing(processing);
+    });
+    const unsubAudit = subscribeLocalGasAuditLogs((logs) => {
+      setLocalGasAuditLogs(logs);
+    });
+
+    configureGasOperationQueueCallbacks({
+      getLatestSyncPayload: () => {
+        const currentDb = dbRef.current;
+        const hash = computeDatabaseContentHash(currentDb);
+        const nowIso = new Date().toISOString();
+        const activeSession = getGasSession();
+        return {
+          version: 2,
+          app: 'Central de Estudos',
+          updatedAt: nowIso,
+          contentHash: hash,
+          userEmail: googleUser?.email || activeSession?.username || undefined,
+          data: currentDb,
+        };
+      },
+      onPersistentFailure: (item) => {
+        toast(
+          `Falha persistente na fila (${item.attempts} tentativas > ${GAS_QUEUE_NOTIFY_AFTER_ATTEMPTS}): "${item.label}". Mantido localmente; verifique Backup → Auditoria de Sincronização.`,
+          true,
+        );
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: `Fila Apps Script — falha persistente (${item.attempts} tentativas)`,
+          status: 'error',
+          errorCode: 'GAS_QUEUE_PERSISTENT_FAILURE',
+          message: `${item.label}: ${item.lastError}`,
+        });
+      },
+      onOperationSucceeded: (item, result) => {
+        if (item.type === 'pushState') {
+          const scope = activeScopeRef.current;
+          const nowIso = result?.updatedAt || new Date().toISOString();
+          const curHash = computeDatabaseContentHash(dbRef.current);
+          lastCloudDbRef.current = dbRef.current;
+          lastCloudHashRef.current = curHash;
+          pendingCloudSyncRef.current = false;
+          setHasPendingCloudChanges(false);
+          setLastCloudSyncAt(nowIso);
+          if (scope && scope !== 'offline_guest') {
+            saveSyncMeta(scope, {
+              lastCloudSyncAt: nowIso,
+              lastCloudContentHash: curHash,
+              hasPendingCloudSync: false,
+            });
+          }
+          recordSyncActivity({
+            category: 'drive-sync',
+            operation: 'Fila Apps Script reenviada com sucesso',
+            status: 'success',
+            message: `${item.label} sincronizado após ${item.attempts} tentativa(s).`,
+          });
+        }
+      },
+      onVersionConflict: (item, result) => {
+        const scope = activeScopeRef.current;
+        if (scope) {
+          recordConflictHistoryEntry(scope, {
+            source: 'apps-script',
+            kind: 'version-divergence',
+            title: 'Divergência de versão detectada ao reenviar fila local',
+            reason:
+              result?.error ||
+              `Conflito ao reenviar "${item.label}". Escolha qual versão manter na aba Backup.`,
+            errorCode: 'VERSION_CONFLICT',
+            localSummary: buildDatabaseVersionSummary(dbRef.current, {
+              updatedAt: new Date().toISOString(),
+              version: getGasSession()?.serverVersion,
+            }),
+          });
+        }
+        toast(
+          'Conflito de versão detectado durante o reenvio automático. Acesse Backup → Histórico de Conflitos.',
+          true,
+        );
+      },
+    });
+
+    return () => {
+      unsubQueue();
+      unsubAudit();
+    };
+  }, [googleUser?.email, recordSyncActivity, toast]);
+
+  const processGasQueueNow = useCallback(
+    async (options?: { forceAll?: boolean; onlyItemId?: string }) => {
+      const res = await processGasOperationQueue({
+        forceAll: options?.forceAll ?? true,
+        onlyItemId: options?.onlyItemId,
+      });
+      if (res.succeeded > 0) {
+        toast(`${res.succeeded} operação(ões) da fila sincronizada(s) com o Google Drive!`);
+      } else if (res.remaining > 0 && res.failed > 0) {
+        toast(
+          `Conexão ainda indisponível (${res.remaining} item(ns) na fila). Novas tentativas automáticas estão agendadas.`,
+          true,
+        );
+      }
+      return res;
+    },
+    [toast],
+  );
+
+  const removeGasQueueItem = useCallback((id: string) => {
+    removeGasQueueItemStore(id);
+  }, []);
+
+  const clearFailedGasQueueItems = useCallback(() => {
+    const removed = clearFailedGasQueueItemsStore();
+    if (removed > 0) {
+      toast(`${removed} item(ns) com falha persistente removido(s) da fila.`);
+    }
+    return removed;
+  }, [toast]);
+
+  const fetchGasAuditLogs = useCallback(async (limit = 150) => {
+    return await gasListAuditLogs(limit);
+  }, []);
+
+  const verifyActiveSyncChecksumNow = useCallback(
+    async (options?: { silent?: boolean }): Promise<ActiveSyncState> => {
+      const localChecksum = computeDatabaseContentHash(dbRef.current);
+      const session = getGasSession();
+      const baseChecksum = lastCloudHashRef.current || session?.lastContentHash || null;
+      const localBaseVersion = typeof session?.serverVersion === 'number' ? session.serverVersion : 0;
+
+      if (!session?.token) {
+        const next: ActiveSyncState = {
+          ...activeSyncMeta,
+          status: 'idle',
+          localChecksum,
+          baseChecksum,
+          localBaseVersion,
+          lastCheckedAt: new Date().toISOString(),
+          blockedReason: null,
+        };
+        return next;
+      }
+
+      setActiveSyncMeta((prev) => ({
+        ...prev,
+        status: 'checking',
+      }));
+
+      const res = await gasVerifyChecksumBeforeWrite({
+        localContentHash: localChecksum,
+        expectedBaseHash: baseChecksum,
+        expectedBaseVersion: localBaseVersion,
+        auditOnResult: true,
+      });
+
+      if (!res.ok) {
+        setActiveSyncMeta((prev) => ({
+          ...prev,
+          status: typeof navigator !== 'undefined' && navigator.onLine === false ? 'offline-queued' : 'error',
+          lastCheckedAt: res.checkedAt,
+          blockedReason: res.reason,
+        }));
+        if (!options?.silent) {
+          toast(`Não foi possível verificar a planilha de controle: ${res.reason}`, true);
+        }
+        return {
+          ...activeSyncMeta,
+          status: 'error',
+          localChecksum,
+          baseChecksum,
+          localBaseVersion,
+          lastCheckedAt: res.checkedAt,
+          blockedReason: res.reason,
+        };
+      }
+
+      const nextStatus: ActiveSyncGuardStatus =
+        res.status === 'conflict'
+          ? 'blocked-conflict'
+          : res.status === 'in-sync'
+            ? 'in-sync'
+            : 'local-ahead';
+
+      const updatedMeta: Omit<ActiveSyncState, 'localChecksum'> = {
+        status: nextStatus,
+        baseChecksum: res.expectedBaseChecksum,
+        remoteChecksum: res.remoteChecksum,
+        localBaseVersion: res.localBaseVersion,
+        remoteVersion: res.remoteVersion,
+        remoteDevice: res.remoteDevice,
+        remoteUpdatedAt: res.remoteUpdatedAt,
+        lastCheckedAt: res.checkedAt,
+        lastGuardOutcome: res.allowedToWrite ? 'allowed' : 'blocked',
+        blockedReason: res.allowedToWrite ? null : res.reason,
+        writesProtectedCount: activeSyncMeta.writesProtectedCount + (res.allowedToWrite ? 0 : 1),
+        controlSheetTable: res.controlSheetTable,
+      };
+      setActiveSyncMeta(updatedMeta);
+
+      if (!options?.silent) {
+        if (!res.allowedToWrite) {
+          toast(res.reason, true);
+        } else if (res.status === 'in-sync') {
+          toast(`Sincronização Ativa OK: checksum idêntico à planilha de controle (v${res.remoteVersion ?? 0}).`);
+        } else {
+          toast(`Planilha de controle verificada (v${res.remoteVersion ?? 0}): cliente atualizado e liberado para gravar.`);
+        }
+      }
+
+      return {
+        ...updatedMeta,
+        localChecksum,
+      };
+    },
+    [activeSyncMeta, toast],
+  );
+
+  const triggerActiveSyncPushNow = useCallback(async (): Promise<boolean> => {
+    if (!isGasSessionActive()) {
+      toast('Conecte sua sessão do Google Apps Script para sincronizar.', true);
+      return false;
+    }
+    const check = await verifyActiveSyncChecksumNow({ silent: true });
+    if (check.status === 'blocked-conflict') {
+      toast(
+        check.blockedReason ||
+          'Gravação bloqueada pela Sincronização Ativa: há uma versão mais recente na planilha de controle.',
+        true,
+      );
+      return false;
+    }
+    if (check.status === 'error' || check.status === 'offline-queued') {
+      toast('Sem conexão com o Google Apps Script. Alterações ficam protegidas na fila local até reconectar.', true);
+      return false;
+    }
+    pendingCloudSyncRef.current = true;
+    await flushCloudSyncNow();
+    return true;
+  }, [flushCloudSyncNow, toast, verifyActiveSyncChecksumNow]);
+
+  // Monitor periódico da conexão com o Google Apps Script (a cada 60s + retorno à aba + eventos online/offline)
+  useEffect(() => {
+    const initialTimer = window.setTimeout(() => {
+      void checkGasConnectionNow({ silent: true });
+    }, 1800);
+
+    const intervalId = window.setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void checkGasConnectionNow({ silent: true });
+    }, 60_000);
+
+    const handleOnline = () => {
+      void checkGasConnectionNow({ silent: true });
+    };
+
+    const handleOffline = () => {
+      setGasQueueConnectionOnline(false);
+      setGasConnectionHealth((prev) => ({
+        ...prev,
+        status: 'offline',
+        lastCheckedAt: new Date().toISOString(),
+        errorMessage: 'Sem conexão com a internet neste dispositivo.',
+      }));
+    };
+
+    const handleVisibilityChange = () => {
+      if (
+        document.visibilityState === 'visible' &&
+        Date.now() - lastGasHealthCheckMsRef.current >= 20_000
+      ) {
+        void checkGasConnectionNow({ silent: true });
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.clearTimeout(initialTimer);
+      window.clearInterval(intervalId);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [checkGasConnectionNow, gasSession?.token]);
+
   const setAppsScriptStudyFolder = useCallback(
     async (folderIdOrUrl: string): Promise<boolean> => {
       const cleanInput = String(folderIdOrUrl || '').trim();
@@ -6443,6 +7268,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         pendingCloudSyncRef.current = false;
         setHasPendingCloudChanges(false);
         setLastCloudSyncAt(nowIso);
+        if (isGasSessionActive()) {
+          updateGasSessionMetadata({ lastContentHash: remoteHash, lastSyncedAt: nowIso });
+          setActiveSyncMeta((prev) => ({
+            ...prev,
+            status: 'in-sync',
+            baseChecksum: remoteHash,
+            remoteChecksum: remoteHash,
+            localBaseVersion: getGasSession()?.serverVersion ?? prev.localBaseVersion,
+            remoteVersion: getGasSession()?.serverVersion ?? prev.remoteVersion,
+            remoteUpdatedAt: nowIso,
+            lastCheckedAt: new Date().toISOString(),
+            lastGuardOutcome: 'allowed',
+            blockedReason: null,
+          }));
+        }
 
         updateConflictHistoryStatus(
           scope,
@@ -7070,39 +7910,105 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           }
 
-          const folder = await getOrCreateStudyFolder(tokenToUse);
-          associateAccountDefaultDriveFolder({
-            id: folder.id,
-            name: folder.name || getPreferredStudyFolder().name,
-            url: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
-          });
+          const isGasMode = isGasSessionActive();
+          let folder = await getOrCreateStudyFolder(tokenToUse);
+          if (folder.id && folder.id !== 'gas_root') {
+            associateAccountDefaultDriveFolder({
+              id: folder.id,
+              name: folder.name || getPreferredStudyFolder().name,
+              url: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
+            });
+          }
 
-          const targetFolderId = isExplicitAll ? undefined : explicitFolderId || folder.id;
+          let backupsList: DriveFileInfo[] = [];
+          let driveFiles: DriveFileInfo[] = [];
+          let latestCloud: Awaited<ReturnType<typeof downloadLatestCloudSync>> = null;
+          let gasListWarning: string | null = null;
 
-          const [, backupsList, driveFiles] = await Promise.all([
-            syncStudySubFoldersInDrive(folder.id, tokenToUse).catch(() => ({})),
-            listDatabaseBackupsFromDrive(tokenToUse, { activeFolderId: folder.id }),
-            listAllStudyFilesInDrive(tokenToUse),
-          ]);
+          if (isGasMode) {
+            // In Apps Script mode, run sequentially to avoid concurrent DriveApp contention/timeouts
+            // and skip redundant listBackups (derived from driveFiles instead).
+            setRestoreProgress({
+              current: 1,
+              total: 3,
+              label: 'Carregando banco de dados do Google Apps Script...',
+            });
+            latestCloud = await downloadLatestCloudSync(tokenToUse, {
+              activeFolderId: folder.id,
+              expectedEmail: googleUser?.email || undefined,
+              bypassCache: true,
+            });
 
-          const latestCloud = await downloadLatestCloudSync(
-            tokenToUse,
-            targetFolderId
-              ? {
-                  onlyFolderId: explicitFolderId ? targetFolderId : undefined,
-                  activeFolderId: folder.id,
-                  strictFolder: Boolean(explicitFolderId),
-                  expectedEmail: googleUser?.email || undefined,
-                  prefetchedBackups: backupsList,
-                  bypassCache: true,
-                }
-              : {
-                  activeFolderId: folder.id,
-                  expectedEmail: googleUser?.email || undefined,
-                  prefetchedBackups: backupsList,
-                  bypassCache: true,
-                },
-          );
+            // Re-read folder now that gasPullState may have synced the real root Drive folderId
+            folder = await getOrCreateStudyFolder(tokenToUse);
+
+            setRestoreProgress({
+              current: 2,
+              total: 3,
+              label: 'Listando arquivos e subpastas no Google Drive (pode levar alguns instantes)...',
+            });
+            try {
+              driveFiles = await listAllStudyFilesInDrive(tokenToUse);
+            } catch (listErr: any) {
+              if (latestCloud?.payload) {
+                gasListWarning = String(listErr?.message || 'Não foi possível listar a pasta de arquivos agora.');
+                console.warn('Falha ao listar arquivos do Drive via Apps Script; prosseguindo com o banco restaurado:', listErr);
+                driveFiles = [];
+              } else {
+                throw listErr;
+              }
+            }
+
+            // Re-read folder again in case gasListFiles resolved the real root folderId
+            folder = await getOrCreateStudyFolder(tokenToUse);
+            if (folder.id && folder.id !== 'gas_root') {
+              associateAccountDefaultDriveFolder({
+                id: folder.id,
+                name: folder.name || getPreferredStudyFolder().name,
+                url: folder.webViewLink || `https://drive.google.com/drive/folders/${folder.id}`,
+              });
+            }
+
+            backupsList = driveFiles.filter(
+              (df) =>
+                df.subfolderName === 'Backups' ||
+                df.name.startsWith('backup_central_estudos') ||
+                df.name.startsWith('backup_incremental_central_estudos') ||
+                df.name === CLOUD_SYNC_FILENAME,
+            );
+          } else {
+            const targetFolderIdPre = isExplicitAll ? undefined : explicitFolderId || folder.id;
+            const [, fetchedBackups, fetchedFiles] = await Promise.all([
+              syncStudySubFoldersInDrive(folder.id, tokenToUse).catch(() => ({})),
+              listDatabaseBackupsFromDrive(tokenToUse, { activeFolderId: folder.id }),
+              listAllStudyFilesInDrive(tokenToUse),
+            ]);
+            backupsList = fetchedBackups;
+            driveFiles = fetchedFiles;
+
+            latestCloud = await downloadLatestCloudSync(
+              tokenToUse,
+              targetFolderIdPre
+                ? {
+                    onlyFolderId: explicitFolderId ? targetFolderIdPre : undefined,
+                    activeFolderId: folder.id,
+                    strictFolder: Boolean(explicitFolderId),
+                    expectedEmail: googleUser?.email || undefined,
+                    prefetchedBackups: backupsList,
+                    bypassCache: true,
+                  }
+                : {
+                    activeFolderId: folder.id,
+                    expectedEmail: googleUser?.email || undefined,
+                    prefetchedBackups: backupsList,
+                    bypassCache: true,
+                  },
+            );
+          }
+
+          const targetFolderId = isExplicitAll
+            ? undefined
+            : explicitFolderId || (folder.id && folder.id !== 'gas_root' ? folder.id : undefined);
 
           const folderFilteredFiles = targetFolderId
             ? driveFiles.filter((df) =>
@@ -7161,6 +8067,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
 
           const hasStudyFolderFiles = driveFiles.some((df) => df.isInStudyFolder);
+          const effectiveOnlyFolderId =
+            isGasMode && !explicitFolderId
+              ? undefined
+              : targetFolderId;
           const {
             updatedDb,
             filesRestored,
@@ -7175,15 +8085,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               tokenToUse,
               scope,
               (current, total, label) => setRestoreProgress({ current, total, label }),
-              targetFolderId
+              effectiveOnlyFolderId
                 ? {
-                    onlyFolderId: targetFolderId,
+                    onlyFolderId: effectiveOnlyFolderId,
                     forceModule,
                     importFromAnyFolder: true,
                     skipTargetDbBlobs: !restoredDb,
+                    lazyBinaryBlobs: isGasMode,
                   }
-                : { importFromAnyFolder: !hasStudyFolderFiles, forceModule },
+                : {
+                    importFromAnyFolder: !hasStudyFolderFiles || isGasMode,
+                    forceModule,
+                    lazyBinaryBlobs: isGasMode,
+                  },
             );
+
+          if (gasListWarning) {
+            toast(
+              `Banco de dados restaurado, mas a listagem de arquivos do Drive demorou demais (${gasListWarning}).`,
+              true,
+            );
+          }
 
           applyRestoredDatabaseForScope(scope, updatedDb, restoredDb ? cloudIso : undefined);
           if (restoredDb) {
@@ -7532,7 +8454,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           activeToken,
           scope,
           (current, total, label) => setRestoreProgress({ current, total, label }),
-          { onlyFolderId: folderId, forceModule: targetModule, skipTargetDbBlobs: true },
+          {
+            onlyFolderId: folderId,
+            forceModule: targetModule,
+            skipTargetDbBlobs: true,
+            lazyBinaryBlobs: isGasSessionActive(),
+          },
         );
 
         const total = filesRestored + orphansImported;
@@ -7587,6 +8514,33 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (!activeToken) return null;
 
       try {
+        // Fast path: when blobKey already encodes the Google Drive file ID (`drive_<id>`),
+        // download directly by ID without listing the entire Drive folder first.
+        if (blobKey.startsWith('drive_')) {
+          const directFileId = blobKey.replace(/^drive_/, '').trim();
+          if (directFileId) {
+            const lowerName = String(filename || '').toLowerCase();
+            const mimeHint = lowerName.endsWith('.pdf')
+              ? 'application/pdf'
+              : lowerName.endsWith('.txt') || lowerName.endsWith('.md')
+                ? 'text/plain'
+                : undefined;
+            try {
+              const directBlob = await downloadDriveFileBlob(directFileId, activeToken, mimeHint);
+              if (directBlob && directBlob.size > 0) {
+                await saveFileBlob(blobKey, directBlob, activeScopeRef.current);
+                return directBlob;
+              }
+            } catch (directErr: any) {
+              const directMsg = String(directErr?.message || '');
+              if (directMsg.includes('TOKEN_EXPIRED') || directMsg.includes('PICKER_FILE_PERMISSION')) {
+                throw directErr;
+              }
+              // Fall back to full folder search if file ID changed or was replaced
+            }
+          }
+        }
+
         const driveFiles = await listAllStudyFilesInDrive(activeToken);
         const candidates = [
           filename,
@@ -8436,6 +9390,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       );
       return true;
     } catch (err: any) {
+      if (err?.queued) {
+        pendingCloudSyncRef.current = true;
+        setHasPendingCloudChanges(true);
+        toast('Sem conexão estável no momento — backup salvo na fila local para reenvio automático.');
+        return true;
+      }
       const msg = String(err?.message || '');
       if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
       recordSyncActivity({
@@ -14191,12 +15151,25 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         gasSession,
         gasConnected,
         gasApiUrl: gasApiUrl || GAS_DEFAULT_API_URL,
+        gasConnectionHealth,
+        checkGasConnectionNow,
+        forceReconnectAppsScript,
         setGasApiUrl,
         connectAppsScript,
         disconnectAppsScript,
         testAppsScriptConnection,
         setAppsScriptStudyFolder,
         setupAppsScriptDailyBackup,
+        gasOperationQueue,
+        gasQueueProcessing,
+        localGasAuditLogs,
+        processGasQueueNow,
+        removeGasQueueItem,
+        clearFailedGasQueueItems,
+        fetchGasAuditLogs,
+        activeSyncState,
+        verifyActiveSyncChecksumNow,
+        triggerActiveSyncPushNow,
         conflictHistory,
         latestVersionComparison,
         isCheckingDivergence,

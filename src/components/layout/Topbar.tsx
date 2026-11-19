@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
-  Cloud,
   CloudOff,
   Home,
   Link2,
@@ -21,6 +20,7 @@ import { DailyGoalWidget } from './DailyGoalWidget';
 import { PostItWidget } from './PostItWidget';
 import { ModuleIcon } from '../ui/ModuleIcon';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
+import { GasConnectionTopbarWidget } from '../backup/GasConnectionMonitor';
 
 interface TopbarProps {
   onExitToLogin?: () => void;
@@ -103,17 +103,13 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     linkTimerToScheduleTopic,
     clearTimerLink,
     commitTimerToSchedule,
-    googleUser,
     driveConnected,
     isRenewingDriveToken,
     isSyncingDrive,
     hasPendingCloudChanges,
     drivePermissionNeedsPicker,
     restoreProgress,
-    disconnectGoogleDrive,
     authorizeDriveFolderViaPicker,
-    gasConnected,
-    gasSession,
     toast,
   } = useStudy();
 
@@ -599,34 +595,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
           </button>
         ) : null}
 
-        {driveConnected || gasConnected ? (
-          <button
-            type="button"
-            onClick={() => setActivePage('Backup e Restauração')}
-            aria-label="Salvo na nuvem (Google Apps Script)"
-            title={
-              isSyncingDrive
-                ? `Salvando na nuvem (${gasSession?.username || googleUser?.email || ''})…`
-                : `Salvo na nuvem via Google Apps Script (${gasSession?.username || googleUser?.email || ''}) — Clique para gerenciar em Backup`
-            }
-            className="relative inline-flex items-center justify-center gap-1.5 h-9 sm:h-10 px-2.5 rounded-xl border border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
-          >
-            <Cloud className="w-4 h-4 shrink-0" />
-            <span className="hidden lg:inline text-[11px] font-bold whitespace-nowrap">
-              {isSyncingDrive ? 'Salvando…' : 'Salvo na nuvem'}
-            </span>
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={() => setActivePage('Backup e Restauração')}
-            aria-label="Conectar nuvem (Google Apps Script)"
-            title="Conectar nuvem (Google Apps Script · Drive)"
-            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
-          >
-            <Cloud className="w-4 h-4" />
-          </button>
-        )}
+        <GasConnectionTopbarWidget />
 
         {onExitToLogin && (
           <button

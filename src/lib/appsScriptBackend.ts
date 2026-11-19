@@ -1,4 +1,13 @@
 import type { DriveFileInfo, DriveFolderSummary } from './googleDrive';
+import {
+  clearGasQueueOnLogout,
+  executeGasWriteWithQueue,
+  GasAuditLogEntry,
+  GasConnectionIntegrityResult,
+  GasQueuedOperationType,
+  recordLocalGasAuditEntry,
+  registerGasQueueBackend,
+} from './gasOperationQueue';
 
 /**
  * URL oficial da implantação do Google Apps Script (App para a Web).
@@ -35,6 +44,7 @@ export interface GasSession {
   expiresAt: number;
   deviceId: string;
   lastSyncedAt?: string | null;
+  lastContentHash?: string | null;
 }
 
 export interface GasServerConflictRow {
@@ -78,6 +88,8 @@ export interface GasLoginResponse {
 
 export interface GasPushStateResult {
   ok: boolean;
+  queued?: boolean;
+  queueId?: string;
   code?: string;
   error?: string;
   conflictId?: string;
@@ -87,9 +99,65 @@ export interface GasPushStateResult {
   summary?: GasVersionSummary;
   remoteUpdatedAt?: string | null;
   remoteContentHash?: string;
+  remoteDevice?: string | null;
   remoteSummary?: GasVersionSummary;
   file?: DriveFileInfo;
 }
+
+export interface GasPreWriteCheckResult {
+  ok: boolean;
+  allowedToWrite: boolean;
+  status: 'in-sync' | 'local-ahead' | 'conflict' | 'remote-empty' | 'network-error';
+  localChecksum: string;
+  expectedBaseChecksum: string | null;
+  remoteChecksum: string | null;
+  localBaseVersion: number;
+  remoteVersion: number | null;
+  remoteDevice: string | null;
+  remoteUpdatedAt: string | null;
+  remoteSummary?: GasVersionSummary;
+  controlSheetTable: string;
+  checkedAt: string;
+  reason: string;
+}
+
+export interface GasActiveSyncEvent {
+  type: 'pre-write-check' | 'write-blocked' | 'write-committed';
+  checkedAt: string;
+  localChecksum?: string;
+  expectedBaseChecksum?: string | null;
+  remoteChecksum?: string | null;
+  localBaseVersion?: number;
+  remoteVersion?: number | null;
+  remoteDevice?: string | null;
+  remoteUpdatedAt?: string | null;
+  controlSheetTable?: string;
+  reason?: string;
+  status?: GasPreWriteCheckResult['status'];
+}
+
+type ActiveSyncEventListener = (event: GasActiveSyncEvent) => void;
+const activeSyncEventListeners = new Set<ActiveSyncEventListener>();
+
+export function subscribeGasActiveSyncEvents(listener: ActiveSyncEventListener): () => void {
+  activeSyncEventListeners.add(listener);
+  return () => {
+    activeSyncEventListeners.delete(listener);
+  };
+}
+
+function emitGasActiveSyncEvent(event: GasActiveSyncEvent): void {
+  activeSyncEventListeners.forEach((fn) => {
+    try {
+      fn(event);
+    } catch {
+      // ignore listener errors
+    }
+  });
+}
+
+const GAS_INTEGRITY_CACHE_TTL_MS = 8_000;
+let lastVerifiedOnlineAtMs = 0;
 
 type GasSessionListener = (session: GasSession | null) => void;
 const sessionListeners = new Set<GasSessionListener>();
@@ -179,6 +247,7 @@ export function getGasSession(): GasSession | null {
             expiresAt: typeof parsed.expiresAt === 'number' ? parsed.expiresAt : Date.now() + 29 * 86400000,
             deviceId: parsed.deviceId || getOrCreateGasDeviceId(),
             lastSyncedAt: parsed.lastSyncedAt || null,
+            lastContentHash: typeof parsed.lastContentHash === 'string' ? parsed.lastContentHash : null,
           };
           return cachedSession;
         }
@@ -218,6 +287,7 @@ export function updateGasSessionMetadata(patch: Partial<GasSession>): GasSession
 
 export function clearGasSession(): void {
   cachedSession = null;
+  invalidateGasListFilesCache();
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       window.localStorage.removeItem(GAS_SESSION_KEY);
@@ -271,6 +341,9 @@ async function gasPost<T = any>(
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? 60_000;
   const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
+  const startedAtMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const shouldAuditAction =
+    action !== 'ping' && action !== 'listAuditLogs' && action !== 'uploadFileChunk';
 
   try {
     const res = await fetch(targetUrl, {
@@ -298,16 +371,60 @@ async function gasPost<T = any>(
       throw new Error(`Resposta inesperada do Google Apps Script (HTTP ${res.status}).`);
     }
 
+    const elapsedMs = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAtMs),
+    );
+
     if (parsed && parsed.code === 'UNAUTHORIZED' && !options?.skipAuth) {
+      lastVerifiedOnlineAtMs = 0;
       clearGasSession();
+    } else if (parsed && parsed.ok && !options?.skipAuth) {
+      lastVerifiedOnlineAtMs = Date.now();
+    }
+
+    if (shouldAuditAction) {
+      const isOk = Boolean(parsed && parsed.ok);
+      recordLocalGasAuditEntry({
+        action,
+        status: isOk ? 'SUCCESS' : 'FAILURE',
+        reason: isOk
+          ? typeof parsed?.serverVersion === 'number'
+            ? `Concluído com sucesso (versão v${parsed.serverVersion})`
+            : 'Operação concluída com sucesso'
+          : String(parsed?.error || parsed?.code || `Falha HTTP ${res.status}`),
+        details: parsed?.code ? `Código: ${parsed.code}` : undefined,
+        deviceId: String(bodyObj.deviceId || ''),
+        username: session?.username || '',
+        serverVersion: typeof parsed?.serverVersion === 'number' ? parsed.serverVersion : null,
+        durationMs: elapsedMs,
+      });
     }
 
     return parsed as T;
   } catch (err: any) {
-    if (err?.name === 'AbortError') {
-      throw new Error('Tempo esgotado ao aguardar o Google Apps Script. Tente novamente.');
+    lastVerifiedOnlineAtMs = 0;
+    const elapsedMs = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAtMs),
+    );
+    const wrappedErr =
+      err?.name === 'AbortError'
+        ? new Error(
+            `Tempo esgotado (${Math.round(timeoutMs / 1000)}s) ao aguardar o Google Apps Script (${action}). A pasta do Drive pode estar grande ou o script demorou para responder; aguarde alguns segundos e tente novamente.`,
+          )
+        : err;
+    if (shouldAuditAction) {
+      recordLocalGasAuditEntry({
+        action,
+        status: 'FAILURE',
+        reason: String(wrappedErr?.message || 'Erro de rede ao comunicar com o Google Apps Script'),
+        deviceId: String(bodyObj.deviceId || ''),
+        username: session?.username || '',
+        durationMs: elapsedMs,
+      });
     }
-    throw err;
+    throw wrappedErr;
   } finally {
     window.clearTimeout(timerId);
   }
@@ -329,6 +446,135 @@ export async function gasPing(customApiUrl?: string): Promise<{
     return {
       ok: false,
       error: err?.message || 'Falha ao conectar com o Google Apps Script.',
+    };
+  }
+}
+
+export interface GasHealthCheckResult {
+  ok: boolean;
+  status: 'online' | 'offline' | 'session-expired' | 'disconnected';
+  latencyMs: number | null;
+  checkedAt: string;
+  scriptVersion?: string | null;
+  serverVersion?: number | null;
+  folderName?: string | null;
+  error?: string | null;
+}
+
+/**
+ * Verifica conectividade real com o Google Apps Script e valida a sessão autenticada (se ativa),
+ * medindo a latência sem recarregar a página.
+ */
+export async function gasCheckHealth(customApiUrl?: string): Promise<GasHealthCheckResult> {
+  const checkedAt = new Date().toISOString();
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    return {
+      ok: false,
+      status: 'offline',
+      latencyMs: null,
+      checkedAt,
+      error: 'Sem conexão com a internet neste dispositivo.',
+    };
+  }
+
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const ping = await gasPing(customApiUrl);
+  const elapsedMs = Math.max(
+    1,
+    Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+  );
+
+  if (!ping.ok) {
+    return {
+      ok: false,
+      status: 'offline',
+      latencyMs: elapsedMs,
+      checkedAt,
+      error: ping.error || 'O servidor Google Apps Script não respondeu.',
+    };
+  }
+
+  const session = getGasSession();
+  if (!session?.token) {
+    return {
+      ok: false,
+      status: 'disconnected',
+      latencyMs: elapsedMs,
+      checkedAt,
+      scriptVersion: ping.version || null,
+      serverVersion: typeof ping.serverVersion === 'number' ? ping.serverVersion : null,
+      folderName: ping.folderName || null,
+      error: 'Servidor online, mas nenhuma sessão está conectada neste navegador.',
+    };
+  }
+
+  try {
+    const versionRes = await gasPost<{
+      ok?: boolean;
+      code?: string;
+      error?: string;
+      serverVersion?: number;
+      updatedAt?: string | null;
+    }>('inspectVersion', {}, { apiUrl: customApiUrl, timeoutMs: 20_000 });
+
+    if (versionRes?.code === 'UNAUTHORIZED') {
+      return {
+        ok: false,
+        status: 'session-expired',
+        latencyMs: elapsedMs,
+        checkedAt,
+        scriptVersion: ping.version || null,
+        serverVersion: typeof ping.serverVersion === 'number' ? ping.serverVersion : null,
+        folderName: ping.folderName || session.folderName || null,
+        error: 'Sessão expirada no servidor. Reconecte com Usuário e Senha sem atualizar a página.',
+      };
+    }
+
+    if (!versionRes?.ok) {
+      return {
+        ok: false,
+        status: 'offline',
+        latencyMs: elapsedMs,
+        checkedAt,
+        scriptVersion: ping.version || null,
+        serverVersion: typeof ping.serverVersion === 'number' ? ping.serverVersion : null,
+        folderName: ping.folderName || session.folderName || null,
+        error: versionRes?.error || 'Falha ao validar sessão no Google Apps Script.',
+      };
+    }
+
+    const resolvedServerVersion =
+      typeof versionRes.serverVersion === 'number'
+        ? versionRes.serverVersion
+        : typeof ping.serverVersion === 'number'
+          ? ping.serverVersion
+          : session.serverVersion;
+
+    // IMPORTANTE: não sobrescrevemos session.serverVersion durante o health check,
+    // pois a Sincronização Ativa precisa preservar a versão-base real sincronizada
+    // neste dispositivo para detectar atualizações feitas por outros aparelhos.
+
+    return {
+      ok: true,
+      status: 'online',
+      latencyMs: elapsedMs,
+      checkedAt,
+      scriptVersion: ping.version || null,
+      serverVersion: resolvedServerVersion ?? null,
+      folderName: ping.folderName || session.folderName || null,
+      error: null,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      status: 'offline',
+      latencyMs: elapsedMs,
+      checkedAt,
+      scriptVersion: ping.version || null,
+      serverVersion: typeof ping.serverVersion === 'number' ? ping.serverVersion : null,
+      folderName: ping.folderName || session.folderName || null,
+      error: err?.message || 'Erro de rede ao validar sessão com o Google Apps Script.',
     };
   }
 }
@@ -359,6 +605,7 @@ export async function gasLogin(
       expiresAt: typeof res.expiresAt === 'number' ? res.expiresAt : Date.now() + 29 * 86400000,
       deviceId: getOrCreateGasDeviceId(),
       lastSyncedAt: res.updatedAt || new Date().toISOString(),
+      lastContentHash: typeof res.contentHash === 'string' && res.contentHash ? res.contentHash : null,
     });
   }
 
@@ -374,7 +621,27 @@ export async function gasLogout(): Promise<void> {
       // ignore network error on logout
     }
   }
+  lastVerifiedOnlineAtMs = 0;
+  clearGasQueueOnLogout();
   clearGasSession();
+}
+
+type GasListFilesResult = {
+  files: DriveFileInfo[];
+  folders: DriveFolderSummary[];
+  folderId: string;
+  folderName: string;
+  folderUrl: string;
+};
+
+const GAS_LIST_FILES_CACHE_TTL_MS = 20_000;
+let cachedGasListFiles: { fetchedAt: number; result: GasListFilesResult } | null = null;
+let inflightListFilesPromise: Promise<GasListFilesResult> | null = null;
+let inflightPullStatePromise: Promise<any> | null = null;
+let inflightListBackupsPromise: Promise<DriveFileInfo[]> | null = null;
+
+export function invalidateGasListFilesCache(): void {
+  cachedGasListFiles = null;
 }
 
 export async function gasPullState(): Promise<{
@@ -397,16 +664,32 @@ export async function gasPullState(): Promise<{
     modifiedTime: string | null;
   };
 }> {
-  const res = await gasPost<any>('pullState', {}, { timeoutMs: 55_000 });
-  if (res?.ok) {
-    updateGasSessionMetadata({
-      ...(typeof res.serverVersion === 'number' ? { serverVersion: res.serverVersion } : {}),
-      ...(res.folderId ? { folderId: res.folderId } : {}),
-      ...(res.folderName ? { folderName: res.folderName } : {}),
-      ...(res.folderUrl ? { folderUrl: res.folderUrl } : {}),
-    });
+  if (inflightPullStatePromise) {
+    return inflightPullStatePromise;
   }
-  return res;
+  const task = (async () => {
+    const res = await gasPost<any>('pullState', {}, { timeoutMs: 150_000 });
+    if (res?.ok) {
+      updateGasSessionMetadata({
+        ...(typeof res.serverVersion === 'number' ? { serverVersion: res.serverVersion } : {}),
+        ...(typeof res.contentHash === 'string' && res.contentHash
+          ? { lastContentHash: res.contentHash }
+          : {}),
+        ...(res.folderId ? { folderId: res.folderId } : {}),
+        ...(res.folderName ? { folderName: res.folderName } : {}),
+        ...(res.folderUrl ? { folderUrl: res.folderUrl } : {}),
+      });
+    }
+    return res;
+  })();
+  inflightPullStatePromise = task;
+  try {
+    return await task;
+  } finally {
+    if (inflightPullStatePromise === task) {
+      inflightPullStatePromise = null;
+    }
+  }
 }
 
 export async function gasInspectRemoteVersion(): Promise<{
@@ -415,17 +698,330 @@ export async function gasInspectRemoteVersion(): Promise<{
   serverVersion: number;
   updatedAt: string | null;
   contentHash?: string;
+  savedByDevice?: string;
+  controlSheetTable?: string;
+  controlSheetVersion?: number;
+  controlSheetHash?: string;
+  controlSheetDevice?: string;
+  controlSheetUpdatedAt?: string | null;
   fileId?: string | null;
   fileName?: string;
   summary?: GasVersionSummary;
   hasRemoteData?: boolean;
 }> {
-  return await gasPost('inspectVersion', {}, { timeoutMs: 30_000 });
+  return await gasPost('inspectVersion', {}, { timeoutMs: 45_000 });
+}
+
+/**
+ * Módulo de Sincronização Ativa (Pré-gravação):
+ * Consulta a planilha de controle (tb_estado) / estado canônico no Google Apps Script
+ * e compara versão + checksum local com o registro mais recente remoto antes de autorizar escrita.
+ */
+export async function gasVerifyChecksumBeforeWrite(options: {
+  localContentHash: string;
+  expectedBaseHash?: string | null;
+  expectedBaseVersion?: number | null;
+  auditOnResult?: boolean;
+}): Promise<GasPreWriteCheckResult> {
+  const checkedAt = new Date().toISOString();
+  const session = getGasSession();
+  const localBaseVersion =
+    typeof options.expectedBaseVersion === 'number'
+      ? options.expectedBaseVersion
+      : typeof session?.serverVersion === 'number'
+        ? session.serverVersion
+        : 0;
+  const expectedBaseChecksum =
+    (options.expectedBaseHash && options.expectedBaseHash.trim()) ||
+    (session?.lastContentHash && session.lastContentHash.trim()) ||
+    null;
+  const localChecksum = String(options.localContentHash || '').trim();
+
+  try {
+    const remote = await gasInspectRemoteVersion();
+    if (!remote?.ok) {
+      const reason = remote?.error || 'Não foi possível consultar a planilha de controle no Apps Script.';
+      return {
+        ok: false,
+        allowedToWrite: false,
+        status: 'network-error',
+        localChecksum,
+        expectedBaseChecksum,
+        remoteChecksum: null,
+        localBaseVersion,
+        remoteVersion: null,
+        remoteDevice: null,
+        remoteUpdatedAt: null,
+        controlSheetTable: 'tb_estado',
+        checkedAt,
+        reason,
+      };
+    }
+
+    const remoteVersion =
+      typeof remote.controlSheetVersion === 'number' && remote.controlSheetVersion > 0
+        ? Math.max(remote.controlSheetVersion, Number(remote.serverVersion || 0))
+        : Number(remote.serverVersion || 0);
+    const remoteChecksum =
+      String(remote.controlSheetHash || remote.contentHash || '').trim() || null;
+    const remoteDevice = String(remote.controlSheetDevice || remote.savedByDevice || '').trim() || null;
+    const remoteUpdatedAt = remote.controlSheetUpdatedAt || remote.updatedAt || null;
+    const controlSheetTable = remote.controlSheetTable || 'tb_estado';
+
+    if (!remote.hasRemoteData && remoteVersion === 0 && !remoteChecksum) {
+      const result: GasPreWriteCheckResult = {
+        ok: true,
+        allowedToWrite: true,
+        status: 'remote-empty',
+        localChecksum,
+        expectedBaseChecksum,
+        remoteChecksum: null,
+        localBaseVersion,
+        remoteVersion: 0,
+        remoteDevice,
+        remoteUpdatedAt,
+        remoteSummary: remote.summary,
+        controlSheetTable,
+        checkedAt,
+        reason: 'Planilha de controle sem registro prévio — gravação inicial liberada.',
+      };
+      emitGasActiveSyncEvent({
+        type: 'pre-write-check',
+        checkedAt,
+        localChecksum,
+        expectedBaseChecksum,
+        remoteChecksum: null,
+        localBaseVersion,
+        remoteVersion: 0,
+        remoteDevice,
+        remoteUpdatedAt,
+        controlSheetTable,
+        status: result.status,
+        reason: result.reason,
+      });
+      return result;
+    }
+
+    // Verifica se o cliente possui o registro mais recente da planilha de controle:
+    // Bloqueia se a versão remota avançou OU se o checksum remoto diverge do último checksum sincronizado pelo cliente.
+    const versionAdvanced =
+      remoteVersion > 0 &&
+      ((localBaseVersion > 0 && remoteVersion > localBaseVersion) ||
+        (localBaseVersion === 0 &&
+          Boolean(remoteChecksum) &&
+          expectedBaseChecksum !== remoteChecksum &&
+          localChecksum !== remoteChecksum));
+    const checksumDiverged = Boolean(
+      expectedBaseChecksum && remoteChecksum && expectedBaseChecksum !== remoteChecksum,
+    );
+
+    if (versionAdvanced || checksumDiverged) {
+      const reason = checksumDiverged
+        ? `Sobrescrita bloqueada pela Sincronização Ativa: checksum da planilha de controle (${remoteChecksum?.slice(0, 12)}) diverge da base local (${expectedBaseChecksum?.slice(0, 12)}) na v${remoteVersion}.`
+        : `Sobrescrita bloqueada pela Sincronização Ativa: a planilha de controle já está na versão v${remoteVersion} (este dispositivo está na v${localBaseVersion}).`;
+
+      if (options.auditOnResult) {
+        recordLocalGasAuditEntry({
+          action: 'verifyChecksum',
+          operationType: 'READ',
+          status: 'FAILURE',
+          reason,
+          details: `Local base: v${localBaseVersion} (${expectedBaseChecksum?.slice(0, 10) || 'sem base'}) · Remoto (${controlSheetTable}): v${remoteVersion} (${remoteChecksum?.slice(0, 10) || '—'})`,
+          serverVersion: remoteVersion,
+        });
+      }
+
+      const result: GasPreWriteCheckResult = {
+        ok: true,
+        allowedToWrite: false,
+        status: 'conflict',
+        localChecksum,
+        expectedBaseChecksum,
+        remoteChecksum,
+        localBaseVersion,
+        remoteVersion,
+        remoteDevice,
+        remoteUpdatedAt,
+        remoteSummary: remote.summary,
+        controlSheetTable,
+        checkedAt,
+        reason,
+      };
+      emitGasActiveSyncEvent({
+        type: 'write-blocked',
+        checkedAt,
+        localChecksum,
+        expectedBaseChecksum,
+        remoteChecksum,
+        localBaseVersion,
+        remoteVersion,
+        remoteDevice,
+        remoteUpdatedAt,
+        controlSheetTable,
+        status: 'conflict',
+        reason,
+      });
+      return result;
+    }
+
+    const isExactMatch = Boolean(remoteChecksum && localChecksum && remoteChecksum === localChecksum);
+    const status: GasPreWriteCheckResult['status'] = isExactMatch ? 'in-sync' : 'local-ahead';
+    const reason = isExactMatch
+      ? `Checksum verificado e idêntico à planilha de controle (v${remoteVersion}).`
+      : `Cliente atualizado com a versão mais recente da planilha de controle (v${remoteVersion}) — gravação autorizada.`;
+
+    const result: GasPreWriteCheckResult = {
+      ok: true,
+      allowedToWrite: true,
+      status,
+      localChecksum,
+      expectedBaseChecksum,
+      remoteChecksum,
+      localBaseVersion,
+      remoteVersion,
+      remoteDevice,
+      remoteUpdatedAt,
+      remoteSummary: remote.summary,
+      controlSheetTable,
+      checkedAt,
+      reason,
+    };
+    emitGasActiveSyncEvent({
+      type: 'pre-write-check',
+      checkedAt,
+      localChecksum,
+      expectedBaseChecksum,
+      remoteChecksum,
+      localBaseVersion,
+      remoteVersion,
+      remoteDevice,
+      remoteUpdatedAt,
+      controlSheetTable,
+      status,
+      reason,
+    });
+    return result;
+  } catch (err: any) {
+    return {
+      ok: false,
+      allowedToWrite: false,
+      status: 'network-error',
+      localChecksum,
+      expectedBaseChecksum,
+      remoteChecksum: null,
+      localBaseVersion,
+      remoteVersion: null,
+      remoteDevice: null,
+      remoteUpdatedAt: null,
+      controlSheetTable: 'tb_estado',
+      checkedAt,
+      reason: String(err?.message || 'Erro de rede ao verificar checksum remoto.'),
+    };
+  }
+}
+
+async function gasPushStateRaw(payload: Record<string, unknown>): Promise<GasPushStateResult> {
+  const session = getGasSession();
+  const force = Boolean(payload.force);
+  const baseVersion =
+    typeof payload.baseVersion === 'number'
+      ? payload.baseVersion
+      : typeof session?.serverVersion === 'number'
+        ? session.serverVersion
+        : 0;
+  const contentHash = String(payload.contentHash || '').trim();
+  const expectedContentHash = String(
+    payload.expectedContentHash || session?.lastContentHash || '',
+  ).trim();
+
+  // Sincronização Ativa: compara versão + checksum com a planilha de controle ANTES de gravar
+  if (!force) {
+    const preCheck = await gasVerifyChecksumBeforeWrite({
+      localContentHash: contentHash,
+      expectedBaseHash: expectedContentHash || null,
+      expectedBaseVersion: baseVersion,
+      auditOnResult: true,
+    });
+    if (!preCheck.ok) {
+      throw new Error(preCheck.reason);
+    }
+    if (!preCheck.allowedToWrite) {
+      return {
+        ok: false,
+        code: 'VERSION_CONFLICT',
+        error: `DRIVE_CONFLICT_NEWER_REMOTE: ${preCheck.reason}`,
+        serverVersion: preCheck.remoteVersion ?? baseVersion,
+        remoteUpdatedAt: preCheck.remoteUpdatedAt,
+        remoteContentHash: preCheck.remoteChecksum || undefined,
+        remoteDevice: preCheck.remoteDevice,
+        remoteSummary: preCheck.remoteSummary,
+      };
+    }
+  }
+
+  const res = await gasPost<GasPushStateResult>(
+    'pushState',
+    {
+      payload: payload.payload,
+      force,
+      baseVersion,
+      contentHash,
+      expectedContentHash,
+    },
+    { timeoutMs: 120_000 },
+  );
+
+  if (res?.ok && typeof res.serverVersion === 'number') {
+    const committedHash = String(res.contentHash || contentHash || '').trim() || null;
+    const committedAt = res.updatedAt || new Date().toISOString();
+    updateGasSessionMetadata({
+      serverVersion: res.serverVersion,
+      lastSyncedAt: committedAt,
+      ...(committedHash ? { lastContentHash: committedHash } : {}),
+    });
+    emitGasActiveSyncEvent({
+      type: 'write-committed',
+      checkedAt: committedAt,
+      localChecksum: committedHash || contentHash,
+      expectedBaseChecksum: committedHash,
+      remoteChecksum: committedHash,
+      localBaseVersion: res.serverVersion,
+      remoteVersion: res.serverVersion,
+      remoteDevice: session?.deviceId || getOrCreateGasDeviceId(),
+      remoteUpdatedAt: committedAt,
+      controlSheetTable: 'tb_estado',
+      status: 'in-sync',
+      reason: `Gravação confirmada na planilha de controle (v${res.serverVersion}).`,
+    });
+  } else if (res?.code === 'VERSION_CONFLICT') {
+    emitGasActiveSyncEvent({
+      type: 'write-blocked',
+      checkedAt: new Date().toISOString(),
+      localChecksum: contentHash,
+      expectedBaseChecksum: expectedContentHash || null,
+      remoteChecksum: res.remoteContentHash || null,
+      localBaseVersion: baseVersion,
+      remoteVersion: typeof res.serverVersion === 'number' ? res.serverVersion : null,
+      remoteDevice: res.remoteDevice || null,
+      remoteUpdatedAt: res.remoteUpdatedAt || null,
+      controlSheetTable: 'tb_estado',
+      status: 'conflict',
+      reason: res.error || 'Conflito de versão/checksum rejeitado pelo Google Apps Script.',
+    });
+  }
+
+  return res;
 }
 
 export async function gasPushState(
   payload: unknown,
-  options?: { force?: boolean; baseVersion?: number; contentHash?: string },
+  options?: {
+    force?: boolean;
+    baseVersion?: number;
+    contentHash?: string;
+    expectedContentHash?: string | null;
+    bypassQueue?: boolean;
+  },
 ): Promise<GasPushStateResult> {
   const session = getGasSession();
   const baseVersion =
@@ -434,43 +1030,108 @@ export async function gasPushState(
       : typeof session?.serverVersion === 'number'
         ? session.serverVersion
         : 0;
+  const expectedContentHash = String(
+    options?.expectedContentHash || session?.lastContentHash || '',
+  ).trim();
 
-  const res = await gasPost<GasPushStateResult>(
-    'pushState',
-    {
+  const queuedRes = await executeGasWriteWithQueue<GasPushStateResult>({
+    type: 'pushState',
+    label: 'Salvamento do banco na nuvem',
+    payload: {
       payload,
       force: Boolean(options?.force),
       baseVersion,
       contentHash: options?.contentHash || '',
+      expectedContentHash,
     },
-    { timeoutMs: 75_000 },
-  );
+    bypassQueue: options?.bypassQueue,
+  });
 
-  if (res?.ok && typeof res.serverVersion === 'number') {
-    updateGasSessionMetadata({
-      serverVersion: res.serverVersion,
-      lastSyncedAt: res.updatedAt || new Date().toISOString(),
-    });
+  if (queuedRes.queued) {
+    return {
+      ok: false,
+      queued: true,
+      queueId: queuedRes.queueId,
+      code: queuedRes.code || 'QUEUED_RETRY',
+      error: queuedRes.error || 'Alteração armazenada na fila local para reenvio automático.',
+    };
   }
 
+  return (
+    queuedRes.data || {
+      ok: queuedRes.ok,
+      code: queuedRes.code,
+      error: queuedRes.error,
+    }
+  );
+}
+
+async function gasCreateBackupRaw(payload: Record<string, unknown>): Promise<{ ok: boolean; file?: DriveFileInfo; error?: string }> {
+  const res = await gasPost<{ ok: boolean; file?: DriveFileInfo; error?: string }>(
+    'createBackup',
+    { payload: payload.payload },
+    { timeoutMs: 120_000 },
+  );
+  if (res.ok) invalidateGasListFilesCache();
   return res;
 }
 
-export async function gasCreateBackup(payload: unknown): Promise<{ ok: boolean; file?: DriveFileInfo; error?: string }> {
-  return await gasPost('createBackup', { payload }, { timeoutMs: 75_000 });
+export async function gasCreateBackup(
+  payload: unknown,
+  options?: { bypassQueue?: boolean },
+): Promise<{ ok: boolean; queued?: boolean; queueId?: string; file?: DriveFileInfo; error?: string }> {
+  const queuedRes = await executeGasWriteWithQueue<{ ok: boolean; file?: DriveFileInfo; error?: string }>({
+    type: 'createBackup',
+    label: 'Criação de backup na nuvem',
+    payload: { payload },
+    bypassQueue: options?.bypassQueue,
+  });
+
+  if (queuedRes.queued) {
+    return {
+      ok: false,
+      queued: true,
+      queueId: queuedRes.queueId,
+      error: queuedRes.error || 'Backup colocado na fila local para envio automático.',
+    };
+  }
+
+  return (
+    queuedRes.data || {
+      ok: queuedRes.ok,
+      error: queuedRes.error,
+    }
+  );
 }
 
 export async function gasListBackups(): Promise<DriveFileInfo[]> {
-  const res = await gasPost<{ ok: boolean; files?: DriveFileInfo[]; error?: string }>('listBackups', {}, { timeoutMs: 35_000 });
-  if (!res.ok) throw new Error(res.error || 'Falha ao listar backups no Apps Script.');
-  return Array.isArray(res.files) ? res.files : [];
+  if (inflightListBackupsPromise) {
+    return inflightListBackupsPromise;
+  }
+  const task = (async () => {
+    const res = await gasPost<{ ok: boolean; files?: DriveFileInfo[]; error?: string }>(
+      'listBackups',
+      {},
+      { timeoutMs: 120_000 },
+    );
+    if (!res.ok) throw new Error(res.error || 'Falha ao listar backups no Apps Script.');
+    return Array.isArray(res.files) ? res.files : [];
+  })();
+  inflightListBackupsPromise = task;
+  try {
+    return await task;
+  } finally {
+    if (inflightListBackupsPromise === task) {
+      inflightListBackupsPromise = null;
+    }
+  }
 }
 
 export async function gasDownloadBackup(fileId: string): Promise<{ payload: any; file?: DriveFileInfo }> {
   const res = await gasPost<{ ok: boolean; payload?: any; file?: DriveFileInfo; error?: string }>(
     'downloadBackup',
     { fileId },
-    { timeoutMs: 55_000 },
+    { timeoutMs: 120_000 },
   );
   if (!res.ok) throw new Error(res.error || 'Falha ao baixar backup do Apps Script.');
   return { payload: res.payload, file: res.file };
@@ -480,9 +1141,10 @@ export async function gasPruneBackups(maxKeep = 15): Promise<number> {
   const res = await gasPost<{ ok: boolean; removed?: number; error?: string }>(
     'pruneBackups',
     { maxKeep },
-    { timeoutMs: 35_000 },
+    { timeoutMs: 60_000 },
   );
   if (!res.ok) throw new Error(res.error || 'Falha ao limpar backups antigos.');
+  invalidateGasListFilesCache();
   return Number(res.removed || 0);
 }
 
@@ -559,6 +1221,7 @@ export async function gasUploadFile(
     if (!finRes.ok || !finRes.file) {
       throw new Error(finRes.error || 'Falha ao montar arquivo enviado em partes no Google Drive.');
     }
+    invalidateGasListFilesCache();
     return finRes.file;
   }
 
@@ -572,31 +1235,57 @@ export async function gasUploadFile(
       moduleTag: moduleTag || subfolder || 'Geral',
       replaceExisting: true,
     },
-    { timeoutMs: 90_000 },
+    { timeoutMs: 120_000 },
   );
 
   if (!res.ok || !res.file) {
     throw new Error(res.error || `Falha ao enviar "${filename}" via Google Apps Script.`);
   }
+  invalidateGasListFilesCache();
   return res.file;
 }
 
-export async function gasListFiles(): Promise<{
-  files: DriveFileInfo[];
-  folders: DriveFolderSummary[];
-  folderId: string;
-  folderName: string;
-  folderUrl: string;
-}> {
-  const res = await gasPost<any>('listFiles', {}, { timeoutMs: 55_000 });
-  if (!res.ok) throw new Error(res.error || 'Falha ao listar arquivos do Google Drive via Apps Script.');
-  return {
-    files: Array.isArray(res.files) ? res.files : [],
-    folders: Array.isArray(res.folders) ? res.folders : [],
-    folderId: res.folderId || '',
-    folderName: res.folderName || '',
-    folderUrl: res.folderUrl || '',
-  };
+export async function gasListFiles(options?: { forceRefresh?: boolean }): Promise<GasListFilesResult> {
+  if (
+    !options?.forceRefresh &&
+    cachedGasListFiles &&
+    Date.now() - cachedGasListFiles.fetchedAt < GAS_LIST_FILES_CACHE_TTL_MS
+  ) {
+    return cachedGasListFiles.result;
+  }
+  if (inflightListFilesPromise) {
+    return inflightListFilesPromise;
+  }
+
+  const task = (async (): Promise<GasListFilesResult> => {
+    const res = await gasPost<any>('listFiles', {}, { timeoutMs: 240_000 });
+    if (!res.ok) throw new Error(res.error || 'Falha ao listar arquivos do Google Drive via Apps Script.');
+    const result: GasListFilesResult = {
+      files: Array.isArray(res.files) ? res.files : [],
+      folders: Array.isArray(res.folders) ? res.folders : [],
+      folderId: res.folderId || '',
+      folderName: res.folderName || '',
+      folderUrl: res.folderUrl || '',
+    };
+    if (result.folderId) {
+      updateGasSessionMetadata({
+        folderId: result.folderId,
+        ...(result.folderName ? { folderName: result.folderName } : {}),
+        ...(result.folderUrl ? { folderUrl: result.folderUrl } : {}),
+      });
+    }
+    cachedGasListFiles = { fetchedAt: Date.now(), result };
+    return result;
+  })();
+
+  inflightListFilesPromise = task;
+  try {
+    return await task;
+  } finally {
+    if (inflightListFilesPromise === task) {
+      inflightListFilesPromise = null;
+    }
+  }
 }
 
 export async function gasDownloadFileBlob(fileId: string, fallbackMime = 'application/octet-stream'): Promise<Blob | null> {
@@ -605,13 +1294,41 @@ export async function gasDownloadFileBlob(fileId: string, fallbackMime = 'applic
     base64Data?: string;
     mimeType?: string;
     error?: string;
-  }>('downloadFile', { fileId }, { timeoutMs: 90_000 });
+  }>('downloadFile', { fileId }, { timeoutMs: 180_000 });
   if (!res.ok || !res.base64Data) return null;
   return base64ToBlob(res.base64Data, res.mimeType || fallbackMime);
 }
 
-export async function gasDeleteFile(fileId: string): Promise<{ ok: boolean; error?: string; code?: string }> {
-  return await gasPost('deleteFile', { fileId }, { timeoutMs: 35_000 });
+async function gasDeleteFileRaw(payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; code?: string }> {
+  const res = await gasPost<{ ok: boolean; error?: string; code?: string }>(
+    'deleteFile',
+    { fileId: String(payload.fileId || '') },
+    { timeoutMs: 45_000 },
+  );
+  if (res.ok) invalidateGasListFilesCache();
+  return res;
+}
+
+export async function gasDeleteFile(
+  fileId: string,
+  options?: { bypassQueue?: boolean },
+): Promise<{ ok: boolean; queued?: boolean; queueId?: string; error?: string; code?: string }> {
+  const queuedRes = await executeGasWriteWithQueue<{ ok: boolean; error?: string; code?: string }>({
+    type: 'deleteFile',
+    label: `Exclusão de arquivo (${fileId.slice(0, 8)}…)`,
+    payload: { fileId },
+    bypassQueue: options?.bypassQueue,
+  });
+  if (queuedRes.queued) {
+    return {
+      ok: false,
+      queued: true,
+      queueId: queuedRes.queueId,
+      code: queuedRes.code,
+      error: queuedRes.error,
+    };
+  }
+  return queuedRes.data || { ok: queuedRes.ok, code: queuedRes.code, error: queuedRes.error };
 }
 
 export async function gasReadPostIt(): Promise<{
@@ -630,10 +1347,7 @@ export async function gasReadPostIt(): Promise<{
   };
 }
 
-export async function gasSavePostIt(
-  content: string,
-  options?: { expectedModifiedTime?: string | null; force?: boolean },
-): Promise<{
+async function gasSavePostItRaw(payload: Record<string, unknown>): Promise<{
   ok: boolean;
   code?: string;
   error?: string;
@@ -645,20 +1359,60 @@ export async function gasSavePostIt(
   return await gasPost(
     'savePostIt',
     {
-      content,
-      expectedModifiedTime: options?.expectedModifiedTime || '',
-      force: Boolean(options?.force),
+      content: String(payload.content ?? ''),
+      expectedModifiedTime: String(payload.expectedModifiedTime || ''),
+      force: Boolean(payload.force),
     },
     { timeoutMs: 30_000 },
   );
 }
 
-export async function gasSetStudyFolder(input: {
+export async function gasSavePostIt(
+  content: string,
+  options?: { expectedModifiedTime?: string | null; force?: boolean; bypassQueue?: boolean },
+): Promise<{
+  ok: boolean;
+  queued?: boolean;
+  queueId?: string;
+  code?: string;
+  error?: string;
+  fileId?: string;
+  modifiedTime?: string;
+  remoteContent?: string;
+  remoteModifiedTime?: string;
+}> {
+  const queuedRes = await executeGasWriteWithQueue<any>({
+    type: 'savePostIt',
+    label: 'Salvamento do Post-it.txt',
+    payload: {
+      content,
+      expectedModifiedTime: options?.expectedModifiedTime || '',
+      force: Boolean(options?.force),
+    },
+    bypassQueue: options?.bypassQueue,
+  });
+  if (queuedRes.queued) {
+    return {
+      ok: false,
+      queued: true,
+      queueId: queuedRes.queueId,
+      code: queuedRes.code,
+      error: queuedRes.error,
+    };
+  }
+  return queuedRes.data || { ok: queuedRes.ok, code: queuedRes.code, error: queuedRes.error };
+}
+
+async function gasSetStudyFolderRaw(payload: Record<string, unknown>): Promise<{
+  ok: boolean;
   folderId?: string;
   folderName?: string;
-}): Promise<{ ok: boolean; folderId?: string; folderName?: string; folderUrl?: string; error?: string }> {
-  const res = await gasPost<any>('setStudyFolder', input, { timeoutMs: 35_000 });
+  folderUrl?: string;
+  error?: string;
+}> {
+  const res = await gasPost<any>('setStudyFolder', payload, { timeoutMs: 45_000 });
   if (res.ok && res.folderId) {
+    invalidateGasListFilesCache();
     updateGasSessionMetadata({
       folderId: res.folderId,
       folderName: res.folderName || 'Central de Estudos - Materiais',
@@ -668,10 +1422,45 @@ export async function gasSetStudyFolder(input: {
   return res;
 }
 
+export async function gasSetStudyFolder(input: {
+  folderId?: string;
+  folderName?: string;
+  bypassQueue?: boolean;
+}): Promise<{ ok: boolean; queued?: boolean; queueId?: string; folderId?: string; folderName?: string; folderUrl?: string; error?: string }> {
+  const { bypassQueue, ...rest } = input;
+  const queuedRes = await executeGasWriteWithQueue<any>({
+    type: 'setStudyFolder',
+    label: 'Alteração da pasta padrão do Drive',
+    payload: rest,
+    bypassQueue,
+  });
+  if (queuedRes.queued) {
+    return {
+      ok: false,
+      queued: true,
+      queueId: queuedRes.queueId,
+      error: queuedRes.error,
+    };
+  }
+  return queuedRes.data || { ok: queuedRes.ok, error: queuedRes.error };
+}
+
 export async function gasListConflicts(): Promise<GasServerConflictRow[]> {
   const res = await gasPost<{ ok: boolean; conflicts?: GasServerConflictRow[] }>('listConflicts', {}, { timeoutMs: 25_000 });
   if (!res.ok || !Array.isArray(res.conflicts)) return [];
   return res.conflicts;
+}
+
+async function gasResolveConflictRaw(payload: Record<string, unknown>): Promise<{ ok: boolean; error?: string; code?: string }> {
+  return await gasPost<{ ok: boolean; error?: string; code?: string }>(
+    'resolveConflict',
+    {
+      conflictId: String(payload.conflictId || ''),
+      status: String(payload.status || 'resolved-local'),
+      resolution: String(payload.resolution || ''),
+    },
+    { timeoutMs: 20_000 },
+  );
 }
 
 export async function gasResolveConflict(
@@ -680,10 +1469,83 @@ export async function gasResolveConflict(
   resolution: string,
 ): Promise<boolean> {
   try {
-    const res = await gasPost<{ ok: boolean }>('resolveConflict', { conflictId, status, resolution }, { timeoutMs: 20_000 });
-    return Boolean(res.ok);
+    const queuedRes = await executeGasWriteWithQueue<{ ok: boolean }>({
+      type: 'resolveConflict',
+      label: 'Resolução de conflito de versão',
+      payload: { conflictId, status, resolution },
+    });
+    return Boolean(queuedRes.ok || queuedRes.queued);
   } catch {
     return false;
+  }
+}
+
+export async function gasListAuditLogs(limit = 150): Promise<{
+  ok: boolean;
+  logs: GasAuditLogEntry[];
+  source: 'drive-json' | 'sheet' | 'unavailable';
+  updatedAt?: string | null;
+  unsupportedByScript?: boolean;
+  error?: string;
+}> {
+  try {
+    const res = await gasPost<{
+      ok: boolean;
+      code?: string;
+      error?: string;
+      logs?: GasAuditLogEntry[];
+      source?: 'drive-json' | 'sheet';
+      updatedAt?: string | null;
+    }>('listAuditLogs', { limit }, { timeoutMs: 35_000 });
+
+    if (!res.ok) {
+      if (res.code === 'UNKNOWN_ACTION') {
+        return {
+          ok: false,
+          logs: [],
+          source: 'unavailable',
+          unsupportedByScript: true,
+          error:
+            'Sua implantação atual do Google Apps Script ainda não possui a rota listAuditLogs. Atualize o Code.gs para habilitar o log remoto no Drive.',
+        };
+      }
+      return {
+        ok: false,
+        logs: [],
+        source: 'unavailable',
+        error: res.error || 'Falha ao carregar log de auditoria no Google Drive.',
+      };
+    }
+
+    const normalized: GasAuditLogEntry[] = (Array.isArray(res.logs) ? res.logs : []).map((row: any, idx: number) => ({
+      id: String(row.id || `drv_${idx}_${row.timestamp || ''}`),
+      timestamp: String(row.timestamp || ''),
+      operationType: row.operationType === 'READ' ? 'READ' : 'WRITE',
+      action: String(row.action || ''),
+      actionLabel: String(row.actionLabel || row.action || 'Operação'),
+      status: row.status === 'FAILURE' ? 'FAILURE' : 'SUCCESS',
+      reason: String(row.reason || (row.status === 'FAILURE' ? 'Falha registrada' : 'Operação concluída')),
+      details: row.details ? String(row.details) : undefined,
+      deviceId: row.deviceId ? String(row.deviceId) : undefined,
+      username: row.username ? String(row.username) : undefined,
+      serverVersion: typeof row.serverVersion === 'number' ? row.serverVersion : null,
+      durationMs: typeof row.durationMs === 'number' ? row.durationMs : null,
+      source: 'drive-script',
+    }));
+
+    return {
+      ok: true,
+      logs: normalized,
+      source: res.source || 'drive-json',
+      updatedAt: res.updatedAt || null,
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      logs: [],
+      source: 'unavailable',
+      error: String(err?.message || 'Erro ao buscar log de auditoria do Drive.'),
+    };
   }
 }
 
@@ -697,3 +1559,74 @@ export async function gasChangePassword(
 ): Promise<{ ok: boolean; error?: string }> {
   return await gasPost('changePassword', { currentPassword, newPassword }, { timeoutMs: 25_000 });
 }
+
+async function verifyGasConnectionIntegrity(options?: {
+  forceLive?: boolean;
+}): Promise<GasConnectionIntegrityResult> {
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    lastVerifiedOnlineAtMs = 0;
+    return {
+      ok: false,
+      code: 'OFFLINE',
+      reason: 'Dispositivo sem conexão com a internet.',
+    };
+  }
+
+  const session = getGasSession();
+  if (!session?.token) {
+    lastVerifiedOnlineAtMs = 0;
+    return {
+      ok: false,
+      code: 'NO_SESSION',
+      reason: 'Sessão do Google Apps Script não está ativa.',
+    };
+  }
+
+  // Reaproveita verificação recente (< 8s) para não duplicar latência em rajadas de escrita
+  if (!options?.forceLive && Date.now() - lastVerifiedOnlineAtMs < GAS_INTEGRITY_CACHE_TTL_MS) {
+    return { ok: true };
+  }
+
+  const health = await gasCheckHealth();
+  if (health.status === 'online') {
+    lastVerifiedOnlineAtMs = Date.now();
+    return { ok: true };
+  }
+
+  lastVerifiedOnlineAtMs = 0;
+  if (health.status === 'session-expired') {
+    return {
+      ok: false,
+      code: 'SESSION_EXPIRED',
+      reason: health.error || 'Sessão do Google Apps Script expirada.',
+    };
+  }
+  return {
+    ok: false,
+    code: 'UNREACHABLE',
+    reason: health.error || 'Google Apps Script indisponível na verificação de integridade.',
+  };
+}
+
+// Registra o verificador de integridade e os executores diretos na fila persistente do Apps Script
+registerGasQueueBackend({
+  checkIntegrity: verifyGasConnectionIntegrity,
+  executeRaw: async (type: GasQueuedOperationType, payload: Record<string, unknown>) => {
+    switch (type) {
+      case 'pushState':
+        return await gasPushStateRaw(payload);
+      case 'createBackup':
+        return await gasCreateBackupRaw(payload);
+      case 'savePostIt':
+        return await gasSavePostItRaw(payload);
+      case 'deleteFile':
+        return await gasDeleteFileRaw(payload);
+      case 'resolveConflict':
+        return await gasResolveConflictRaw(payload);
+      case 'setStudyFolder':
+        return await gasSetStudyFolderRaw(payload);
+      default:
+        return { ok: false, code: 'UNKNOWN_QUEUE_OP', error: `Operação desconhecida na fila: ${type}` };
+    }
+  },
+});

@@ -1889,21 +1889,131 @@ export async function stampDriveFileSyncTag(
  * Lists ALL non-trashed files visible across the user's Google Drive (all study folders, nested subfolders, and account folders).
  * Throws TOKEN_EXPIRED on 401 so callers can reconnect cleanly instead of assuming Drive is empty.
  */
+function normalizeGasSegmentKey(value: string): string {
+  return String(value || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+const GAS_CANONICAL_SUBFOLDER_LOOKUP = new Map<string, string>(
+  [...CANONICAL_SUBFOLDER_NAMES, 'Questões'].map((name) => [normalizeGasSegmentKey(name), name]),
+);
+
+function enrichGasListedDriveFiles(res: {
+  files: DriveFileInfo[];
+  folders: DriveFolderSummary[];
+  folderId: string;
+  folderName: string;
+}): DriveFileInfo[] {
+  const rootId = String(res.folderId || '').trim();
+  const rootName = String(res.folderName || DRIVE_FOLDER_NAME).trim() || DRIVE_FOLDER_NAME;
+  const rootNameKey = normalizeGasSegmentKey(rootName);
+
+  const folderIdByRelPath = new Map<string, string>();
+  const folderById = new Map<string, DriveFolderSummary>();
+  for (const folder of res.folders || []) {
+    if (!folder?.id) continue;
+    folderById.set(folder.id, folder);
+    const rawPath = String(folder.fullPath || folder.name || '').trim();
+    if (!rawPath) continue;
+    const segs = rawPath.split('/').map((s) => s.trim()).filter(Boolean);
+    const relSegs =
+      segs.length > 0 && normalizeGasSegmentKey(segs[0]) === rootNameKey ? segs.slice(1) : segs;
+    const relKey = relSegs.map(normalizeGasSegmentKey).join('/');
+    if (relKey) {
+      folderIdByRelPath.set(relKey, folder.id);
+    } else if (!rootId) {
+      folderIdByRelPath.set('', folder.id);
+    }
+  }
+
+  return (res.files || []).map((f) => {
+    const rawFolderPath = String((f as any).folderName || f.folderPath || '').trim();
+    const rawSegments = rawFolderPath
+      .split('/')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const relSegments =
+      rawSegments.length > 0 && normalizeGasSegmentKey(rawSegments[0]) === rootNameKey
+        ? rawSegments.slice(1)
+        : rawSegments;
+
+    // Resolve all ancestor folder IDs (root -> every intermediate subfolder -> direct parent)
+    const ancestorSet = new Set<string>();
+    if (rootId) ancestorSet.add(rootId);
+    let directFolderId = '';
+    for (let i = 0; i < relSegments.length; i++) {
+      const prefixKey = relSegments
+        .slice(0, i + 1)
+        .map(normalizeGasSegmentKey)
+        .join('/');
+      const matchedId = folderIdByRelPath.get(prefixKey);
+      if (matchedId) {
+        ancestorSet.add(matchedId);
+        directFolderId = matchedId;
+      }
+    }
+    const existingParents = Array.isArray(f.parents) ? f.parents.filter(Boolean) : [];
+    for (const pid of existingParents) {
+      ancestorSet.add(pid);
+      const pf = folderById.get(pid);
+      if (pf && pf.fullPath) {
+        const pfSegs = pf.fullPath.split('/').map((s) => s.trim()).filter(Boolean);
+        const pfRel =
+          pfSegs.length > 0 && normalizeGasSegmentKey(pfSegs[0]) === rootNameKey
+            ? pfSegs.slice(1)
+            : pfSegs;
+        for (let i = 0; i < pfRel.length; i++) {
+          const pKey = pfRel
+            .slice(0, i + 1)
+            .map(normalizeGasSegmentKey)
+            .join('/');
+          const mId = folderIdByRelPath.get(pKey);
+          if (mId) ancestorSet.add(mId);
+        }
+      }
+    }
+
+    const resolvedParents =
+      existingParents.length > 0
+        ? existingParents
+        : directFolderId
+          ? [directFolderId]
+          : rootId
+            ? [rootId]
+            : [];
+
+    // Canonical top-level module category (e.g. 'Lei Seca', 'PDFs Pessoais', 'Provas e Gabaritos', etc.)
+    const topRelSeg = relSegments[0] || '';
+    const canonicalSubfolder = topRelSeg
+      ? GAS_CANONICAL_SUBFOLDER_LOOKUP.get(normalizeGasSegmentKey(topRelSeg)) || topRelSeg
+      : undefined;
+
+    const fullFolderPath =
+      relSegments.length > 0 ? `${rootName}/${relSegments.join('/')}` : rootName;
+
+    return enrichDriveFileWithSyncTag({
+      ...f,
+      parents: resolvedParents,
+      ancestorFolderIds: Array.from(ancestorSet),
+      isInStudyFolder: true,
+      isInActiveFolder: true,
+      subfolderName: canonicalSubfolder,
+      folderPath: fullFolderPath,
+    });
+  });
+}
+
 export async function listAllStudyFilesInDrive(
   token?: string,
   prefetchedGraph?: DriveFolderGraphResult,
 ): Promise<DriveFileInfo[]> {
   if (isGasSessionActive()) {
     const res = await gasListFiles();
-    return res.files.map((f) =>
-      enrichDriveFileWithSyncTag({
-        ...f,
-        isInStudyFolder: true,
-        isInActiveFolder: true,
-        subfolderName: (f as any).folderName || f.subfolderName,
-        folderPath: (f as any).folderName || f.folderPath || res.folderName,
-      }),
-    );
+    return enrichGasListedDriveFiles(res);
   }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -1997,19 +2107,37 @@ export async function listAllStudyFilesInDrive(
 export async function listDriveFoldersOverview(token?: string): Promise<DriveFolderSummary[]> {
   if (isGasSessionActive()) {
     const res = await gasListFiles();
+    const enrichedFiles = enrichGasListedDriveFiles(res);
+    const isStudyCandidateFile = (f: DriveFileInfo) =>
+      f.mimeType === 'application/pdf' ||
+      f.mimeType === 'application/vnd.google-apps.document' ||
+      f.mimeType.startsWith('text/') ||
+      /\.(pdf|txt|docx?|md)$/i.test(f.name);
+    const rootName = String(res.folderName || DRIVE_FOLDER_NAME).trim() || DRIVE_FOLDER_NAME;
+    const rootNameKey = normalizeGasSegmentKey(rootName);
+
     return res.folders.map((folder) => {
-      const folderFiles = res.files.filter(
-        (f) => f.parents?.includes(folder.id) || (f as any).folderName === folder.fullPath,
+      const isRoot = folder.id === res.folderId;
+      const folderFiles = enrichedFiles.filter((f) =>
+        isRoot
+          ? f.parents?.includes(folder.id) || f.ancestorFolderIds?.includes(folder.id)
+          : f.parents?.includes(folder.id) || f.ancestorFolderIds?.includes(folder.id),
       );
+      const rawFull = String(folder.fullPath || folder.name || '').trim();
+      const segs = rawFull.split('/').map((s) => s.trim()).filter(Boolean);
+      const displayFullPath =
+        isRoot || (segs.length > 0 && normalizeGasSegmentKey(segs[0]) === rootNameKey)
+          ? rawFull || rootName
+          : `${rootName}/${rawFull}`;
       return {
         id: folder.id,
         name: folder.name,
-        fullPath: folder.fullPath || folder.name,
+        fullPath: displayFullPath,
         webViewLink: folder.webViewLink,
-        isStudyRoot: folder.id === res.folderId,
+        isStudyRoot: isRoot,
         isInsideStudyRoot: true,
         fileCount: folderFiles.length,
-        studyFileCount: folderFiles.length,
+        studyFileCount: folderFiles.filter((f) => f.subfolderName !== 'Backups' && isStudyCandidateFile(f)).length,
         files: folderFiles,
       };
     });
@@ -2163,14 +2291,16 @@ async function decodeDriveSnapshotJson(parsed: any): Promise<any> {
 export async function saveCloudSyncSnapshot(
   payload: unknown,
   token?: string,
-  options?: { force?: boolean },
+  options?: { force?: boolean; expectedContentHash?: string | null; baseVersion?: number },
 ): Promise<DriveFileInfo> {
   if (isGasSessionActive()) {
     const payloadObj =
       payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
     const res = await gasPushState(payload, {
       force: options?.force,
+      baseVersion: options?.baseVersion,
       contentHash: String(payloadObj?.contentHash || ''),
+      expectedContentHash: options?.expectedContentHash,
     });
     if (!res.ok) {
       if (res.code === 'VERSION_CONFLICT') {
@@ -2182,14 +2312,27 @@ export async function saveCloudSyncSnapshot(
           conflictId?: string;
           serverVersion?: number;
           remoteUpdatedAt?: string | null;
+          remoteContentHash?: string;
+          remoteDevice?: string | null;
           remoteSummary?: unknown;
         };
         err.code = 'VERSION_CONFLICT';
         err.conflictId = res.conflictId;
         err.serverVersion = res.serverVersion;
         err.remoteUpdatedAt = res.remoteUpdatedAt;
+        err.remoteContentHash = res.remoteContentHash;
+        err.remoteDevice = res.remoteDevice;
         err.remoteSummary = res.remoteSummary;
         throw err;
+      }
+      if (res.queued) {
+        const queuedErr = new Error(
+          res.error || 'Alteração armazenada na fila local para reenvio automático.',
+        ) as Error & { queued?: boolean; queueId?: string; code?: string };
+        queuedErr.queued = true;
+        queuedErr.queueId = res.queueId;
+        queuedErr.code = res.code || 'QUEUED_RETRY';
+        throw queuedErr;
       }
       throw new Error(res.error || 'Falha ao sincronizar estado com Google Apps Script.');
     }
@@ -2305,6 +2448,15 @@ export async function saveDatabaseBackupToDrive(
 ): Promise<DriveFileInfo> {
   if (isGasSessionActive()) {
     const res = await gasCreateBackup(dbSnapshot);
+    if (res.queued) {
+      const queuedErr = new Error(
+        res.error || 'Backup armazenado na fila local para reenvio automático.',
+      ) as Error & { queued?: boolean; queueId?: string; code?: string };
+      queuedErr.queued = true;
+      queuedErr.queueId = res.queueId;
+      queuedErr.code = 'QUEUED_RETRY';
+      throw queuedErr;
+    }
     if (!res.ok || !res.file) {
       throw new Error(res.error || 'Falha ao salvar backup via Google Apps Script.');
     }
@@ -2333,14 +2485,20 @@ export async function listDatabaseBackupsFromDrive(
 ): Promise<DriveFileInfo[]> {
   if (isGasSessionActive()) {
     const files = await gasListBackups();
-    return files.map((f) =>
-      enrichDriveFileWithSyncTag({
+    const gasRootId = getGasSession()?.folderId || '';
+    const gasRootName = getGasSession()?.folderName || DRIVE_FOLDER_NAME;
+    return files.map((f) => {
+      const ancestors = new Set<string>(Array.isArray(f.parents) ? f.parents.filter(Boolean) : []);
+      if (gasRootId) ancestors.add(gasRootId);
+      return enrichDriveFileWithSyncTag({
         ...f,
+        ancestorFolderIds: Array.from(ancestors),
         isInStudyFolder: true,
         isInActiveFolder: true,
-        folderPath: 'Backups',
-      }),
-    );
+        subfolderName: 'Backups',
+        folderPath: `${gasRootName}/Backups`,
+      });
+    });
   }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
@@ -3900,6 +4058,14 @@ export async function savePostItFileToDrive(
 ): Promise<DriveFileInfo> {
   if (isGasSessionActive()) {
     const res = await gasSavePostIt(content, { force: true });
+    if (res.queued) {
+      return enrichDriveFileWithSyncTag({
+        id: knownFileId || 'gas_postit_queued',
+        name: POST_IT_FILENAME,
+        mimeType: 'text/plain',
+        modifiedTime: new Date().toISOString(),
+      });
+    }
     if (!res.ok) {
       throw new Error(res.error || 'Falha ao salvar Post-it.txt via Google Apps Script.');
     }

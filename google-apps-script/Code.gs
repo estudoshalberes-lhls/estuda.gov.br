@@ -34,6 +34,8 @@ var CONFIG = {
   // Arquivos canônicos no Google Drive
   SYNC_FILENAME: 'central_estudos_sync_latest.json',
   POST_IT_FILENAME: 'Post-it.txt',
+  AUDIT_LOG_FILENAME: '_sync_audit_log.json',
+  MAX_AUDIT_LOG_ENTRIES: 250,
 
   // Controle de sessão e backups rotativos
   SESSION_TTL_DAYS: 30,
@@ -130,65 +132,286 @@ function doPost(e) {
       });
     }
 
-    switch (action) {
-      case 'logout':
-        return handleLogout_(body, authResult.username);
-      case 'changePassword':
-        return handleChangePassword_(body, authResult.username);
-      case 'pullState':
-        return handlePullState_(body, authResult.username);
-      case 'inspectVersion':
-        return handleInspectVersion_();
-      case 'pushState':
-        return handlePushState_(body, authResult.username);
-      case 'createBackup':
-        return handleCreateBackup_(body, authResult.username);
-      case 'listBackups':
-        return handleListBackups_();
-      case 'downloadBackup':
-        return handleDownloadBackup_(body);
-      case 'deleteBackup':
-        return handleDeleteBackup_(body, authResult.username);
-      case 'pruneBackups':
-        return handlePruneBackups_(body, authResult.username);
-      case 'uploadFile':
-        return handleUploadFile_(body, authResult.username);
-      case 'uploadFileChunk':
-        return handleUploadFileChunk_(body);
-      case 'finalizeChunkedUpload':
-        return handleFinalizeChunkedUpload_(body, authResult.username);
-      case 'listFiles':
-        return handleListFiles_();
-      case 'downloadFile':
-        return handleDownloadFile_(body);
-      case 'deleteFile':
-        return handleDeleteFile_(body, authResult.username);
-      case 'readPostIt':
-        return handleReadPostIt_();
-      case 'savePostIt':
-        return handleSavePostIt_(body, authResult.username);
-      case 'setStudyFolder':
-        return handleSetStudyFolder_(body, authResult.username);
-      case 'listConflicts':
-        return handleListConflicts_();
-      case 'resolveConflict':
-        return handleResolveConflict_(body, authResult.username);
-      case 'setupDailyBackupTrigger':
-        return handleSetupDailyBackupTrigger_(authResult.username);
-      default:
-        return jsonResponse_({
-          ok: false,
-          code: 'UNKNOWN_ACTION',
-          error: 'Ação não reconhecida: ' + action,
-        });
+    var startedAtMs = Date.now();
+    var deviceId = String(body.deviceId || 'web').trim();
+    var output = dispatchAuthenticatedAction_(action, body, authResult.username);
+
+    // Registra log estruturado de auditoria (Leitura/Escrita + Sucesso/Falha) no Google Drive
+    if (shouldRecordSyncAudit_(action)) {
+      recordAuditFromOutput_(action, authResult.username, deviceId, output, Date.now() - startedAtMs);
     }
+
+    return output;
   } catch (err) {
+    var errMsg = String(err && err.message ? err.message : err);
+    if (shouldRecordSyncAudit_(action)) {
+      appendSyncAuditEntry_({
+        action: action,
+        status: 'FAILURE',
+        reason: errMsg,
+        username: String(body.username || ''),
+        deviceId: String(body.deviceId || 'web'),
+        durationMs: 0,
+      });
+    }
     return jsonResponse_({
       ok: false,
       code: 'SERVER_ERROR',
-      error: String(err && err.message ? err.message : err),
+      error: errMsg,
     });
   }
+}
+
+function dispatchAuthenticatedAction_(action, body, username) {
+  switch (action) {
+    case 'logout':
+      return handleLogout_(body, username);
+    case 'changePassword':
+      return handleChangePassword_(body, username);
+    case 'pullState':
+      return handlePullState_(body, username);
+    case 'inspectVersion':
+      return handleInspectVersion_();
+    case 'pushState':
+      return handlePushState_(body, username);
+    case 'createBackup':
+      return handleCreateBackup_(body, username);
+    case 'listBackups':
+      return handleListBackups_();
+    case 'downloadBackup':
+      return handleDownloadBackup_(body);
+    case 'deleteBackup':
+      return handleDeleteBackup_(body, username);
+    case 'pruneBackups':
+      return handlePruneBackups_(body, username);
+    case 'uploadFile':
+      return handleUploadFile_(body, username);
+    case 'uploadFileChunk':
+      return handleUploadFileChunk_(body);
+    case 'finalizeChunkedUpload':
+      return handleFinalizeChunkedUpload_(body, username);
+    case 'listFiles':
+      return handleListFiles_();
+    case 'downloadFile':
+      return handleDownloadFile_(body);
+    case 'deleteFile':
+      return handleDeleteFile_(body, username);
+    case 'readPostIt':
+      return handleReadPostIt_();
+    case 'savePostIt':
+      return handleSavePostIt_(body, username);
+    case 'setStudyFolder':
+      return handleSetStudyFolder_(body, username);
+    case 'listConflicts':
+      return handleListConflicts_();
+    case 'resolveConflict':
+      return handleResolveConflict_(body, username);
+    case 'listAuditLogs':
+      return handleListAuditLogs_(body);
+    case 'setupDailyBackupTrigger':
+      return handleSetupDailyBackupTrigger_(username);
+    default:
+      return jsonResponse_({
+        ok: false,
+        code: 'UNKNOWN_ACTION',
+        error: 'Ação não reconhecida: ' + action,
+      });
+  }
+}
+
+function shouldRecordSyncAudit_(action) {
+  return action !== 'ping' && action !== 'listAuditLogs' && action !== 'uploadFileChunk';
+}
+
+function classifyAuditAction_(action) {
+  var readMap = {
+    pullState: 'Leitura do estado principal',
+    inspectVersion: 'Verificação de versão remota',
+    listFiles: 'Listagem de arquivos do Drive',
+    listBackups: 'Listagem de backups',
+    downloadFile: 'Download de arquivo do Drive',
+    downloadBackup: 'Download de backup JSON',
+    readPostIt: 'Leitura do Post-it.txt',
+    listConflicts: 'Consulta de histórico de conflitos',
+    login: 'Autenticação de sessão',
+  };
+  var writeMap = {
+    pushState: 'Salvamento do banco na nuvem',
+    createBackup: 'Criação de snapshot de backup',
+    deleteBackup: 'Exclusão de backup',
+    pruneBackups: 'Limpeza de backups antigos',
+    uploadFile: 'Envio de arquivo ao Drive',
+    finalizeChunkedUpload: 'Envio de arquivo grande (em partes)',
+    deleteFile: 'Exclusão de arquivo no Drive',
+    savePostIt: 'Salvamento do Post-it.txt',
+    setStudyFolder: 'Alteração da pasta padrão do Drive',
+    resolveConflict: 'Resolução de conflito de versão',
+    setupDailyBackupTrigger: 'Ativação de backup diário',
+    logout: 'Encerramento de sessão',
+    changePassword: 'Alteração de senha',
+  };
+  if (readMap[action]) return { operationType: 'READ', actionLabel: readMap[action] };
+  if (writeMap[action]) return { operationType: 'WRITE', actionLabel: writeMap[action] };
+  return { operationType: 'WRITE', actionLabel: String(action || 'Operação') };
+}
+
+function recordAuditFromOutput_(action, username, deviceId, textOutput, durationMs) {
+  try {
+    var parsed = JSON.parse(textOutput.getContent());
+    var isOk = Boolean(parsed && parsed.ok);
+    var reason = isOk
+      ? buildAuditSuccessReason_(action, parsed)
+      : String((parsed && (parsed.error || parsed.code)) || 'Operação recusada pelo servidor');
+    appendSyncAuditEntry_({
+      action: action,
+      status: isOk ? 'SUCCESS' : 'FAILURE',
+      reason: reason,
+      details: parsed && parsed.code ? 'Código: ' + parsed.code : '',
+      username: username,
+      deviceId: deviceId,
+      serverVersion: typeof (parsed && parsed.serverVersion) === 'number' ? parsed.serverVersion : null,
+      durationMs: durationMs,
+    });
+  } catch (e) {
+    // Nunca interrompe resposta principal
+  }
+}
+
+function buildAuditSuccessReason_(action, parsed) {
+  if (action === 'pushState' && typeof parsed.serverVersion === 'number') {
+    return 'Estado salvo na nuvem (versão v' + parsed.serverVersion + ')';
+  }
+  if (action === 'pullState') {
+    return parsed.payload
+      ? 'Estado carregado do Drive (versão v' + (parsed.serverVersion || 0) + ')'
+      : 'Pasta verificada (sem snapshot prévio)';
+  }
+  if (action === 'listFiles' && parsed.files) {
+    return parsed.files.length + ' arquivo(s) listado(s) no Drive' + (parsed.truncated ? ' (parcial)' : '');
+  }
+  if (action === 'uploadFile' || action === 'finalizeChunkedUpload') {
+    return 'Arquivo salvo: ' + ((parsed.file && parsed.file.name) || 'arquivo');
+  }
+  if (action === 'createBackup') {
+    return 'Backup criado: ' + ((parsed.file && parsed.file.name) || 'snapshot');
+  }
+  return 'Operação concluída com sucesso';
+}
+
+function appendSyncAuditEntry_(input) {
+  try {
+    var folder = getOrCreateRootFolder_();
+    var backupsFolder = getOrCreateSubfolder_(folder, 'Backups');
+    var meta = classifyAuditAction_(input.action);
+    var entry = {
+      id: Utilities.getUuid(),
+      timestamp: new Date().toISOString(),
+      operationType: meta.operationType,
+      action: String(input.action || ''),
+      actionLabel: meta.actionLabel,
+      status: input.status === 'FAILURE' ? 'FAILURE' : 'SUCCESS',
+      reason: String(input.reason || '').slice(0, 400),
+      details: String(input.details || '').slice(0, 400),
+      username: String(input.username || ''),
+      deviceId: String(input.deviceId || 'web'),
+      serverVersion: typeof input.serverVersion === 'number' ? input.serverVersion : null,
+      durationMs: typeof input.durationMs === 'number' ? Math.round(input.durationMs) : null,
+      source: 'drive-script',
+    };
+
+    var existingFile = findLatestFileByName_(backupsFolder, CONFIG.AUDIT_LOG_FILENAME);
+    var entries = [];
+    if (existingFile) {
+      try {
+        var parsed = JSON.parse(existingFile.getBlob().getDataAsString('UTF-8'));
+        if (parsed && Array.isArray(parsed.logs)) {
+          entries = parsed.logs;
+        } else if (Array.isArray(parsed)) {
+          entries = parsed;
+        }
+      } catch (parseErr) {
+        entries = [];
+      }
+    }
+
+    entries.unshift(entry);
+    if (entries.length > CONFIG.MAX_AUDIT_LOG_ENTRIES) {
+      entries = entries.slice(0, CONFIG.MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    var doc = {
+      version: 1,
+      updatedAt: entry.timestamp,
+      total: entries.length,
+      logs: entries,
+    };
+    upsertTextFile_(backupsFolder, CONFIG.AUDIT_LOG_FILENAME, JSON.stringify(doc), 'application/json');
+  } catch (e) {
+    // Log de auditoria nunca derruba operação principal
+  }
+}
+
+function handleListAuditLogs_(body) {
+  var limit = Math.max(10, Math.min(250, Number((body && body.limit) || 150)));
+  var folder = getOrCreateRootFolder_();
+  var backupsFolder = getOrCreateSubfolder_(folder, 'Backups');
+  var auditFile = findLatestFileByName_(backupsFolder, CONFIG.AUDIT_LOG_FILENAME);
+  var logs = [];
+  var source = 'drive-json';
+  var fileId = null;
+  var updatedAt = null;
+
+  if (auditFile) {
+    fileId = auditFile.getId();
+    updatedAt = auditFile.getLastUpdated().toISOString();
+    try {
+      var parsed = JSON.parse(auditFile.getBlob().getDataAsString('UTF-8'));
+      var arr = parsed && Array.isArray(parsed.logs) ? parsed.logs : Array.isArray(parsed) ? parsed : [];
+      logs = arr.slice(0, limit);
+    } catch (e) {
+      logs = [];
+    }
+  }
+
+  // Fallback/complemento com tb_logs_acesso caso o arquivo JSON ainda esteja vazio
+  if (logs.length === 0) {
+    try {
+      var ss = ensureHiddenSpreadsheet_(folder);
+      var sheet = ss.getSheetByName('tb_logs_acesso');
+      if (sheet && sheet.getLastRow() >= 2) {
+        source = 'sheet';
+        var rows = sheet.getDataRange().getValues();
+        for (var i = rows.length - 1; i >= 1 && logs.length < limit; i--) {
+          var row = rows[i];
+          var act = String(row[4] || '');
+          var meta = classifyAuditAction_(act);
+          var rawStatus = String(row[5] || 'OK').toUpperCase();
+          logs.push({
+            id: String(row[0] || Utilities.getUuid()),
+            timestamp: String(row[1] || ''),
+            operationType: meta.operationType,
+            action: act,
+            actionLabel: meta.actionLabel,
+            status: rawStatus === 'OK' || rawStatus === 'SUCCESS' ? 'SUCCESS' : 'FAILURE',
+            reason: String(row[6] || (rawStatus === 'OK' ? 'Operação concluída' : 'Falha registrada')),
+            username: String(row[2] || ''),
+            deviceId: String(row[3] || 'web'),
+            source: 'drive-script',
+          });
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  return jsonResponse_({
+    ok: true,
+    logs: logs,
+    source: source,
+    fileId: fileId,
+    updatedAt: updatedAt,
+  });
 }
 
 // ============================================================================
@@ -825,21 +1048,64 @@ function upsertTextFile_(folder, filename, content, mimeType) {
   return folder.createFile(filename, content, mimeType || MimeType.PLAIN_TEXT);
 }
 
+function readLatestControlSheetState_(rootFolder) {
+  try {
+    var ss = ensureHiddenSpreadsheet_(rootFolder);
+    var sheet = ss.getSheetByName('tb_estado');
+    if (!sheet) return null;
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return null;
+    var row = sheet.getRange(lastRow, 1, 1, 11).getValues()[0];
+    return {
+      rowId: String(row[0] || ''),
+      version: Number(row[1] || 0),
+      updatedAt: row[2] ? String(row[2]) : null,
+      contentHash: String(row[3] || '').trim(),
+      deviceId: String(row[4] || '').trim(),
+      syncFileId: String(row[5] || '').trim(),
+      summary: {
+        laws: Number(row[6] || 0),
+        scheduleTopics: Number(row[7] || 0),
+        questions: Number(row[8] || 0),
+        annotations: Number(row[9] || 0),
+        pdfs: Number(row[10] || 0),
+      },
+    };
+  } catch (e) {
+    return null;
+  }
+}
+
 function readCanonicalState_(rootFolder) {
   var props = PropertiesService.getScriptProperties();
   var serverVersion = Number(props.getProperty(PROP_KEYS.SERVER_VERSION) || '0');
+  var controlRow = readLatestControlSheetState_(rootFolder);
+  if (controlRow && controlRow.version > serverVersion) {
+    serverVersion = controlRow.version;
+    props.setProperty(PROP_KEYS.SERVER_VERSION, String(serverVersion));
+  }
+
   var backupsFolder = getOrCreateSubfolder_(rootFolder, 'Backups');
   var syncFile = findLatestFileByName_(backupsFolder, CONFIG.SYNC_FILENAME);
 
   if (!syncFile) {
     return {
       serverVersion: serverVersion,
-      updatedAt: props.getProperty(PROP_KEYS.LAST_UPDATED_AT) || null,
-      contentHash: props.getProperty(PROP_KEYS.LAST_CONTENT_HASH) || '',
+      updatedAt: (controlRow && controlRow.updatedAt) || props.getProperty(PROP_KEYS.LAST_UPDATED_AT) || null,
+      contentHash:
+        (controlRow && controlRow.contentHash) || props.getProperty(PROP_KEYS.LAST_CONTENT_HASH) || '',
+      savedByDevice: (controlRow && controlRow.deviceId) || '',
+      controlSheet: controlRow,
       fileId: null,
       fileName: CONFIG.SYNC_FILENAME,
       payload: null,
-      summary: { laws: 0, scheduleTopics: 0, questions: 0, annotations: 0, pdfs: 0 },
+      summary: (controlRow && controlRow.summary) || {
+        laws: 0,
+        scheduleTopics: 0,
+        questions: 0,
+        annotations: 0,
+        pdfs: 0,
+      },
     };
   }
 
@@ -852,9 +1118,16 @@ function readCanonicalState_(rootFolder) {
   }
 
   var updatedAt =
+    (controlRow && controlRow.version >= serverVersion && controlRow.updatedAt) ||
     (parsed && (parsed.updatedAt || parsed.exportedAt)) ||
     syncFile.getLastUpdated().toISOString();
-  var contentHash = (parsed && parsed.contentHash) || props.getProperty(PROP_KEYS.LAST_CONTENT_HASH) || '';
+  var contentHash =
+    (controlRow && controlRow.version >= serverVersion && controlRow.contentHash) ||
+    (parsed && parsed.contentHash) ||
+    props.getProperty(PROP_KEYS.LAST_CONTENT_HASH) ||
+    '';
+  var savedByDevice =
+    (controlRow && controlRow.deviceId) || (parsed && parsed.savedByDevice) || '';
   var fileVersion = Number((parsed && parsed.serverVersion) || serverVersion || 1);
   if (fileVersion > serverVersion) {
     serverVersion = fileVersion;
@@ -865,6 +1138,8 @@ function readCanonicalState_(rootFolder) {
     serverVersion: serverVersion,
     updatedAt: updatedAt,
     contentHash: contentHash,
+    savedByDevice: savedByDevice,
+    controlSheet: controlRow,
     fileId: syncFile.getId(),
     fileName: syncFile.getName(),
     payload: parsed,
@@ -949,6 +1224,9 @@ function handlePullState_(body, username) {
     serverVersion: stateInfo.serverVersion,
     updatedAt: stateInfo.updatedAt,
     contentHash: stateInfo.contentHash,
+    savedByDevice: stateInfo.savedByDevice || '',
+    controlSheetVersion: stateInfo.controlSheet ? stateInfo.controlSheet.version : stateInfo.serverVersion,
+    controlSheetHash: stateInfo.controlSheet ? stateInfo.controlSheet.contentHash : stateInfo.contentHash,
     fileId: stateInfo.fileId,
     fileName: stateInfo.fileName,
     payload: stateInfo.payload,
@@ -960,15 +1238,22 @@ function handlePullState_(body, username) {
 function handleInspectVersion_() {
   var folder = getOrCreateRootFolder_();
   var stateInfo = readCanonicalState_(folder);
+  var cs = stateInfo.controlSheet;
   return jsonResponse_({
     ok: true,
     serverVersion: stateInfo.serverVersion,
     updatedAt: stateInfo.updatedAt,
     contentHash: stateInfo.contentHash,
+    savedByDevice: stateInfo.savedByDevice || '',
+    controlSheetTable: 'tb_estado',
+    controlSheetVersion: cs ? cs.version : stateInfo.serverVersion,
+    controlSheetHash: cs ? cs.contentHash : stateInfo.contentHash,
+    controlSheetDevice: cs ? cs.deviceId : stateInfo.savedByDevice || '',
+    controlSheetUpdatedAt: cs ? cs.updatedAt : stateInfo.updatedAt,
     fileId: stateInfo.fileId,
     fileName: stateInfo.fileName,
     summary: stateInfo.summary,
-    hasRemoteData: Boolean(stateInfo.payload),
+    hasRemoteData: Boolean(stateInfo.payload || (cs && cs.version > 0)),
   });
 }
 
@@ -980,6 +1265,7 @@ function handlePushState_(body, username) {
 
   var force = Boolean(body.force);
   var baseVersion = Number(body.baseVersion || 0);
+  var expectedContentHash = String(body.expectedContentHash || '').trim();
   var deviceId = String(body.deviceId || 'web').trim();
 
   var lock = LockService.getScriptLock();
@@ -990,13 +1276,39 @@ function handlePushState_(body, username) {
     var props = PropertiesService.getScriptProperties();
     var currentState = readCanonicalState_(folder);
     var currentVersion = currentState.serverVersion || 0;
+    var currentHash = String(
+      (currentState.controlSheet && currentState.controlSheet.contentHash) || currentState.contentHash || '',
+    ).trim();
+    var incomingHash = String(payload.contentHash || body.contentHash || '').trim();
 
-    // Trava otimista: se outro dispositivo gravou uma versão mais nova e não é force, bloqueia sobrescrita!
-    if (!force && currentVersion > 0 && baseVersion > 0 && currentVersion > baseVersion) {
+    // Trava de Sincronização Ativa: valida versão e checksum contra a planilha de controle (tb_estado)
+    // antes de gravar, evitando sobrescrita acidental quando outro dispositivo gravou mais recentemente.
+    var versionMismatch =
+      currentVersion > 0 &&
+      ((baseVersion > 0 && currentVersion > baseVersion) ||
+        (baseVersion === 0 && currentHash && expectedContentHash !== currentHash && incomingHash !== currentHash));
+    var checksumMismatch = Boolean(
+      expectedContentHash && currentHash && expectedContentHash !== currentHash,
+    );
+
+    if (!force && (versionMismatch || checksumMismatch)) {
+      var conflictReason = checksumMismatch
+        ? 'Checksum divergente na planilha de controle (tb_estado): esperado ' +
+          expectedContentHash.slice(0, 12) +
+          ', remoto ' +
+          currentHash.slice(0, 12) +
+          ' (v' +
+          currentVersion +
+          ').'
+        : 'Outro dispositivo salvou a versão v' +
+          currentVersion +
+          ' enquanto este aparelho estava na v' +
+          baseVersion +
+          '.';
       var conflictId = recordConflictRow_(
         deviceId,
         'pushState',
-        'Outro dispositivo salvou a versão v' + currentVersion + ' enquanto este aparelho estava na v' + baseVersion + '.',
+        conflictReason,
         baseVersion,
         currentVersion,
       );
@@ -1005,19 +1317,20 @@ function handlePushState_(body, username) {
         code: 'VERSION_CONFLICT',
         conflictId: conflictId,
         error:
-          'DRIVE_CONFLICT_NEWER_REMOTE: Outro dispositivo salvou uma versão mais recente (v' +
-          currentVersion +
-          ') no Google Drive.',
+          'DRIVE_CONFLICT_NEWER_REMOTE: ' + conflictReason,
         serverVersion: currentVersion,
         remoteUpdatedAt: currentState.updatedAt,
-        remoteContentHash: currentState.contentHash,
+        remoteContentHash: currentHash,
+        remoteDevice: currentState.savedByDevice || '',
+        controlSheetVersion: currentState.controlSheet ? currentState.controlSheet.version : currentVersion,
+        controlSheetHash: currentHash,
         remoteSummary: currentState.summary,
       });
     }
 
     var nowIso = new Date().toISOString();
     var nextVersion = currentVersion + 1;
-    var contentHash = String(payload.contentHash || body.contentHash || '');
+    var contentHash = incomingHash;
 
     var wrappedPayload = Object.assign({}, payload, {
       serverVersion: nextVersion,
@@ -1051,6 +1364,7 @@ function handlePushState_(body, username) {
       serverVersion: nextVersion,
       updatedAt: nowIso,
       contentHash: contentHash,
+      savedByDevice: deviceId,
       summary: summary,
       file: serializeDriveFile_(syncFile, 'Backups'),
     });
@@ -1099,7 +1413,7 @@ function pruneRotatingBackupsInternal_(backupsFolder, maxKeep) {
     var f = iter.next();
     if (f.isTrashed()) continue;
     var name = f.getName();
-    if (name === CONFIG.SYNC_FILENAME || name === CONFIG.HIDDEN_SHEET_NAME) continue;
+    if (name === CONFIG.SYNC_FILENAME || name === CONFIG.HIDDEN_SHEET_NAME || name === CONFIG.AUDIT_LOG_FILENAME) continue;
     if (name.toLowerCase().indexOf('.json') === name.length - 5) {
       list.push(f);
     }
@@ -1200,15 +1514,19 @@ function handlePruneBackups_(body, username) {
 // ARQUIVOS (PDFs, PROVAS, LEIS, RESUMOS — COM SUPORTE A CHUNKS PARA PDFs GRANDES)
 // ============================================================================
 
-function serializeDriveFile_(file, subfolderName) {
+function serializeDriveFile_(file, subfolderName, knownParentId) {
   var parents = [];
-  try {
-    var pIter = file.getParents();
-    while (pIter.hasNext()) {
-      parents.push(pIter.next().getId());
+  if (knownParentId) {
+    parents.push(knownParentId);
+  } else {
+    try {
+      var pIter = file.getParents();
+      while (pIter.hasNext()) {
+        parents.push(pIter.next().getId());
+      }
+    } catch (e) {
+      // ignore
     }
-  } catch (e) {
-    // ignore
   }
   return {
     id: file.getId(),
@@ -1362,33 +1680,50 @@ function handleFinalizeChunkedUpload_(body, username) {
   }
 }
 
-function collectFilesRecursive_(folder, pathPrefix, outFiles, outFolders) {
+function collectFilesRecursive_(folder, pathPrefix, outFiles, outFolders, parentFolderId, deadlineMs, state) {
+  if (deadlineMs && Date.now() >= deadlineMs) {
+    if (state) state.truncated = true;
+    return;
+  }
+
+  var folderId = folder.getId();
+  var folderName = folder.getName();
   var fIter = folder.getFiles();
   var fileCount = 0;
   while (fIter.hasNext()) {
+    if (deadlineMs && Date.now() >= deadlineMs) {
+      if (state) state.truncated = true;
+      break;
+    }
     var f = fIter.next();
     if (f.isTrashed()) continue;
     var name = f.getName();
-    if (name === CONFIG.HIDDEN_SHEET_NAME) continue;
+    if (name === CONFIG.HIDDEN_SHEET_NAME || name === CONFIG.AUDIT_LOG_FILENAME) continue;
     fileCount++;
-    outFiles.push(serializeDriveFile_(f, pathPrefix || folder.getName()));
+    outFiles.push(serializeDriveFile_(f, pathPrefix || folderName, folderId));
   }
 
   outFolders.push({
-    id: folder.getId(),
-    name: folder.getName(),
-    fullPath: pathPrefix || folder.getName(),
+    id: folderId,
+    name: folderName,
+    parentId: parentFolderId || '',
+    fullPath: pathPrefix || folderName,
     fileCount: fileCount,
     webViewLink: folder.getUrl(),
   });
 
   var subIter = folder.getFolders();
   while (subIter.hasNext()) {
+    if (deadlineMs && Date.now() >= deadlineMs) {
+      if (state) state.truncated = true;
+      break;
+    }
     var sub = subIter.next();
     if (sub.isTrashed()) continue;
-    if (sub.getName() === '_tmp_chunks') continue;
-    var nextPath = pathPrefix ? pathPrefix + '/' + sub.getName() : sub.getName();
-    collectFilesRecursive_(sub, nextPath, outFiles, outFolders);
+    var subName = sub.getName();
+    if (subName === '_tmp_chunks') continue;
+    var nextPath = pathPrefix ? pathPrefix + '/' + subName : subName;
+    collectFilesRecursive_(sub, nextPath, outFiles, outFolders, folderId, deadlineMs, state);
   }
 }
 
@@ -1396,7 +1731,9 @@ function handleListFiles_() {
   var rootFolder = getOrCreateRootFolder_();
   var files = [];
   var folders = [];
-  collectFilesRecursive_(rootFolder, '', files, folders);
+  var state = { truncated: false };
+  var deadlineMs = Date.now() + 260000;
+  collectFilesRecursive_(rootFolder, '', files, folders, '', deadlineMs, state);
   return jsonResponse_({
     ok: true,
     folderId: rootFolder.getId(),
@@ -1404,6 +1741,7 @@ function handleListFiles_() {
     folderUrl: rootFolder.getUrl(),
     files: files,
     folders: folders,
+    truncated: state.truncated,
   });
 }
 

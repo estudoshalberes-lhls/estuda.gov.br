@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
+  ClipboardList,
   Clock,
   Cloud,
   CloudDownload,
@@ -27,7 +28,10 @@ import { formatUploadSize } from '../lib/parsers';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 import { SyncActivityLogPanel } from '../components/backup/SyncActivityLogPanel';
 import { AppsScriptSetupPanel } from '../components/backup/AppsScriptSetupPanel';
+import { GasConnectionMonitorPanel } from '../components/backup/GasConnectionMonitor';
+import { ActiveSyncPanel } from '../components/backup/ActiveSyncPanel';
 import { ConflictHistoryPanel } from '../components/backup/ConflictHistoryPanel';
+import { SyncAuditPanel } from '../components/backup/SyncAuditPanel';
 
 export const BackupPage: React.FC = () => {
   const {
@@ -72,8 +76,10 @@ export const BackupPage: React.FC = () => {
     createManualRestorePoint,
     restoreFromLocalRestorePoint,
     deleteLocalRestorePointById,
+    gasOperationQueue,
   } = useStudy();
 
+  const [activeBackupTab, setActiveBackupTab] = useState<'overview' | 'audit'>('overview');
   const fileRef = useRef<HTMLInputElement | null>(null);
   const mobileQuickFilesInputRef = useRef<HTMLInputElement | null>(null);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -393,6 +399,47 @@ export const BackupPage: React.FC = () => {
         </article>
       </div>
 
+      {/* Abas da página de Backup */}
+      <div
+        role="tablist"
+        aria-label="Seções de Backup e Auditoria"
+        className="flex flex-wrap items-center gap-1 p-1 mb-4 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] w-fit max-w-full"
+      >
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeBackupTab === 'overview'}
+          onClick={() => setActiveBackupTab('overview')}
+          className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            activeBackupTab === 'overview'
+              ? 'bg-[var(--panel-raised)] text-[var(--text)] shadow-xs border border-[var(--line-strong)]'
+              : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+          }`}
+        >
+          <Database className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>Backups e Nuvem</span>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={activeBackupTab === 'audit'}
+          onClick={() => setActiveBackupTab('audit')}
+          className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+            activeBackupTab === 'audit'
+              ? 'bg-[var(--panel-raised)] text-[var(--text)] shadow-xs border border-[var(--line-strong)]'
+              : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
+          }`}
+        >
+          <ClipboardList className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+          <span>Auditoria de Sincronização</span>
+          {gasOperationQueue.length > 0 && (
+            <span className="font-mono-num text-[11px] font-extrabold text-[var(--warning)] ml-1">
+              ({gasOperationQueue.length})
+            </span>
+          )}
+        </button>
+      </div>
+
       <input
         ref={mobileQuickFilesInputRef}
         type="file"
@@ -402,9 +449,17 @@ export const BackupPage: React.FC = () => {
         className="hidden"
       />
 
-      <AppsScriptSetupPanel />
+      {activeBackupTab === 'audit' ? (
+        <SyncAuditPanel />
+      ) : (
+        <>
+          <GasConnectionMonitorPanel />
 
-      <ConflictHistoryPanel />
+          <ActiveSyncPanel />
+
+          <AppsScriptSetupPanel />
+
+          <ConflictHistoryPanel />
 
 
       <Panel
@@ -1323,6 +1378,8 @@ export const BackupPage: React.FC = () => {
           </button>
         </Panel>
       </div>
+        </>
+      )}
     </div>
   );
 };
