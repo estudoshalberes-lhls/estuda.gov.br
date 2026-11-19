@@ -158,7 +158,7 @@ export const PdfAnnotatorViewer: React.FC<PdfAnnotatorViewerProps> = ({
   const bakeTimerRef = useRef<number | null>(null);
   const isBakingRef = useRef(false);
 
-  // Sync incoming Firestore annotation updates when not actively drawing
+  // Sync incoming cloud annotation updates when not actively drawing
   const activeStrokeRef = useRef<{ page: number; points: number[] } | null>(null);
   useEffect(() => {
     if (!persistedAnnotations) return;

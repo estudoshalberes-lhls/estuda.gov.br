@@ -799,7 +799,7 @@ function countByKey<T>(
 }
 
 /**
- * Prevents additive merges (offline_guest -> account, offline -> Firestore/Drive, Drive TXT -> DB)
+ * Prevents additive merges (offline_guest -> account, offline -> Drive/Apps Script, Drive TXT -> DB)
  * from resurrecting items in `incompleteGoals`, `schedule`, or `weeklySchedules` that were already
  * finalized into `completedGoals` or archived from `schedule` into `incompleteGoals`.
  */

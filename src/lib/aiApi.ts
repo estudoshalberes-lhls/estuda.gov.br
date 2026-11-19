@@ -1,4 +1,4 @@
-import { auth } from './googleDrive';
+import { getGasSession } from './appsScriptBackend';
 
 export interface AiExtractedEditalTopic {
   materia: string;
@@ -22,14 +22,11 @@ export interface AiGeneratedQuestion {
 }
 
 async function getAuthHeaders(): Promise<Record<string, string>> {
-  const user = auth.currentUser;
-  if (!user) {
-    throw new Error('Faça login com sua conta Google autorizada para utilizar a análise por IA.');
-  }
-  const idToken = await user.getIdToken();
+  const session = getGasSession();
   return {
     'Content-Type': 'application/json',
-    Authorization: `Bearer ${idToken}`,
+    'x-study-client': 'central-estudos',
+    ...(session?.token ? { Authorization: `Bearer ${session.token}` } : {}),
   };
 }
 

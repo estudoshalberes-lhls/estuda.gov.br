@@ -6,8 +6,6 @@ export type SyncActivityCategory =
   | 'drive-backup'
   | 'drive-upload'
   | 'drive-delete'
-  | 'firebase-sync'
-  | 'firebase-restore'
   | 'oauth';
 
 export type AffectedFileAction =

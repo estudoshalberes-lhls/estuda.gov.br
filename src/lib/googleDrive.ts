@@ -1,15 +1,3 @@
-import { getApp, getApps, initializeApp } from 'firebase/app';
-import {
-  browserLocalPersistence,
-  getAuth,
-  GoogleAuthProvider,
-  onAuthStateChanged,
-  setPersistence,
-  signInWithPopup,
-  signOut,
-  type User,
-} from 'firebase/auth';
-import firebaseConfig from '../../firebase-applet-config.json';
 import { loadDriveJsonCacheEntry, saveDriveJsonCacheEntry } from './fileStorage';
 import { IncrementalBackupEnvelope, isIncrementalBackupPayload } from './incrementalBackup';
 import {
@@ -29,23 +17,19 @@ import {
   isGasSessionActive,
 } from './appsScriptBackend';
 
-export { firebaseConfig };
-export type { User };
-export type GoogleAccountUser = User;
-
-export const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-export const auth = getAuth(firebaseApp);
+export interface GoogleAccountUser {
+  uid: string;
+  email: string | null;
+  displayName: string | null;
+  photoURL?: string | null;
+}
+export type User = GoogleAccountUser;
 
 export const GOOGLE_CLIENT_ID =
   String(import.meta.env.VITE_GOOGLE_CLIENT_ID || '').trim() ||
-  String((firebaseConfig as { oAuthClientId?: string }).oAuthClientId || '').trim() ||
   '848919975785-6uthlnjqh75uodmirv21drrddqs969sv.apps.googleusercontent.com';
 
-// Numeric Google Cloud project number required by Google Picker .setAppId()
-// so selecting files/folders actually grants `drive.file` scope access to this OAuth app.
-export const GOOGLE_APP_ID =
-  String(GOOGLE_CLIENT_ID.split('-')[0] || '').replace(/\D/g, '') ||
-  String((firebaseConfig as { messagingSenderId?: string }).messagingSenderId || '').replace(/\D/g, '');
+export const GOOGLE_APP_ID = String(GOOGLE_CLIENT_ID.split('-')[0] || '').replace(/\D/g, '');
 
 export const DRIVE_FOLDER_NAME = 'Central de Estudos - Materiais';
 export const DEFAULT_STUDY_FOLDER_ID = '';
@@ -87,9 +71,9 @@ export function isDriveScopeConsentNeeded(): boolean {
   }
 }
 
-void setPersistence(auth, browserLocalPersistence).catch(() => {
-  // ignore persistence error in restricted contexts
-});
+function getActiveLocalAccountHint(): string | null {
+  return getGasSession()?.username || readLastGoogleEmail();
+}
 
 function readBlockedDriveFileIds(): Set<string> {
   try {
@@ -214,8 +198,8 @@ function persistDriveAccessToken(
   cachedAccessToken = token;
   cachedAccessTokenExpiresAt = expiresAt;
   lastSilentRefreshFailureAt = 0;
-  const uid = user?.uid || auth.currentUser?.uid || '';
-  const email = user?.email || auth.currentUser?.email || readLastGoogleEmail() || undefined;
+  const uid = user?.uid || getActiveLocalAccountHint() || '';
+  const email = user?.email || getActiveLocalAccountHint() || undefined;
   if (email) rememberLastGoogleEmail(email);
   const payload = JSON.stringify({ token, expiresAt, uid });
   try {
@@ -235,7 +219,7 @@ function restorePersistedDriveAccessToken(user?: User | null): string | null {
   if (cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 60_000)) {
     return cachedAccessToken;
   }
-  const activeUid = user?.uid || auth.currentUser?.uid || '';
+  const activeUid = user?.uid || getActiveLocalAccountHint() || '';
   const readValidFromStorage = (storage: Storage | undefined, key: string): string | null => {
     if (!storage) return null;
     try {
@@ -282,9 +266,7 @@ export interface DriveFolderPreference {
 function resolveAccountPrefScope(accountHint?: string | null): string | null {
   const raw =
     (typeof accountHint === 'string' && accountHint.trim()) ||
-    auth.currentUser?.email?.trim() ||
-    auth.currentUser?.uid?.trim() ||
-    readLastGoogleEmail() ||
+    getActiveLocalAccountHint() ||
     '';
   if (!raw) return null;
   return raw.toLowerCase();
@@ -424,8 +406,9 @@ export function clearAccessTokenOnly(): void {
 }
 
 export function isDriveAccessTokenExpiringSoon(bufferMs = 5 * 60 * 1000): boolean {
+  if (isGasSessionActive()) return false;
   if (!cachedAccessToken) {
-    restorePersistedDriveAccessToken(auth.currentUser);
+    restorePersistedDriveAccessToken(null);
   }
   if (!cachedAccessToken) return true;
   if (!cachedAccessTokenExpiresAt) return false;
@@ -494,31 +477,15 @@ function loadGoogleIdentityServices(): Promise<void> {
   return gsiLoadPromise;
 }
 
-export async function ensureFirebaseSessionAlive(forceRefresh = false): Promise<User | null> {
-  if (!auth.currentUser && typeof auth.authStateReady === 'function') {
-    await auth.authStateReady().catch(() => {});
-  }
-  const user = auth.currentUser;
-  if (!user) return null;
-  try {
-    await user.getIdToken(forceRefresh);
-  } catch {
-    // ignore token refresh failure when offline
-  }
-  return auth.currentUser;
-}
-
 export async function refreshDriveAccessTokenSilently(_options?: {
   email?: string | null;
   force?: boolean;
 }): Promise<string | null> {
+  if (isGasSessionActive()) return 'gas-session-active';
   if (typeof window === 'undefined') return null;
 
-  // Never invoke google.accounts.oauth2.initTokenClient().requestAccessToken() automatically or in background,
-  // because GIS opens a popup directly from the current preview origin and triggers "Erro 400: origin_mismatch"
-  // on dynamic Cloud Run preview URLs, while also consuming the user gesture before Firebase signInWithPopup.
   if (!cachedAccessToken) {
-    restorePersistedDriveAccessToken(auth.currentUser);
+    restorePersistedDriveAccessToken(null);
   }
   if (cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt)) {
     return cachedAccessToken;
@@ -788,7 +755,7 @@ function parseGoogleDriveErrorMessage(rawText: string): string {
 async function tryRefreshDriveTokenAfter401(): Promise<string | null> {
   clearAccessTokenOnly();
   return await refreshDriveAccessTokenSilently({
-    email: auth.currentUser?.email || readLastGoogleEmail(),
+    email: getActiveLocalAccountHint(),
     force: true,
   });
 }
@@ -934,140 +901,29 @@ async function throwDriveResponseError(res: Response, context: string): Promise<
 export function formatGoogleAuthError(error: any): string {
   const code = String(error?.code || error?.type || '');
   const msg = String(error?.message || '');
-
-  if (code === 'auth/unauthorized-domain' || msg.includes('auth/unauthorized-domain')) {
-    const host = typeof window !== 'undefined' ? window.location.hostname : '';
-    return `Domínio "${host}" não autorizado no Firebase Authentication (auth/unauthorized-domain). Adicione este domínio em Authentication → Settings → Authorized domains no Console do Firebase.`;
-  }
-  if (msg.toLowerCase().includes('origin_mismatch') || msg.toLowerCase().includes('redirect_uri_mismatch')) {
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    return `Origem JavaScript "${origin}" não registrada no cliente OAuth 2.0 do Google Cloud (origin_mismatch). Adicione esta URL em Origens JavaScript autorizadas no Google Cloud Console.`;
-  }
-  if (
-    code === 'auth/popup-blocked' ||
-    code === 'popup_failed_to_open' ||
-    msg.includes('popup_failed_to_open') ||
-    msg.includes('popup-blocked')
-  ) {
-    return 'O navegador bloqueou a janela popup de login do Google. Libere pop-ups para este site (ou abra em uma aba comum) e tente novamente.';
-  }
-  if (
-    code === 'auth/popup-closed-by-user' ||
-    code === 'auth/cancelled-popup-request' ||
-    code === 'popup_closed' ||
-    msg.includes('popup_closed') ||
-    msg.includes('popup-closed-by-user')
-  ) {
-    return 'A janela de login do Google foi fechada antes de concluir a autenticação. Tente novamente e selecione sua conta.';
-  }
-  if (code === 'access_denied' || msg.includes('access_denied')) {
-    return 'Autorização recusada na conta Google. Conceda acesso ao Google Drive para sincronizar seus backups.';
-  }
-  if (
-    code === 'auth/network-request-failed' ||
-    msg.includes('network-request-failed') ||
-    msg.includes('Failed to fetch')
-  ) {
-    return 'Falha de rede ao conectar com o Firebase/Google. Verifique sua conexão e tente novamente.';
+  if (msg.includes('Failed to fetch') || code === 'network-error') {
+    return 'Falha de rede ao conectar com o Google Apps Script. Verifique sua conexão e tente novamente.';
   }
   const codeSuffix = code ? ` (${code})` : '';
-  return msg ? `${msg}${codeSuffix}` : `Não foi possível concluir o login com o Google${codeSuffix}.`;
+  return msg ? `${msg}${codeSuffix}` : `Não foi possível concluir a conexão com o Google Drive${codeSuffix}.`;
 }
 
 export const initDriveAuth = (
-  onAuthSuccess?: (user: User, token: string | null) => void,
-  onAuthFailure?: () => void,
+  _onAuthSuccess?: (user: User, token: string | null) => void,
+  _onAuthFailure?: () => void,
 ) => {
-  return onAuthStateChanged(auth, (user) => {
-    if (user) {
-      rememberLastGoogleEmail(user.email);
-      const token = cachedAccessToken || restorePersistedDriveAccessToken(user);
-      notifyDriveTokenListeners();
-      if (onAuthSuccess) {
-        onAuthSuccess(user, token);
-      }
-    } else if (!isSigningIn) {
-      resetDriveCache();
-      if (onAuthFailure) {
-        onAuthFailure();
-      }
-    }
-  });
+  return () => {};
 };
 
-export const googleSignIn = async (options?: {
+export const googleSignIn = async (_options?: {
   loginHint?: string | null;
   forceAccountPicker?: boolean;
   forceConsent?: boolean;
 }): Promise<{ user: User; accessToken: string } | null> => {
-  const hint =
-    (options?.loginHint || (!options?.forceAccountPicker ? auth.currentUser?.email || readLastGoogleEmail() : null) || null)?.trim() ||
-    undefined;
-
-  const provider = new GoogleAuthProvider();
-  DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
-
-  // CRITICAL: Never force `prompt: 'consent'` on routine reconnects!
-  // Forcing `consent` makes Google repeatedly display "A Google não validou esta app"
-  // every single hour even though the user already authorized this app.
-  // Without `prompt: 'consent'`, Google automatically shows consent ONLY on first grant
-  // and skips it cleanly on subsequent reconnects.
-  const customParams: Record<string, string> = {};
-  if (hint) {
-    customParams.login_hint = hint;
-  }
-  if (options?.forceConsent) {
-    customParams.prompt = options?.forceAccountPicker ? 'select_account consent' : 'consent';
-  } else if (options?.forceAccountPicker || !hint) {
-    customParams.prompt = 'select_account';
-  }
-  if (Object.keys(customParams).length > 0) {
-    provider.setCustomParameters(customParams);
-  }
-
-  try {
-    isSigningIn = true;
-    // Call signInWithPopup synchronously on the first tick of the user click gesture
-    // (browserLocalPersistence is already configured at module initialization)
-    const result = await signInWithPopup(auth, provider);
-    const credential = GoogleAuthProvider.credentialFromResult(result);
-    const accessToken =
-      credential?.accessToken ||
-      String((result as any)?._tokenResponse?.oauthAccessToken || '').trim() ||
-      '';
-
-    rememberLastGoogleEmail(result.user.email);
-    if (accessToken) {
-      markDriveScopeConsentNeeded(false);
-      clearDrivePermissionBlockedFiles();
-      const rawExpireSec = Number((result as any)?._tokenResponse?.oauthExpireIn || 0);
-      const ttlMs =
-        Number.isFinite(rawExpireSec) && rawExpireSec >= 600 && rawExpireSec <= 7200
-          ? Math.max(30 * 60 * 1000, (rawExpireSec - 60) * 1000)
-          : DRIVE_TOKEN_DEFAULT_TTL_MS;
-      persistDriveAccessToken(accessToken, Date.now() + ttlMs, result.user);
-    } else {
-      markDriveScopeConsentNeeded(true);
-    }
-
-    cachedFolderId = null;
-    cachedFolderLink = null;
-    for (const key of Object.keys(cachedSubFolderIds)) {
-      delete cachedSubFolderIds[key];
-    }
-
-    return { user: result.user, accessToken };
-  } catch (error: any) {
-    console.error('Erro de login com Firebase Google Auth:', error);
-    const formatted = new Error(formatGoogleAuthError(error)) as Error & { code?: string };
-    formatted.code = error?.code || error?.type;
-    throw formatted;
-  } finally {
-    isSigningIn = false;
-  }
+  return null;
 };
 
-export const getAccessToken = async (options?: {
+export const getAccessToken = async (_options?: {
   allowSilentRefresh?: boolean;
   forceRefresh?: boolean;
   loginHint?: string | null;
@@ -1075,49 +931,12 @@ export const getAccessToken = async (options?: {
   if (isGasSessionActive()) {
     return 'gas-session-active';
   }
-  if (!options?.forceRefresh) {
-    if (!cachedAccessToken && auth.currentUser) {
-      restorePersistedDriveAccessToken(auth.currentUser);
-    }
-    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(45 * 1000)) {
-      return cachedAccessToken;
-    }
-  }
-
-  if (options?.allowSilentRefresh !== false && (auth.currentUser || readLastGoogleEmail())) {
-    const renewed = await refreshDriveAccessTokenSilently({
-      email: options?.loginHint || auth.currentUser?.email,
-      force: options?.forceRefresh,
-    });
-    if (renewed) {
-      return renewed;
-    }
-  }
-
-  if (
-    !options?.forceRefresh &&
-    cachedAccessToken &&
-    (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 15_000)
-  ) {
-    return cachedAccessToken;
-  }
-
   return null;
 };
 
 export const googleSignOut = async (): Promise<void> => {
-  const tokenToRevoke = cachedAccessToken;
   clearRememberedGoogleEmail();
   resetDriveCache();
-  await signOut(auth);
-  try {
-    const win = typeof window !== 'undefined' ? (window as any) : null;
-    if (tokenToRevoke && win?.google?.accounts?.oauth2?.revoke) {
-      win.google.accounts.oauth2.revoke(tokenToRevoke, () => {});
-    }
-  } catch {
-    // ignore revoke errors
-  }
 };
 
 /**

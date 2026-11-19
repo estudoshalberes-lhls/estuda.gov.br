@@ -37,8 +37,6 @@ function sourceLabel(source: SyncConflictHistoryEntry['source']): string {
       return 'Google Apps Script';
     case 'google-drive':
       return 'Google Drive';
-    case 'firebase':
-      return 'Firebase';
     case 'drive-file':
       return 'Arquivo do Drive';
     case 'oauth':

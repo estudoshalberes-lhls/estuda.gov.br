@@ -29,9 +29,7 @@ const CATEGORY_LABELS: Record<SyncActivityCategory, string> = {
   'drive-backup': 'Backup Drive',
   'drive-upload': 'Envio ao Drive',
   'drive-delete': 'Lixeira do Drive',
-  'firebase-sync': 'Firebase Sync',
-  'firebase-restore': 'Restauração Firebase',
-  oauth: 'Sessão OAuth Google',
+  oauth: 'Sessão Nuvem',
 };
 
 const FILE_ACTION_META: Record<

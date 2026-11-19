@@ -1,6 +1,6 @@
 import type { StudyDatabase } from '../types/study';
 
-export type ConflictSource = 'apps-script' | 'google-drive' | 'firebase' | 'drive-file' | 'oauth';
+export type ConflictSource = 'apps-script' | 'google-drive' | 'drive-file' | 'oauth';
 export type ConflictKind = 'version-divergence' | 'sync-failure' | 'file-conflict' | 'auth-failure';
 export type ConflictResolutionStatus = 'pending' | 'resolved-local' | 'resolved-drive' | 'dismissed';
 

@@ -11,7 +11,6 @@ import { DriveSyncConflictDialog } from './components/backup/DriveSyncConflictDi
 import { ToastRegion } from './components/ui/ToastRegion';
 import { BackToTopButton } from './components/ui/BackToTopButton';
 import { OfflineIndicator } from './components/ui/OfflineIndicator';
-import { FirestoreAuthAlertBanner } from './components/ui/FirestoreAuthAlertBanner';
 import { ModuleName } from './types/study';
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
@@ -138,7 +137,6 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         {!examFocusMode && <GovFederalBar insideApp />}
         {!examFocusMode && <Topbar onExitToLogin={onExitToLogin} />}
         {!examFocusMode && <TopModuleNav />}
-        {!examFocusMode && <FirestoreAuthAlertBanner />}
 
         <section
           className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-7 py-5 sm:py-6"
@@ -200,15 +198,15 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 };
 
 const MainApp: React.FC = () => {
-  const { firebaseConnected, driveConnected, gasConnected } = useStudy();
+  const { driveConnected, gasConnected } = useStudy();
   const [offlineMode, setOfflineMode] = useState<boolean>(false);
   const [forceLoginScreen, setForceLoginScreen] = useState<boolean>(false);
 
   React.useEffect(() => {
-    if (firebaseConnected || driveConnected || gasConnected) {
+    if (driveConnected || gasConnected) {
       setForceLoginScreen(false);
     }
-  }, [firebaseConnected, driveConnected, gasConnected]);
+  }, [driveConnected, gasConnected]);
 
   const handleContinueOffline = () => {
     setOfflineMode(true);
@@ -220,7 +218,7 @@ const MainApp: React.FC = () => {
     setForceLoginScreen(true);
   };
 
-  const shouldShowLogin = forceLoginScreen || (!firebaseConnected && !driveConnected && !gasConnected && !offlineMode);
+  const shouldShowLogin = forceLoginScreen || (!driveConnected && !gasConnected && !offlineMode);
 
   return (
     <>

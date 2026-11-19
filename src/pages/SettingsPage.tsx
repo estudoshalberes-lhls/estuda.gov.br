@@ -2,8 +2,8 @@ import React from 'react';
 import { THEMES } from '../data/seedData';
 import { useStudy } from '../context/StudyContext';
 import { ModuleName } from '../types/study';
+import { Cloud, ExternalLink, LogOut, Server } from 'lucide-react';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
-import { GoogleDriveOAuthPanel } from '../components/settings/GoogleDriveOAuthPanel';
 
 const CONFIGURABLE_MODULES: ReadonlyArray<{
   name: ModuleName;
@@ -27,6 +27,13 @@ export const SettingsPage: React.FC = () => {
     moduleVisibility,
     updatePreferences,
     updateModuleVisibility,
+    gasConnected,
+    gasSession,
+    driveFolderUrl,
+    activeDriveFolderName,
+    lastCloudSyncAt,
+    disconnectAppsScript,
+    setActivePage,
     toast,
   } = useStudy();
   const prefs = db.preferences;
@@ -73,12 +80,79 @@ export const SettingsPage: React.FC = () => {
     <div>
       <PageHeader
         eyebrow="PREFERÊNCIAS DO PORTAL · CONFIGURAÇÕES"
-        title="Conta Google, aparência e controles por módulo"
-        description="Gerencie a conexão OAuth do Google Drive, personalize o tema institucional, a barra lateral e os painéis visíveis."
+        title="Nuvem, aparência e controles por módulo"
+        description="Acompanhe a conexão com o Google Apps Script (Google Drive), personalize o tema institucional, a barra lateral e os painéis visíveis."
       />
 
       <div className="grid grid-cols-1 gap-4">
-        <GoogleDriveOAuthPanel />
+        <Panel
+          title="Conexão em Nuvem — Modo 100% Google Apps Script"
+          subtitle="Seus dados, cronogramas, leis, PDFs e Post-it sincronizam diretamente com seu Google Drive via Apps Script (sessão de 30 dias)."
+          action={
+            <button
+              type="button"
+              onClick={() => setActivePage('Backup e Restauração')}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Server className="w-3.5 h-3.5 shrink-0" />
+              <span>Gerenciar em Backup</span>
+            </button>
+          }
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-4 py-3">
+            <div className="flex items-start sm:items-center gap-3 min-w-0">
+              <span
+                className={`grid place-items-center w-9 h-9 rounded-lg border shrink-0 ${
+                  gasConnected
+                    ? 'border-[var(--good)]/40 bg-[var(--good)]/12 text-[var(--good)]'
+                    : 'border-[var(--line-strong)] bg-[var(--panel)] text-[var(--muted)]'
+                }`}
+              >
+                <Cloud className="w-4 h-4" />
+              </span>
+              <div className="min-w-0">
+                <strong className="block text-[13px] font-bold text-[var(--text)] truncate">
+                  {gasConnected && gasSession
+                    ? `Conectado como ${gasSession.username}`
+                    : 'Desconectado (modo local)'}
+                </strong>
+                <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                  {gasConnected && gasSession
+                    ? `Pasta ativa: "${activeDriveFolderName}"${
+                        lastCloudSyncAt
+                          ? ` · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
+                          : ''
+                      }`
+                    : 'Acesse Backup e Restauração ou a Tela Inicial para entrar com usuário e senha.'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {driveFolderUrl && (
+                <a
+                  href={driveFolderUrl}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] transition-colors whitespace-nowrap"
+                >
+                  <span>Abrir Drive</span>
+                  <ExternalLink className="w-3 h-3" />
+                </a>
+              )}
+              {gasConnected && (
+                <button
+                  type="button"
+                  onClick={() => void disconnectAppsScript()}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 transition-colors whitespace-nowrap cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sair</span>
+                </button>
+              )}
+            </div>
+          </div>
+        </Panel>
 
         <Panel title="Tema visual" subtitle="Alterações aplicadas imediatamente em toda a interface.">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3">

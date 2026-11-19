@@ -38,15 +38,6 @@ export const BackupPage: React.FC = () => {
     resetDemoData,
     testLocalIntegrity,
     toast,
-    firebaseConnected,
-    isSyncingFirebase,
-    lastFirebaseSyncAt,
-    firebaseChunkCount,
-    firebaseLastError,
-    clearFirebaseError,
-    syncNowWithFirebase,
-    restoreFromFirebase,
-    migrateDriveToFirebase,
     googleUser,
     driveConnected,
     driveTokenReady,
@@ -372,7 +363,7 @@ export const BackupPage: React.FC = () => {
       <PageHeader
         eyebrow="GUARDA PERMANENTE · BACKUP"
         title="Sincronização em nuvem e cópias de segurança"
-        description="Restaure todo o seu dossiê diretamente da sua conta Firebase / Google Drive e emita snapshots de segurança em JSON."
+        description="Gerencie sua conexão 100% Google Apps Script (Google Drive + Planilha oculta), resolva conflitos e emita snapshots de segurança em JSON."
       />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
@@ -415,172 +406,6 @@ export const BackupPage: React.FC = () => {
 
       <ConflictHistoryPanel />
 
-      <Panel
-        title="Banco de Dados Principal em Nuvem — Firebase Firestore (Tempo Real)"
-        subtitle="Todo o banco de dados do portal (29 tabelas: questões, simulados, cronograma, caderno de erros, lei seca, matriz de incidência, editais, discursivas e preferências) é salvo e sincronizado automaticamente no Firebase Firestore no PC e no smartphone."
-        className="mb-4"
-      >
-        <div className="flex flex-col gap-3 p-3.5 rounded-xl border border-amber-500/40 bg-amber-500/8">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-            <div className="flex items-start sm:items-center gap-3 min-w-0">
-              <span
-                className={`grid place-items-center w-10 h-10 rounded-xl border shrink-0 ${
-                  firebaseConnected
-                    ? 'border-emerald-500/45 bg-emerald-500/15 text-emerald-600'
-                    : 'border-[var(--line-strong)] bg-[var(--panel)] text-[var(--muted)]'
-                }`}
-              >
-                <Database className="w-5 h-5" aria-hidden="true" />
-              </span>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <strong className="text-[13px] font-bold text-[var(--text)]">
-                    {firebaseConnected
-                      ? `Firebase Firestore Ativo (${googleUser?.email || 'Conta autenticada'})`
-                      : 'Firebase Firestore — Conecte sua conta Google para sincronização automática'}
-                  </strong>
-                  <span
-                    className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-bold ${
-                      firebaseConnected
-                        ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300 border border-emerald-500/35'
-                        : 'bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/35'
-                    }`}
-                  >
-                    <CheckCircle2 className="w-3 h-3 shrink-0" />
-                    {firebaseConnected
-                      ? isSyncingFirebase
-                        ? 'Sincronizando…'
-                        : 'Sincronização Automática Ativa'
-                      : 'Modo Offline / Local'}
-                  </span>
-                </div>
-                <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed mt-0.5">
-                  {firebaseConnected
-                    ? `Estrutura particionada na nuvem (${firebaseChunkCount} partições sem depender do Google Drive Picker)${
-                        lastFirebaseSyncAt
-                          ? ` · Última sincronização: ${new Date(lastFirebaseSyncAt).toLocaleString('pt-BR')}`
-                          : ''
-                      }`
-                    : 'Com o Firebase ativo, todas as alterações sincronizam em tempo real entre computador e smartphone.'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 shrink-0">
-              {!firebaseConnected ? (
-                <button
-                  type="button"
-                  onClick={() => void connectGoogleDrive()}
-                  disabled={isSyncingFirebase}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                >
-                  <Cloud className="w-3.5 h-3.5 shrink-0" />
-                  <span>Conectar Conta Google ao Firebase</span>
-                </button>
-              ) : (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => void syncNowWithFirebase()}
-                    disabled={isSyncingFirebase}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-emerald-600 bg-emerald-600 text-white text-[12px] font-bold hover:bg-emerald-700 disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                  >
-                    <CloudUpload className={`w-3.5 h-3.5 shrink-0 ${isSyncingFirebase ? 'animate-bounce' : ''}`} />
-                    <span>{isSyncingFirebase ? 'Sincronizando Firebase…' : 'Sincronizar Agora com Firebase'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => void syncNowWithFirebase({ forceFullWrite: true })}
-                    disabled={isSyncingFirebase}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                  >
-                    <RefreshCcw className={`w-3.5 h-3.5 text-[var(--accent)] shrink-0 ${isSyncingFirebase ? 'animate-spin' : ''}`} />
-                    <span>Gravar Banco Completo no Firestore</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => void migrateDriveToFirebase()}
-                    disabled={isSyncingFirebase || isSyncingDrive}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                  >
-                    <FolderSync className={`w-3.5 h-3.5 shrink-0 ${isSyncingDrive || isSyncingFirebase ? 'animate-spin' : ''}`} />
-                    <span>
-                      {isSyncingDrive
-                        ? 'Lendo Google Drive…'
-                        : 'Importar Tudo do Google Drive p/ o Firebase'}
-                    </span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const ok = await requestConfirm({
-                        title: 'Restaurar banco de dados do Firebase Firestore',
-                        description:
-                          'Deseja recarregar todas as 29 tabelas diretamente da última versão gravada no Firebase Firestore?',
-                        confirmLabel: 'Restaurar do Firebase',
-                      });
-                      if (ok) {
-                        await restoreFromFirebase();
-                      }
-                    }}
-                    disabled={isSyncingFirebase}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                  >
-                    <CloudDownload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                    <span>Restaurar do Firebase</span>
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {firebaseLastError && (
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-lg border border-red-500/40 bg-red-500/10 text-red-700 dark:text-red-300">
-              <div className="flex items-start gap-2 min-w-0">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <div className="min-w-0 text-[11.5px] leading-relaxed">
-                  <strong className="font-bold block">
-                    {firebaseLastError.category === 'auth'
-                      ? 'Falha de autenticação Firebase'
-                      : firebaseLastError.category === 'permission'
-                        ? 'Permissão negada no Firestore'
-                        : firebaseLastError.category === 'config'
-                          ? 'Configuração do Firebase pendente ou incompatível'
-                          : firebaseLastError.category === 'quota'
-                            ? 'Limite de cota do Firestore'
-                            : 'Erro na última sincronização Firebase'}
-                    {firebaseLastError.code && firebaseLastError.code !== 'unknown'
-                      ? ` (${firebaseLastError.code})`
-                      : ''}
-                  </strong>
-                  <span>{firebaseLastError.userMessage}</span>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {firebaseLastError.category === 'auth' && (
-                  <button
-                    type="button"
-                    onClick={() => void connectGoogleDrive()}
-                    className="px-2.5 py-1.5 rounded-md border border-red-500/40 bg-red-500/15 hover:bg-red-500/25 text-[11px] font-bold cursor-pointer"
-                  >
-                    Reconectar Google
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={clearFirebaseError}
-                  className="px-2.5 py-1.5 rounded-md border border-red-500/30 hover:bg-red-500/15 text-[11px] font-semibold cursor-pointer"
-                >
-                  Dispensar
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
-      </Panel>
 
       <Panel
         title="Modo Smartphone & Compartilhamento Rápido (App Google Drive / WhatsApp / Arquivos)"
@@ -658,8 +483,8 @@ export const BackupPage: React.FC = () => {
                       ? lastCloudSyncAt
                         ? `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
                         : `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Renovação automática ativada`
-                      : `Conta e Firebase conectados (${googleUser?.email || 'Google'}), mas a sessão OAuth do Google Drive expirou — clique em "Reconectar conta Google" para reautorizar`
-                    : 'Nenhuma conta Google vinculada no momento. Conecte para ativar backups automáticos na nuvem'}
+                      : `Sessão desconectada — faça login no painel do Google Apps Script acima para ativar a nuvem`
+                    : 'Faça login no painel do Google Apps Script acima para ativar backups automáticos no Google Drive'}
                 </span>
               </div>
             </div>
@@ -987,8 +812,8 @@ export const BackupPage: React.FC = () => {
                 {drivePermissionNeedsPicker
                   ? 'seus dados já estão salvos neste navegador. Ative a pasta sincronizada do Google Drive para enviar suas alterações.'
                   : driveConnected && !driveTokenReady
-                  ? 'seus dados já estão seguros no Firebase Firestore e no navegador, mas a sessão OAuth do Google Drive precisa ser confirmada. Toque em Reconectar para enviar os arquivos.'
-                  : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta Google.'}
+                  ? 'seus dados já estão salvos neste navegador, mas a sessão do Google Drive precisa ser confirmada. Toque em Reconectar para enviar os arquivos.'
+                  : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta.'}
               </span>
               {drivePermissionNeedsPicker ? (
                 <button

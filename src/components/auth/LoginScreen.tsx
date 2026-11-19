@@ -3,17 +3,13 @@ import {
   AlertCircle,
   ArrowRight,
   BookOpen,
-  Check,
-  Copy,
   Eye,
   EyeOff,
-  ExternalLink,
   KeyRound,
   Lock,
   Server,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
-import firebaseConfig from '../../../firebase-applet-config.json';
 import { GovFederalBar } from '../layout/GovFederalBar';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 
@@ -42,33 +38,26 @@ const WORKSPACE_PILLARS = [
   },
   {
     index: '04.',
-    title: 'Firebase & Google Drive em Nuvem',
+    title: 'Google Drive + Apps Script em Nuvem',
     description:
-      'Sincronize todas as tabelas em tempo real no Firebase Firestore e salve seus PDFs e backups no Google Drive.',
+      'Sincronize todas as tabelas, PDFs, Post-it e backups automáticos direto no seu Google Drive, sem popups OAuth.',
   },
 ] as const;
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) => {
   const {
-    googleUser,
-    firebaseConnected,
-    driveConnected,
     gasConnected,
     gasSession,
     connectAppsScript,
-    connectGoogleDrive,
     authError,
-    toast,
     lastCloudSyncAt,
   } = useStudy();
 
-  const [loading, setLoading] = useState(false);
   const [gasLoading, setGasLoading] = useState(false);
   const [gasUsername, setGasUsername] = useState('estudos.halberes@gmail.com');
   const [gasPassword, setGasPassword] = useState('');
   const [showGasPassword, setShowGasPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [copiedHost, setCopiedHost] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
 
   const handleAppsScriptLogin = async (e: React.FormEvent) => {
@@ -93,64 +82,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
     }
   };
 
-  const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
-  const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
-
-  const handleGoogleLogin = async (forceAccountPicker = false) => {
-    setLoading(true);
-    setErrorMessage(null);
-    try {
-      const ok = await connectGoogleDrive({ forceAccountPicker });
-      if (ok) {
-        onContinueOffline();
-      } else {
-        setErrorMessage(null);
-      }
-    } catch (err: any) {
-      const msg = err?.message || '';
-      setErrorMessage(msg || 'Falha ao autenticar com o Google.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const displayedError = errorMessage || authError;
-  const isUnauthorizedDomainError = Boolean(
-    displayedError && displayedError.toLowerCase().includes('unauthorized-domain'),
-  );
-  const isOriginMismatchError = Boolean(
-    displayedError &&
-      (displayedError.toLowerCase().includes('origin_mismatch') ||
-        displayedError.toLowerCase().includes('origens javascript autorizadas') ||
-        displayedError.toLowerCase().includes('redirect_uri_mismatch')),
-  );
-  const needsDomainHelp = isUnauthorizedDomainError || isOriginMismatchError;
-  const copyValue = isUnauthorizedDomainError ? currentHost : currentOrigin;
-  const domainConsoleUrl = isUnauthorizedDomainError
-    ? `https://console.firebase.google.com/project/${firebaseConfig.projectId}/authentication/settings`
-    : 'https://console.cloud.google.com/apis/credentials?project=848919975785';
-  const domainConsoleLabel = isUnauthorizedDomainError
-    ? 'Abrir Firebase Console'
-    : 'Abrir Google Cloud Console';
-
-  const handleCopyHost = async () => {
-    if (!copyValue) return;
-    try {
-      await navigator.clipboard.writeText(copyValue);
-      setCopiedHost(true);
-      toast(`${isUnauthorizedDomainError ? 'Domínio' : 'Origem'} "${copyValue}" copiado!`);
-      window.setTimeout(() => setCopiedHost(false), 2000);
-    } catch {
-      toast('Não foi possível copiar automaticamente. Selecione e copie o endereço exibido.', true);
-    }
-  };
 
   return (
     <div className="min-h-screen w-full bg-[var(--page)] text-[var(--text)] flex flex-col justify-between">
       <div>
         <GovFederalBar />
 
-        {/* Sub-barra limpa estilo gov.br com a marca MEC/estuda.gov.br */}
         <div className="w-full bg-[var(--panel)] border-b border-[var(--line)] shadow-[0_1px_4px_rgba(7,29,65,0.05)]">
           <div className="max-w-[1180px] mx-auto px-3 sm:px-8 min-h-[54px] py-2 flex items-center justify-between gap-2.5 sm:gap-4">
             <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
@@ -179,9 +117,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
       </div>
 
       <main className="flex-1 w-full max-w-[1180px] mx-auto px-5 py-8 sm:px-8 lg:py-12 grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_410px] gap-8 lg:gap-12 items-start">
-        {/* Coluna Esquerda: Vitrine Visual Institucional + Pilares do Portal */}
         <section className="flex flex-col gap-6 min-w-0">
-          {/* Bloco Hero estilo Banner gov.br */}
           <div className="rounded-md overflow-hidden border border-[var(--line)] bg-[var(--panel)] shadow-[0_2px_10px_rgba(7,29,65,0.06)]">
             <div className="grid grid-cols-1 md:grid-cols-[1.05fr_0.95fr] items-stretch">
               <div className="bg-white flex items-center justify-center p-4 sm:p-5 border-b md:border-b-0 md:border-r border-[var(--line)]">
@@ -207,7 +143,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   Portal Único do Estudante Federal.
                 </h1>
                 <p className="mt-3 mb-0 text-[14px] leading-relaxed text-[var(--muted)]">
-                  Emita seu comprovante de regularidade no edital, consulte a lei seca sem fila de espera e sincronize seu acervo de provas e simulados na nuvem com zero burocracia.
+                  Emita seu comprovante de regularidade no edital, consulte a lei seca sem fila de espera e sincronize seu acervo de provas e simulados direto no Google Drive com zero burocracia.
                 </p>
                 <div className="mt-4 pt-3 border-t border-[var(--line)] text-[11.5px] font-semibold text-[var(--accent)]">
                   Programa Bolsa-Questão &amp; Café Forte · Exercício 2026
@@ -216,7 +152,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
             </div>
           </div>
 
-          {/* Lista Limpa dos 4 Serviços do Portal */}
           <section
             aria-label="Serviços do portal"
             className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-5 pt-2"
@@ -239,7 +174,6 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
           </section>
         </section>
 
-        {/* Coluna Direita: Cartão Limpo de Identificação estilo gov.br */}
         <aside className="w-full lg:sticky lg:top-6">
           <section
             aria-labelledby="login-card-title"
@@ -249,10 +183,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               id="login-card-title"
               className="m-0 font-display text-[18px] font-bold tracking-[-0.015em] text-[var(--text)]"
             >
-              Identifique-se no estuda.gov.br com:
+              Identifique-se no estuda.gov.br:
             </h2>
 
-            {/* Acesso Universal 100% Google Apps Script (Usuário e Senha · Multi-Dispositivo) */}
             <div className="mt-4 pb-4 border-b border-[var(--line)]">
               {gasConnected && gasSession ? (
                 <div className="flex flex-col gap-2">
@@ -273,7 +206,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                 <form onSubmit={handleAppsScriptLogin} className="space-y-3">
                   <div className="flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--accent)]">
                     <KeyRound className="w-3.5 h-3.5 shrink-0" />
-                    <span>Acesso Universal (Modo 100% Google Apps Script · Drive)</span>
+                    <span>Acesso Universal (Google Drive · Apps Script)</span>
                   </div>
 
                   <div>
@@ -326,146 +259,51 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
                   </button>
                 </form>
               )}
-
-              {(firebaseConnected || driveConnected) && !gasConnected && googleUser?.email && (
-                <div className="mt-3 pt-3 border-t border-[var(--line)] flex flex-col gap-1.5">
-                  <button
-                    type="button"
-                    onClick={onContinueOffline}
-                    className="w-full min-h-[40px] px-4 py-2 rounded-full border border-[var(--good)] bg-[var(--good)]/12 text-[var(--good)] text-[12.5px] font-bold flex items-center justify-center gap-2 hover:bg-[var(--good)] hover:text-white transition-colors cursor-pointer"
-                  >
-                    <span>Continuar com Google ({googleUser.email})</span>
-                    <ArrowRight className="w-4 h-4 shrink-0" />
-                  </button>
-                </div>
-              )}
             </div>
-
-
 
             {displayedError && (
               <div
                 role="alert"
-                className="mt-4 rounded border border-[var(--bad)]/40 bg-[var(--bad)]/10 p-3 text-[12px] text-[var(--bad)] flex flex-col gap-2"
+                className="mt-4 rounded border border-[var(--bad)]/40 bg-[var(--bad)]/10 p-3 text-[12px] text-[var(--bad)] flex items-start gap-2"
               >
-                <div className="flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
-                  <span className="leading-relaxed">{displayedError}</span>
-                </div>
-                <div className="flex flex-wrap items-center gap-2">
-                  {needsDomainHelp && copyValue && (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void handleCopyHost()}
-                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded border border-[var(--bad)]/35 bg-[var(--panel)] text-[var(--text)] text-[11.5px] font-semibold hover:border-[var(--accent)] transition-colors whitespace-nowrap cursor-pointer"
-                      >
-                        {copiedHost ? (
-                          <Check className="w-3.5 h-3.5 text-[var(--good)]" aria-hidden="true" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5 text-[var(--accent)]" aria-hidden="true" />
-                        )}
-                        <span>
-                          {copiedHost
-                            ? isUnauthorizedDomainError
-                              ? 'Domínio copiado'
-                              : 'Origem copiada'
-                            : isUnauthorizedDomainError
-                              ? 'Copiar domínio'
-                              : 'Copiar origem'}
-                        </span>
-                      </button>
-                      <a
-                        href={domainConsoleUrl}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-semibold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
-                      >
-                        <span>{domainConsoleLabel}</span>
-                        <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
-                      </a>
-                    </>
-                  )}
-                </div>
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" aria-hidden="true" />
+                <span className="leading-relaxed">{displayedError}</span>
               </div>
             )}
 
-            {/* Lista limpa estilo "Outras opções de identificação:" */}
-            <div className="mt-6 pt-4 border-t border-[var(--line)]">
-              <div className="text-[12.5px] font-semibold text-[var(--text)] mb-2.5">
-                Outras opções de identificação:
+            <div className="mt-5 pt-4 border-t border-[var(--line)]">
+              <div className="text-[12.5px] font-semibold text-[var(--text)] mb-2">
+                Outras opções de acesso:
               </div>
 
-              <div className="flex flex-col divide-y divide-[var(--line)]/60">
-                <button
-                  type="button"
-                  onClick={() => void handleGoogleLogin(false)}
-                  disabled={loading}
-                  className="w-full py-2.5 px-1 text-left flex items-center justify-between gap-2 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-wait bg-transparent border-0"
-                >
-                  <span className="flex items-center gap-2.5 min-w-0">
-                    <svg
-                      xmlns="http://www.w3.org/2000/svg"
-                      viewBox="0 0 48 48"
-                      className="w-4 h-4 shrink-0"
-                      aria-hidden="true"
-                    >
-                      <path
-                        fill="#EA4335"
-                        d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                      />
-                      <path
-                        fill="#4285F4"
-                        d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                      />
-                      <path
-                        fill="#FBBC05"
-                        d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                      />
-                      <path
-                        fill="#34A853"
-                        d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                      />
-                    </svg>
-                    <span className="truncate">
-                      {loading ? 'Autenticando no Google…' : 'Conectar com Google Drive'}
-                    </span>
-                  </span>
-                  <span className="text-[11px] font-bold text-[var(--good)] shrink-0">
-                    Nuvem
-                  </span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={onContinueOffline}
-                  className="w-full py-2.5 px-1 text-left flex items-center gap-2.5 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer bg-transparent border-0"
-                >
-                  <ArrowRight className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
-                  <span>Entrar direto no navegador (sem cadastro)</span>
-                </button>
-              </div>
+              <button
+                type="button"
+                onClick={onContinueOffline}
+                className="w-full py-2.5 px-1 text-left flex items-center gap-2.5 text-[13px] font-medium text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer bg-transparent border-0"
+              >
+                <ArrowRight className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                <span>Entrar direto no navegador (modo local / configurar Backup)</span>
+              </button>
 
               <div className="mt-3">
                 <PWAInstallButton variant="login" />
               </div>
             </div>
 
-            {/* Informações técnicas e sigilo preservadas no rodapé do cartão */}
             <div className="mt-5 pt-4 border-t border-[var(--line)] flex flex-col gap-2.5 text-[11px] text-[var(--muted)] leading-relaxed">
               <div className="flex items-start gap-2">
                 <Lock className="w-3.5 h-3.5 text-[var(--accent)] shrink-0 mt-0.5" aria-hidden="true" />
                 <span>
-                  <strong className="font-semibold text-[var(--text)]">Sigilo e Guarda em Nuvem Garantidos:</strong>{' '}
-                  todas as alterações, PDFs, leis, questões e backups são sincronizados com sua conta Google no Firebase Firestore e Google Drive, além do cache seguro no navegador.
+                  <strong className="font-semibold text-[var(--text)]">Guarda Permanente no Google Drive:</strong>{' '}
+                  suas alterações, cronograma, leis, questões, Post-it, PDFs e backups são sincronizados diretamente com o seu Google Drive via Apps Script, além do cache offline no navegador.
                 </span>
               </div>
 
               {lastCloudSyncAt && (
                 <div className="rounded border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 py-2 text-[10.5px] text-[var(--muted)] flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                  <strong className="text-[var(--text)] font-bold">Diagnóstico de Salvamento:</strong>
+                  <strong className="text-[var(--text)] font-bold">Última Sincronização:</strong>
                   <span>
-                    Nuvem Drive:{' '}
+                    Google Drive:{' '}
                     <strong className="font-mono-num text-[var(--text)]">
                       {new Date(lastCloudSyncAt).toLocaleString('pt-BR')}
                     </strong>
@@ -483,7 +321,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
             <strong className="text-[var(--text)]">estuda.gov.br</strong> · Ministério da Aprovação, Café Forte e Madrugadas (Paródia)
           </span>
           <span className="text-[var(--subtle)]">
-            Sincronização em Nuvem · Firebase Firestore &amp; Google Drive
+            Sincronização 100% Google Apps Script &amp; Google Drive
           </span>
         </div>
       </footer>

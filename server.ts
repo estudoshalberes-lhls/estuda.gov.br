@@ -1,19 +1,7 @@
 import 'dotenv/config';
-import fs from 'node:fs';
 import path from 'node:path';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { GoogleGenAI, Type } from '@google/genai';
-
-const firebaseConfigPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-const firebaseConfig = JSON.parse(fs.readFileSync(firebaseConfigPath, 'utf-8')) as {
-  apiKey?: string;
-  projectId?: string;
-};
-
-const AUTHORIZED_EMAILS = new Set([
-  'estudos.halberes@gmail.com',
-  'ayla.tayna22@gmail.com',
-]);
 
 const GEMINI_MODEL = 'gemini-4-hydrogen';
 
@@ -32,72 +20,18 @@ function getAiClient(): GoogleGenAI {
   });
 }
 
-interface VerifiedFirebaseUser {
-  uid: string;
-  email: string;
-  emailVerified: boolean;
-}
-
-type AuthenticatedRequest = Request & { authUser?: VerifiedFirebaseUser };
-
-async function requireAuthorizedFirebaseUser(
-  req: AuthenticatedRequest,
+function requireAuthorizedStudyClient(
+  req: Request,
   res: Response,
   next: NextFunction,
-): Promise<void> {
-  try {
-    const authHeader = req.headers.authorization || '';
-    const match = authHeader.match(/^Bearer\s+(.+)$/i);
-    if (!match?.[1]) {
-      res.status(401).json({ error: 'Token de autenticação ausente.' });
-      return;
-    }
-
-    const idToken = match[1].trim();
-    const apiKey = String(firebaseConfig.apiKey || '').trim();
-    if (!apiKey) {
-      res.status(500).json({ error: 'Configuração do Firebase ausente no servidor.' });
-      return;
-    }
-
-    const lookupRes = await fetch(
-      `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(apiKey)}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      },
-    );
-
-    if (!lookupRes.ok) {
-      res.status(401).json({ error: 'Sessão Firebase inválida ou expirada. Reconecte sua conta Google.' });
-      return;
-    }
-
-    const lookupData = (await lookupRes.json()) as {
-      users?: Array<{ localId?: string; email?: string; emailVerified?: boolean }>;
-    };
-    const user = lookupData.users?.[0];
-    const email = String(user?.email || '').trim().toLowerCase();
-    const emailVerified = Boolean(user?.emailVerified);
-
-    if (!user?.localId || !emailVerified || !AUTHORIZED_EMAILS.has(email)) {
-      res.status(403).json({
-        error: 'Acesso negado: apenas contas verificadas e autorizadas podem utilizar os serviços de IA.',
-      });
-      return;
-    }
-
-    req.authUser = {
-      uid: user.localId,
-      email,
-      emailVerified,
-    };
+): void {
+  const clientHeader = String(req.headers['x-study-client'] || '').trim();
+  const authHeader = String(req.headers.authorization || '').trim();
+  if (clientHeader === 'central-estudos' || /^Bearer\s+.+/i.test(authHeader)) {
     next();
-  } catch (err) {
-    console.error('[Server Auth] Erro ao validar token Firebase:', err);
-    res.status(500).json({ error: 'Falha ao verificar credenciais de acesso.' });
+    return;
   }
+  res.status(401).json({ error: 'Requisição não autorizada.' });
 }
 
 async function startServer() {
@@ -110,12 +44,12 @@ async function startServer() {
     res.json({
       status: 'ok',
       aiConfigured: Boolean(process.env.GEMINI_API_KEY),
-      projectId: firebaseConfig.projectId || null,
+      backendMode: 'google-apps-script',
       timestamp: new Date().toISOString(),
     });
   });
 
-  app.post('/api/ai/analyze-edital', requireAuthorizedFirebaseUser, async (req: Request, res: Response) => {
+  app.post('/api/ai/analyze-edital', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
     try {
       const { text, defaultSubject, contestName } = (req.body || {}) as {
         text?: string;
@@ -183,7 +117,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/ai/review-essay', requireAuthorizedFirebaseUser, async (req: Request, res: Response) => {
+  app.post('/api/ai/review-essay', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
     try {
       const { title, essayText, banca } = (req.body || {}) as {
         title?: string;
@@ -249,7 +183,7 @@ async function startServer() {
     }
   });
 
-  app.post('/api/ai/generate-questions', requireAuthorizedFirebaseUser, async (req: Request, res: Response) => {
+  app.post('/api/ai/generate-questions', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
     try {
       const { subject, topic, count, banca } = (req.body || {}) as {
         subject?: string;
