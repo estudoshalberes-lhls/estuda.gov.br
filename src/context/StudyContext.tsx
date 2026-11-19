@@ -173,6 +173,36 @@ import {
   readStudyTextFile,
 } from '../lib/pdfExtract';
 import {
+  API_URL as GAS_DEFAULT_API_URL,
+  GasSession,
+  clearGasSession,
+  gasInspectRemoteVersion,
+  gasListConflicts,
+  gasLogin,
+  gasLogout,
+  gasPing,
+  gasPullState,
+  gasPushState,
+  gasResolveConflict,
+  gasSetStudyFolder,
+  gasSetupDailyBackupTrigger,
+  getConfiguredGasApiUrl,
+  getGasSession,
+  isGasSessionActive,
+  setConfiguredGasApiUrl,
+  subscribeGasSession,
+} from '../lib/appsScriptBackend';
+import {
+  SyncConflictHistoryEntry,
+  VersionComparisonReport,
+  buildDatabaseVersionSummary,
+  clearResolvedConflictHistoryForScope,
+  loadConflictHistory,
+  recordConflictHistoryEntry,
+  subscribeConflictHistory,
+  updateConflictHistoryStatus,
+} from '../lib/conflictHistory';
+import {
   loadDatabaseFromFirestore,
   loadDifferentialChangesFromFirestore,
   saveDatabaseToFirestore,
@@ -1026,6 +1056,36 @@ interface StudyContextValue {
   pruneOldCloudBackups: (maxKeep?: number) => Promise<number>;
   syncActivityLogs: SyncActivityLogEntry[];
   clearSyncActivityLogs: () => void;
+  // Modo 100% Google Apps Script (Drive + Planilha Oculta)
+  gasSession: GasSession | null;
+  gasConnected: boolean;
+  gasApiUrl: string;
+  setGasApiUrl: (url: string) => void;
+  connectAppsScript: (
+    username: string,
+    password: string,
+    customApiUrl?: string,
+  ) => Promise<{ ok: boolean; error?: string }>;
+  disconnectAppsScript: () => Promise<void>;
+  testAppsScriptConnection: (customApiUrl?: string) => Promise<{
+    ok: boolean;
+    version?: string;
+    serverVersion?: number;
+    folderName?: string;
+    message: string;
+  }>;
+  setAppsScriptStudyFolder: (folderIdOrUrl: string) => Promise<boolean>;
+  setupAppsScriptDailyBackup: () => Promise<boolean>;
+  // Histórico de Conflitos & Resolução Manual (Local × Drive)
+  conflictHistory: SyncConflictHistoryEntry[];
+  latestVersionComparison: VersionComparisonReport | null;
+  isCheckingDivergence: boolean;
+  resolvingConflictAction: string | null;
+  checkLocalVsDriveDivergence: () => Promise<VersionComparisonReport | null>;
+  resolveVersionDivergenceKeepLocal: (entryId?: string) => Promise<boolean>;
+  resolveVersionDivergenceKeepDrive: (entryId?: string) => Promise<boolean>;
+  dismissConflictHistoryEntry: (entryId: string) => void;
+  clearResolvedConflictHistory: () => void;
   driveSyncConflicts: DeletedDriveConflict[];
   driveConflictErrors: Record<string, { reason: DriveTrashFailureReason; message: string }>;
   resolvingDriveConflictId: string | null;
@@ -3499,6 +3559,31 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const activeTimerTopicRef = useRef<ActiveTimerLink | null>(activeTimerTopic);
   activeTimerTopicRef.current = activeTimerTopic;
 
+  const [gasSession, setGasSession] = useState<GasSession | null>(() => getGasSession());
+  const [gasApiUrl, setGasApiUrlState] = useState<string>(() => getConfiguredGasApiUrl());
+  const [conflictHistory, setConflictHistory] = useState<SyncConflictHistoryEntry[]>(() =>
+    loadConflictHistory(initialScope),
+  );
+  const [latestVersionComparison, setLatestVersionComparison] = useState<VersionComparisonReport | null>(null);
+  const [isCheckingDivergence, setIsCheckingDivergence] = useState<boolean>(false);
+  const [resolvingConflictAction, setResolvingConflictAction] = useState<string | null>(null);
+  const gasHydratedTokenRef = useRef<string | null>(null);
+  const gasConnected = Boolean(gasSession?.token);
+
+  useEffect(() => {
+    return subscribeGasSession((next) => {
+      setGasSession(next);
+    });
+  }, []);
+
+  useEffect(() => {
+    return subscribeConflictHistory((changedScope, nextItems) => {
+      if (changedScope === activeScopeRef.current) {
+        setConflictHistory(nextItems);
+      }
+    });
+  }, []);
+
   useEffect(() => {
     return subscribeSyncActivityLogs((changedScope, nextLogs) => {
       if (changedScope === activeScopeRef.current) {
@@ -3517,6 +3602,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const clearSyncActivityLogs = useCallback(() => {
     clearSyncActivityLogsForScope(activeScopeRef.current || 'offline_guest');
+  }, []);
+
+  const setGasApiUrl = useCallback((url: string) => {
+    const clean = setConfiguredGasApiUrl(url);
+    setGasApiUrlState(clean);
   }, []);
 
   const runDriveTimestampComparison = useCallback(
@@ -6815,10 +6905,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const mergedCloudDb: StudyDatabase = currentDb;
       const mergedHash = computeDatabaseContentHash(mergedCloudDb);
 
-      const forceSnapshot =
-        flushedDeleteIds.length > 0 ||
-        Date.now() - lastDeletionMsRef.current < 120_000 ||
-        syncedScopeOnceRef.current === scope;
+      const isGasActive = isGasSessionActive();
+      const forceSnapshot = isGasActive
+        ? false
+        : flushedDeleteIds.length > 0 ||
+          Date.now() - lastDeletionMsRef.current < 120_000 ||
+          syncedScopeOnceRef.current === scope;
 
       const savedSync =
         lastCloudHashRef.current !== mergedHash || flushedDeleteIds.length > 0
@@ -6828,7 +6920,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 app: 'Central de Estudos',
                 updatedAt: nowIso,
                 contentHash: mergedHash,
-                userEmail: googleUser?.email || undefined,
+                userEmail: googleUser?.email || gasSession?.username || undefined,
                 data: mergedCloudDb,
               },
               token,
@@ -6851,12 +6943,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (flushedDeleteIds.length > 0 || savedSync) {
         recordSyncActivity({
           category: 'drive-sync',
-          operation: 'Sincronização contínua com o Google Drive',
+          operation: isGasActive
+            ? 'Sincronização silenciosa (Google Apps Script)'
+            : 'Sincronização contínua com o Google Drive',
           status: remainingDeletes > 0 ? 'warning' : 'success',
           message:
             flushedDeleteIds.length > 0
               ? `Espelho atualizado e ${flushedDeleteIds.length} arquivo(s) excluído(s) enviado(s) para a lixeira do Drive.`
-              : `Espelho automático (${CLOUD_SYNC_FILENAME}) atualizado no Google Drive.`,
+              : `Salvo na nuvem (${CLOUD_SYNC_FILENAME}) com proteção de versão.`,
           affectedFiles: [
             ...flushedDeleteNames.map((name) => ({ name, action: 'trashed' as const })),
             ...(savedSync ? [{ name: savedSync.name, action: 'uploaded' as const, driveFileId: savedSync.id }] : []),
@@ -6877,88 +6971,163 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     } catch (err: any) {
       const errMsg = String(err?.message || '');
-      if (errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE')) {
-        // Reconcile remote snapshot with local tombstones & force push so local deletions are never discarded
-        let reconciledOk = false;
-        try {
-          const latestCloud = await downloadLatestCloudSync(token, {
-            expectedEmail: googleUser?.email || undefined,
-            bypassCache: true,
-          });
-          let reconciledDb = currentDb;
-          if (latestCloud?.payload) {
-            let remoteDb = normalizeAndMergeDatabase(latestCloud.payload);
-            if (latestCloud.incrementalDeltas?.length) {
-              for (const incDelta of latestCloud.incrementalDeltas) {
-                remoteDb = applyIncrementalDeltaToDatabase(remoteDb, incDelta);
-              }
-            }
-            const mergedTombstones = stripActiveEntityTombstones(
-              mergeTombstoneMaps(
-                remoteDb.deletedTombstones,
-                currentDb.deletedTombstones,
-              ),
-              currentDb,
-            );
-            reconciledDb = applyTombstonesToMergedDatabase(
-              {
-                ...currentDb,
-                deletedTombstones: mergedTombstones,
-              },
-              scope,
-            );
-          }
-          const reconciledIso = new Date().toISOString();
-          const reconciledHash = computeDatabaseContentHash(reconciledDb);
-          const forcedSync = await saveCloudSyncSnapshot(
-            {
-              version: 2,
-              app: 'Central de Estudos',
-              updatedAt: reconciledIso,
-              contentHash: reconciledHash,
-              userEmail: googleUser?.email || undefined,
-              data: reconciledDb,
-            },
-            token,
-            { force: true },
-          );
-          lastCloudDbRef.current = reconciledDb;
-          lastCloudHashRef.current = reconciledHash;
-          recordUploadedFilesInCacheMeta(scope, {
-            backupFiles: forcedSync ? [forcedSync] : [],
-            extraPatch: {
-              lastCloudSyncAt: reconciledIso,
-              lastCloudContentHash: reconciledHash,
-              hasPendingCloudSync: false,
-            },
-          });
-          setLastCloudSyncAt(reconciledIso);
-          pendingCloudSyncRef.current = false;
-          setHasPendingCloudChanges(false);
-          reconciledOk = true;
-        } catch {
-          reconciledOk = false;
-        }
-        if (!reconciledOk) {
+      const isGasActive = isGasSessionActive();
+      const isVersionConflict =
+        err?.code === 'VERSION_CONFLICT' || errMsg.includes('DRIVE_CONFLICT_NEWER_REMOTE');
+
+      if (isVersionConflict) {
+        // No modo Apps Script, NUNCA sobrescrevemos silenciosamente outro computador: registramos no Histórico de Conflitos!
+        if (isGasActive) {
           pendingCloudSyncRef.current = true;
           setHasPendingCloudChanges(true);
           saveSyncMeta(scope, { hasPendingCloudSync: true });
+          const localSum = buildDatabaseVersionSummary(currentDb, {
+            updatedAt: new Date().toISOString(),
+            version: getGasSession()?.serverVersion,
+          });
+          const remoteSumRaw = err?.remoteSummary as any;
+          const driveSum = remoteSumRaw
+            ? {
+                updatedAt: err?.remoteUpdatedAt || null,
+                version: typeof err?.serverVersion === 'number' ? err.serverVersion : undefined,
+                fileName: CLOUD_SYNC_FILENAME,
+                laws: Number(remoteSumRaw.laws || 0),
+                scheduleTopics: Number(remoteSumRaw.scheduleTopics || 0),
+                questions: Number(remoteSumRaw.questions || 0),
+                annotations: Number(remoteSumRaw.annotations || 0),
+                pdfs: Number(remoteSumRaw.pdfs || 0),
+              }
+            : undefined;
+
+          recordConflictHistoryEntry(scope, {
+            source: 'apps-script',
+            kind: 'version-divergence',
+            title: 'Divergência de versão detectada entre este computador e o Google Drive',
+            reason:
+              errMsg ||
+              'Outro dispositivo salvou uma versão mais recente no Google Drive. Escolha manualmente qual versão manter na aba Backup.',
+            errorCode: 'VERSION_CONFLICT',
+            serverConflictId: err?.conflictId,
+            localSummary: localSum,
+            driveSummary: driveSum,
+          });
           recordSyncActivity({
             category: 'drive-sync',
-            operation: 'Conflito na sincronização do Drive',
+            operation: 'Conflito de versão bloqueado (proteção contra sobrescrita)',
             status: 'warning',
-            errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
-            message: 'Alterações mais recentes detectadas no Drive; nova tentativa mantida na fila.',
+            errorCode: 'VERSION_CONFLICT',
+            message:
+              'Versão mais recente detectada no Google Drive. Acesse Backup → Histórico de Conflitos para escolher Local ou Drive.',
           });
           toast(
-            'Alterações mais recentes encontradas no Google Drive. Nova tentativa automática permanece na fila.',
+            'Conflito de versão detectado com outro dispositivo! Acesse Backup → Histórico de Conflitos para escolher qual versão manter.',
             true,
           );
+        } else {
+          // Fluxo OAuth legado: tenta reconciliar ou registra no Histórico de Conflitos
+          let reconciledOk = false;
+          try {
+            const latestCloud = await downloadLatestCloudSync(token, {
+              expectedEmail: googleUser?.email || undefined,
+              bypassCache: true,
+            });
+            let reconciledDb = currentDb;
+            if (latestCloud?.payload) {
+              let remoteDb = normalizeAndMergeDatabase(latestCloud.payload);
+              if (latestCloud.incrementalDeltas?.length) {
+                for (const incDelta of latestCloud.incrementalDeltas) {
+                  remoteDb = applyIncrementalDeltaToDatabase(remoteDb, incDelta);
+                }
+              }
+              const mergedTombstones = stripActiveEntityTombstones(
+                mergeTombstoneMaps(
+                  remoteDb.deletedTombstones,
+                  currentDb.deletedTombstones,
+                ),
+                currentDb,
+              );
+              reconciledDb = applyTombstonesToMergedDatabase(
+                {
+                  ...currentDb,
+                  deletedTombstones: mergedTombstones,
+                },
+                scope,
+              );
+            }
+            const reconciledIso = new Date().toISOString();
+            const reconciledHash = computeDatabaseContentHash(reconciledDb);
+            const forcedSync = await saveCloudSyncSnapshot(
+              {
+                version: 2,
+                app: 'Central de Estudos',
+                updatedAt: reconciledIso,
+                contentHash: reconciledHash,
+                userEmail: googleUser?.email || undefined,
+                data: reconciledDb,
+              },
+              token,
+              { force: true },
+            );
+            lastCloudDbRef.current = reconciledDb;
+            lastCloudHashRef.current = reconciledHash;
+            recordUploadedFilesInCacheMeta(scope, {
+              backupFiles: forcedSync ? [forcedSync] : [],
+              extraPatch: {
+                lastCloudSyncAt: reconciledIso,
+                lastCloudContentHash: reconciledHash,
+                hasPendingCloudSync: false,
+              },
+            });
+            setLastCloudSyncAt(reconciledIso);
+            pendingCloudSyncRef.current = false;
+            setHasPendingCloudChanges(false);
+            reconciledOk = true;
+          } catch {
+            reconciledOk = false;
+          }
+          if (!reconciledOk) {
+            pendingCloudSyncRef.current = true;
+            setHasPendingCloudChanges(true);
+            saveSyncMeta(scope, { hasPendingCloudSync: true });
+            recordConflictHistoryEntry(scope, {
+              source: 'google-drive',
+              kind: 'version-divergence',
+              title: 'Conflito de sincronização com o Google Drive',
+              reason: 'Alterações mais recentes foram detectadas no Google Drive e a mesclagem automática não concluiu.',
+              errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
+              localSummary: buildDatabaseVersionSummary(currentDb, { updatedAt: new Date().toISOString() }),
+            });
+            recordSyncActivity({
+              category: 'drive-sync',
+              operation: 'Conflito na sincronização do Drive',
+              status: 'warning',
+              errorCode: 'DRIVE_CONFLICT_NEWER_REMOTE',
+              message: 'Alterações mais recentes detectadas no Drive; nova tentativa mantida na fila.',
+            });
+            toast(
+              'Alterações mais recentes encontradas no Google Drive. Verifique o Histórico de Conflitos na aba Backup.',
+              true,
+            );
+          }
         }
       } else {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges(true);
         saveSyncMeta(scope, { hasPendingCloudSync: true });
+        recordConflictHistoryEntry(scope, {
+          source: isGasActive ? 'apps-script' : 'google-drive',
+          kind: errMsg.includes('TOKEN_EXPIRED') ? 'auth-failure' : 'sync-failure',
+          title: errMsg.includes('TOKEN_EXPIRED')
+            ? 'Falha de sincronização: sessão expirada'
+            : 'Falha ao salvar alterações na nuvem',
+          reason: errMsg || 'Erro ao enviar alterações pendentes para o Google Drive.',
+          errorCode: errMsg.includes('TOKEN_EXPIRED')
+            ? 'oauth/drive-token-expired'
+            : errMsg.includes('DRIVE_FOLDER_PERMISSION')
+              ? 'DRIVE_FOLDER_PERMISSION'
+              : 'SYNC_ERROR',
+          localSummary: buildDatabaseVersionSummary(currentDb, { updatedAt: new Date().toISOString() }),
+        });
         recordSyncActivity({
           category: 'drive-sync',
           operation: 'Falha na sincronização contínua do Google Drive',
@@ -6970,9 +7139,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               : undefined,
           message: errMsg || 'Erro ao enviar alterações pendentes para o Google Drive.',
         });
-        if (errMsg.includes('TOKEN_EXPIRED')) {
+        if (!isGasActive && errMsg.includes('TOKEN_EXPIRED')) {
           setDriveTokenReady(false);
-        } else if (errMsg.includes('DRIVE_FOLDER_PERMISSION')) {
+        } else if (!isGasActive && errMsg.includes('DRIVE_FOLDER_PERMISSION')) {
           const pref = getPreferredStudyFolder();
           setDrivePermissionNeedsPicker({
             folderId: pref.id || DEFAULT_STUDY_FOLDER_ID,
@@ -7003,7 +7172,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       getPendingDriveDeletes('offline_guest').length > 0;
     if (!pendingCloudSyncRef.current && !hasPendingDeletes) return;
 
-    const delayMs = Date.now() - lastDeletionMsRef.current < 15_000 ? 2500 : DRIVE_SYNC_DEBOUNCE_MS;
+    const delayMs = isGasSessionActive()
+      ? 3500
+      : Date.now() - lastDeletionMsRef.current < 15_000
+        ? 2500
+        : DRIVE_SYNC_DEBOUNCE_MS;
     const timer = window.setTimeout(() => {
       const stillHasDeletes =
         getPendingDriveDeletes(activeScopeRef.current).length > 0 ||
@@ -8051,7 +8224,643 @@ function isEmailAuthorized(email?: string | null): boolean {
     }
   }, [recordSyncActivity, syncAccountWithDriveOnAuth, toast]);
 
+  // ==========================================================================
+  // MODO 100% GOOGLE APPS SCRIPT (DRIVE + PLANILHA OCULTA) & HISTÓRICO DE CONFLITOS
+  // ==========================================================================
+
+  const hydrateGasScopeAndRemoteState = useCallback(
+    async (
+      session: GasSession,
+      initialPayload?: any,
+      initialUpdatedAt?: string | null,
+      initialConflicts?: Array<{
+        id: string;
+        timestamp: string;
+        reason: string;
+        localVersion: number;
+        serverVersion: number;
+        status: string;
+        resolution?: string;
+        resolvedAt?: string;
+      }>,
+    ) => {
+      const gasScope = getUserScopeKey({ email: session.username });
+      if (gasScope !== activeScopeRef.current) {
+        window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
+        const prevScope = activeScopeRef.current;
+        const prevSnapshot = JSON.stringify(dbRef.current);
+        const nowIso = new Date().toISOString();
+        persistLocalDatabaseForScope(prevScope, prevSnapshot, nowIso);
+
+        activeScopeRef.current = gasScope;
+        setStorageUserScope(gasScope);
+        const scopedLocal = loadStoredDatabase(gasScope);
+        isRestoringRef.current = true;
+        skipPersistDbRef.current = scopedLocal;
+        lastPersistedDbRef.current = scopedLocal;
+        lastPersistedDbHashRef.current = computeDatabaseContentHash(scopedLocal);
+        setDb(scopedLocal);
+        dbRef.current = scopedLocal;
+        window.setTimeout(() => {
+          isRestoringRef.current = false;
+        }, 80);
+      }
+
+      setConflictHistory(loadConflictHistory(gasScope));
+      setSyncActivityLogs(loadSyncActivityLogs(gasScope));
+      setDriveConnected(true);
+      setDriveTokenReady(true);
+      setAuthError(null);
+      setDrivePermissionNeedsPicker(null);
+      if (session.folderId) {
+        setActiveDriveFolderId(session.folderId);
+      }
+      if (session.folderName) {
+        setActiveDriveFolderName(session.folderName);
+      }
+      if (session.folderUrl) {
+        setDriveFolderUrl(session.folderUrl);
+      }
+
+      setIsSyncingDrive(true);
+      try {
+        let payload = initialPayload;
+        let updatedAt = initialUpdatedAt || session.lastSyncedAt || null;
+
+        if (payload === undefined) {
+          const pulled = await gasPullState();
+          if (pulled?.ok) {
+            payload = pulled.payload;
+            updatedAt = pulled.updatedAt;
+            if (pulled.folderId) setActiveDriveFolderId(pulled.folderId);
+            if (pulled.folderName) setActiveDriveFolderName(pulled.folderName);
+            if (pulled.folderUrl) setDriveFolderUrl(pulled.folderUrl);
+          }
+        }
+
+        if (payload && typeof payload === 'object') {
+          const remoteDb = applyTombstonesToMergedDatabase(normalizeAndMergeDatabase(payload), gasScope);
+          const remoteHash = computeDatabaseContentHash(remoteDb);
+          const localDb = dbRef.current;
+          const localHash = computeDatabaseContentHash(localDb);
+          const localMeta = loadSyncMeta(gasScope);
+          const hasLocalPending = hasPersistedPendingSync(localMeta);
+
+          if (localHash !== remoteHash && hasLocalPending && !isUntouchedSeedDatabase(localDb)) {
+            // Há alterações locais pendentes divergentes da nuvem: registra no Histórico de Conflitos sem destruir nada!
+            recordConflictHistoryEntry(gasScope, {
+              source: 'apps-script',
+              kind: 'version-divergence',
+              title: 'Divergência encontrada ao abrir sessão neste dispositivo',
+              reason:
+                'Este dispositivo tinha alterações locais pendentes diferentes da versão salva no Google Drive. Escolha manualmente qual versão manter na aba Backup.',
+              errorCode: 'STARTUP_DIVERGENCE',
+              localSummary: buildDatabaseVersionSummary(localDb, {
+                updatedAt: localMeta.lastLocalEditAt || new Date().toISOString(),
+              }),
+              driveSummary: buildDatabaseVersionSummary(remoteDb, {
+                updatedAt,
+                version: session.serverVersion,
+                fileName: CLOUD_SYNC_FILENAME,
+              }),
+            });
+            toast(
+              'Há divergência entre este dispositivo e o Google Drive. Acesse Backup → Histórico de Conflitos para escolher qual versão manter.',
+              true,
+            );
+          } else if (!isUntouchedSeedDatabase(remoteDb)) {
+            const syncedAtIso = updatedAt || new Date().toISOString();
+            applyRestoredDatabaseForScope(gasScope, remoteDb, syncedAtIso, {
+              skipFirestorePush: true,
+            });
+            saveSyncMeta(gasScope, {
+              lastCloudSyncAt: syncedAtIso,
+              lastCloudContentHash: remoteHash,
+              hasPendingCloudSync: false,
+            });
+            lastCloudDbRef.current = remoteDb;
+            lastCloudHashRef.current = remoteHash;
+            pendingCloudSyncRef.current = false;
+            setHasPendingCloudChanges(false);
+            setLastCloudSyncAt(syncedAtIso);
+          }
+        } else if (!isUntouchedSeedDatabase(dbRef.current)) {
+          // Primeira vez no Apps Script: sobe o banco local atual como versão v1
+          const nowIso = new Date().toISOString();
+          const curHash = computeDatabaseContentHash(dbRef.current);
+          const pushed = await gasPushState(
+            {
+              version: 2,
+              app: 'Central de Estudos',
+              updatedAt: nowIso,
+              contentHash: curHash,
+              userEmail: session.username,
+              data: dbRef.current,
+            },
+            { force: true, contentHash: curHash },
+          );
+          if (pushed.ok) {
+            lastCloudDbRef.current = dbRef.current;
+            lastCloudHashRef.current = curHash;
+            pendingCloudSyncRef.current = false;
+            setHasPendingCloudChanges(false);
+            setLastCloudSyncAt(pushed.updatedAt || nowIso);
+          }
+        }
+
+        // Importa conflitos pendentes registrados na planilha oculta tb_conflitos
+        const serverConflicts = initialConflicts || (await gasListConflicts().catch(() => []));
+        for (const sc of serverConflicts) {
+          if (sc.status === 'pending') {
+            recordConflictHistoryEntry(gasScope, {
+              id: `srv_${sc.id}`,
+              timestamp: sc.timestamp || new Date().toISOString(),
+              source: 'apps-script',
+              kind: 'version-divergence',
+              title: `Conflito de versão (v${sc.localVersion} × v${sc.serverVersion})`,
+              reason: sc.reason || 'Divergência registrada no servidor Google Apps Script.',
+              errorCode: 'VERSION_CONFLICT',
+              serverConflictId: sc.id,
+            });
+          }
+        }
+
+        syncedScopeOnceRef.current = gasScope;
+      } catch (err: any) {
+        const msg = err?.message || 'Erro ao carregar estado do Google Apps Script.';
+        recordConflictHistoryEntry(gasScope, {
+          source: 'apps-script',
+          kind: 'sync-failure',
+          title: 'Falha ao sincronizar sessão com Google Apps Script',
+          reason: msg,
+          errorCode: 'GAS_HYDRATE_ERROR',
+          localSummary: buildDatabaseVersionSummary(dbRef.current, { updatedAt: new Date().toISOString() }),
+        });
+        toast(msg, true);
+      } finally {
+        setIsSyncingDrive(false);
+      }
+    },
+    [applyRestoredDatabaseForScope, toast],
+  );
+
+  // Hidrata sessão persistida do Google Apps Script automaticamente ao abrir o site
+  useEffect(() => {
+    const activeGas = getGasSession();
+    if (!activeGas?.token) return;
+    if (gasHydratedTokenRef.current === activeGas.token) return;
+    gasHydratedTokenRef.current = activeGas.token;
+    void hydrateGasScopeAndRemoteState(activeGas);
+  }, [gasSession?.token, hydrateGasScopeAndRemoteState]);
+
+  const connectAppsScript = useCallback(
+    async (
+      username: string,
+      password: string,
+      customApiUrl?: string,
+    ): Promise<{ ok: boolean; error?: string }> => {
+      setAuthError(null);
+      try {
+        const res = await gasLogin(username, password, customApiUrl);
+        if (!res.ok) {
+          const msg = res.error || 'Usuário ou senha inválidos no Google Apps Script.';
+          setAuthError(msg);
+          return { ok: false, error: msg };
+        }
+        const session = getGasSession();
+        if (session) {
+          gasHydratedTokenRef.current = session.token;
+          await hydrateGasScopeAndRemoteState(session, res.payload, res.updatedAt, res.conflicts);
+          recordSyncActivity({
+            category: 'drive-sync',
+            operation: 'Login no Modo 100% Google Apps Script',
+            status: 'success',
+            message: `Conectado como ${session.username} · Pasta "${session.folderName}" (v${session.serverVersion}).`,
+          });
+          toast(`Conectado ao Google Drive via Apps Script (${session.folderName})!`);
+        }
+        return { ok: true };
+      } catch (err: any) {
+        const msg = err?.message || 'Não foi possível conectar ao Google Apps Script.';
+        setAuthError(msg);
+        return { ok: false, error: msg };
+      }
+    },
+    [hydrateGasScopeAndRemoteState, recordSyncActivity, toast],
+  );
+
+  const disconnectAppsScript = useCallback(async () => {
+    const scope = activeScopeRef.current;
+    if (pendingCloudSyncRef.current && isGasSessionActive()) {
+      try {
+        await flushCloudSyncNow();
+      } catch {
+        // ignore pre-logout flush error
+      }
+    }
+    await gasLogout();
+    gasHydratedTokenRef.current = null;
+    syncedScopeOnceRef.current = null;
+    setDriveConnected(false);
+    setDriveTokenReady(false);
+    setHasPendingCloudChanges(false);
+    recordSyncActivity(
+      {
+        category: 'oauth',
+        operation: 'Desconexão do Google Apps Script',
+        status: 'success',
+        message: 'Sessão do Modo 100% Google Apps Script encerrada neste dispositivo.',
+      },
+      scope,
+    );
+    toast('Sessão do Google Apps Script encerrada.');
+  }, [flushCloudSyncNow, recordSyncActivity, toast]);
+
+  const testAppsScriptConnection = useCallback(
+    async (customApiUrl?: string) => {
+      const res = await gasPing(customApiUrl);
+      if (res.ok) {
+        return {
+          ok: true,
+          version: res.version,
+          serverVersion: res.serverVersion,
+          folderName: res.folderName,
+          message: `Conexão OK! Script v${res.version || '2.0'} ativo · Pasta "${res.folderName || 'Central de Estudos'}" · Estado v${res.serverVersion ?? 0}.`,
+        };
+      }
+      return {
+        ok: false,
+        message: res.error || 'O script não respondeu no formato JSON esperado.',
+      };
+    },
+    [],
+  );
+
+  const setAppsScriptStudyFolder = useCallback(
+    async (folderIdOrUrl: string): Promise<boolean> => {
+      const cleanInput = String(folderIdOrUrl || '').trim();
+      if (!cleanInput) {
+        toast('Informe o link ou ID da pasta do Google Drive.', true);
+        return false;
+      }
+      const extractedId = extractDriveFolderId(cleanInput);
+      const res = await gasSetStudyFolder(
+        extractedId ? { folderId: extractedId } : { folderName: cleanInput },
+      );
+      if (!res.ok) {
+        toast(res.error || 'Não foi possível associar a pasta no Google Apps Script.', true);
+        return false;
+      }
+      if (res.folderId) setActiveDriveFolderId(res.folderId);
+      if (res.folderName) setActiveDriveFolderName(res.folderName);
+      if (res.folderUrl) setDriveFolderUrl(res.folderUrl);
+      toast(`Pasta padrão "${res.folderName}" salva no servidor para todos os seus dispositivos!`);
+      return true;
+    },
+    [toast],
+  );
+
+  const setupAppsScriptDailyBackup = useCallback(async (): Promise<boolean> => {
+    const res = await gasSetupDailyBackupTrigger();
+    if (!res.ok) {
+      toast(res.error || 'Falha ao ativar backup diário automático no Google Apps Script.', true);
+      return false;
+    }
+    toast(res.message || 'Backup diário automático ativado no servidor (03h)!');
+    return true;
+  }, [toast]);
+
+  const checkLocalVsDriveDivergence = useCallback(async (): Promise<VersionComparisonReport | null> => {
+    const scope = activeScopeRef.current;
+    setIsCheckingDivergence(true);
+    try {
+      const localSummary = buildDatabaseVersionSummary(dbRef.current, {
+        updatedAt: loadSyncMeta(scope).lastLocalEditAt || lastCloudSyncAt || new Date().toISOString(),
+        version: getGasSession()?.serverVersion,
+      });
+
+      if (isGasSessionActive()) {
+        const remote = await gasInspectRemoteVersion();
+        if (!remote.ok) {
+          const report: VersionComparisonReport = {
+            checkedAt: new Date().toISOString(),
+            backendMode: 'apps-script',
+            hasDivergence: false,
+            localSummary,
+            driveSummary: null,
+            error: remote.error || 'Não foi possível consultar a versão do Google Drive.',
+          };
+          setLatestVersionComparison(report);
+          return report;
+        }
+
+        const localHash = computeDatabaseContentHash(dbRef.current);
+        const driveSummary = remote.hasRemoteData
+          ? {
+              updatedAt: remote.updatedAt,
+              version: remote.serverVersion,
+              fileName: remote.fileName || CLOUD_SYNC_FILENAME,
+              laws: Number(remote.summary?.laws || 0),
+              scheduleTopics: Number(remote.summary?.scheduleTopics || 0),
+              questions: Number(remote.summary?.questions || 0),
+              annotations: Number(remote.summary?.annotations || 0),
+              pdfs: Number(remote.summary?.pdfs || 0),
+            }
+          : null;
+
+        const sessionVer = getGasSession()?.serverVersion || 0;
+        const hashDiffers = Boolean(remote.contentHash && localHash && remote.contentHash !== localHash);
+        const versionDiffers = Boolean(remote.serverVersion > 0 && sessionVer > 0 && remote.serverVersion !== sessionVer);
+        const countsDiffer = Boolean(
+          driveSummary &&
+            (driveSummary.laws !== localSummary.laws ||
+              driveSummary.scheduleTopics !== localSummary.scheduleTopics ||
+              driveSummary.questions !== localSummary.questions ||
+              driveSummary.annotations !== localSummary.annotations ||
+              driveSummary.pdfs !== localSummary.pdfs),
+        );
+        const hasDivergence = Boolean(driveSummary && (hashDiffers || versionDiffers || countsDiffer));
+        const divergenceReason = !driveSummary
+          ? 'Ainda não há snapshot salvo na nuvem.'
+          : versionDiffers
+            ? `Versão do servidor (v${remote.serverVersion}) difere da versão local (v${sessionVer}).`
+            : countsDiffer
+              ? 'Quantidade de registros entre Local e Google Drive está diferente.'
+              : hashDiffers
+                ? 'Conteúdo interno diverge entre a versão Local e o Google Drive.'
+                : undefined;
+
+        const report: VersionComparisonReport = {
+          checkedAt: new Date().toISOString(),
+          backendMode: 'apps-script',
+          hasDivergence,
+          divergenceReason,
+          localSummary,
+          driveSummary,
+          driveFileId: remote.fileId || undefined,
+          driveFileName: remote.fileName || CLOUD_SYNC_FILENAME,
+        };
+        setLatestVersionComparison(report);
+
+        if (hasDivergence && driveSummary) {
+          recordConflictHistoryEntry(scope, {
+            source: 'apps-script',
+            kind: 'version-divergence',
+            title: 'Divergência detectada na comparação Local × Drive',
+            reason: divergenceReason || 'Local e Google Drive possuem conteúdos diferentes.',
+            errorCode: 'MANUAL_CHECK_DIVERGENCE',
+            localSummary,
+            driveSummary,
+          });
+        }
+        return report;
+      }
+
+      // Modo OAuth Drive legado
+      const token = await getAccessToken();
+      if (!token) {
+        const report: VersionComparisonReport = {
+          checkedAt: new Date().toISOString(),
+          backendMode: 'google-drive-oauth',
+          hasDivergence: false,
+          localSummary,
+          driveSummary: null,
+          error: 'Conecte o Google Apps Script ou sua conta Google Drive para comparar versões.',
+        };
+        setLatestVersionComparison(report);
+        return report;
+      }
+
+      const latestCloud = await downloadLatestCloudSync(token, {
+        expectedEmail: googleUser?.email || undefined,
+        bypassCache: true,
+      });
+      if (!latestCloud?.payload) {
+        const report: VersionComparisonReport = {
+          checkedAt: new Date().toISOString(),
+          backendMode: 'google-drive-oauth',
+          hasDivergence: false,
+          divergenceReason: 'Nenhum arquivo de sincronização encontrado no Google Drive.',
+          localSummary,
+          driveSummary: null,
+        };
+        setLatestVersionComparison(report);
+        return report;
+      }
+
+      const remoteDb = normalizeAndMergeDatabase(latestCloud.payload);
+      const driveSummary = buildDatabaseVersionSummary(remoteDb, {
+        updatedAt: latestCloud.file.modifiedTime || latestCloud.payload?.updatedAt || null,
+        fileName: latestCloud.file.name,
+      });
+      const hasDivergence = computeDatabaseContentHash(dbRef.current) !== computeDatabaseContentHash(remoteDb);
+      const report: VersionComparisonReport = {
+        checkedAt: new Date().toISOString(),
+        backendMode: 'google-drive-oauth',
+        hasDivergence,
+        divergenceReason: hasDivergence
+          ? 'O snapshot local e a cópia do Google Drive possuem diferenças.'
+          : undefined,
+        localSummary,
+        driveSummary,
+        driveFileId: latestCloud.file.id,
+        driveFileName: latestCloud.file.name,
+      };
+      setLatestVersionComparison(report);
+      if (hasDivergence) {
+        recordConflictHistoryEntry(scope, {
+          source: 'google-drive',
+          kind: 'version-divergence',
+          title: 'Divergência detectada na comparação Local × Drive',
+          reason: 'O snapshot local e o arquivo do Google Drive possuem dados diferentes.',
+          errorCode: 'MANUAL_CHECK_DIVERGENCE',
+          localSummary,
+          driveSummary,
+        });
+      }
+      return report;
+    } catch (err: any) {
+      const report: VersionComparisonReport = {
+        checkedAt: new Date().toISOString(),
+        backendMode: isGasSessionActive() ? 'apps-script' : 'google-drive-oauth',
+        hasDivergence: false,
+        localSummary: buildDatabaseVersionSummary(dbRef.current),
+        driveSummary: null,
+        error: err?.message || 'Erro ao comparar versão Local com o Google Drive.',
+      };
+      setLatestVersionComparison(report);
+      return report;
+    } finally {
+      setIsCheckingDivergence(false);
+    }
+  }, [googleUser?.email, lastCloudSyncAt]);
+
+  const resolveVersionDivergenceKeepLocal = useCallback(
+    async (entryId?: string): Promise<boolean> => {
+      const scope = activeScopeRef.current;
+      setResolvingConflictAction('keep-local');
+      try {
+        // Cria ponto de restauração local de segurança antes de forçar envio
+        const localCurHash = computeDatabaseContentHash(dbRef.current);
+        await createLocalRestorePoint(scope, JSON.stringify(dbRef.current), {
+          label: 'Segurança antes de manter versão Local sobre o Drive',
+          reason: 'manual',
+          contentHash: localCurHash,
+          stats: {
+            laws: Object.keys(dbRef.current.laws || {}).length,
+            questions: (dbRef.current.questions || []).length,
+            contests: (dbRef.current.contests || []).length,
+            errors: (dbRef.current.annotations || []).length,
+          },
+        }).catch(() => {});
+
+        const nowIso = new Date().toISOString();
+        const curHash = computeDatabaseContentHash(dbRef.current);
+        const payload = {
+          version: 2,
+          app: 'Central de Estudos',
+          updatedAt: nowIso,
+          contentHash: curHash,
+          userEmail: googleUser?.email || getGasSession()?.username || undefined,
+          data: dbRef.current,
+        };
+
+        const saved = await saveCloudSyncSnapshot(payload, undefined, { force: true });
+        lastCloudDbRef.current = dbRef.current;
+        lastCloudHashRef.current = curHash;
+        pendingCloudSyncRef.current = false;
+        setHasPendingCloudChanges(false);
+        setLastCloudSyncAt(nowIso);
+        recordUploadedFilesInCacheMeta(scope, {
+          backupFiles: saved ? [saved] : [],
+          extraPatch: {
+            lastCloudSyncAt: nowIso,
+            lastCloudContentHash: curHash,
+            hasPendingCloudSync: false,
+          },
+        });
+
+        updateConflictHistoryStatus(
+          scope,
+          entryId || 'ALL_PENDING_VERSION',
+          'resolved-local',
+          'Usuário escolheu manter a versão Local e enviá-la ao Google Drive.',
+        );
+        if (isGasSessionActive()) {
+          void gasResolveConflict('ALL_PENDING', 'resolved-local', 'Versão Local mantida pelo usuário');
+        }
+        recordSyncActivity({
+          category: 'drive-sync',
+          operation: 'Conflito resolvido (Versão Local mantida)',
+          status: 'success',
+          message: 'Versão Local enviada ao Google Drive como versão oficial.',
+        });
+        toast('Versão Local mantida e enviada com sucesso para o Google Drive!');
+        await checkLocalVsDriveDivergence();
+        return true;
+      } catch (err: any) {
+        toast(err?.message || 'Falha ao enviar versão Local para o Google Drive.', true);
+        return false;
+      } finally {
+        setResolvingConflictAction(null);
+      }
+    },
+    [checkLocalVsDriveDivergence, googleUser?.email, recordSyncActivity, toast],
+  );
+
+  const resolveVersionDivergenceKeepDrive = useCallback(
+    async (entryId?: string): Promise<boolean> => {
+      const scope = activeScopeRef.current;
+      setResolvingConflictAction('keep-drive');
+      try {
+        // Salva ponto de restauração de segurança do estado Local atual ANTES de substituir pelo Drive!
+        const beforeRestoreHash = computeDatabaseContentHash(dbRef.current);
+        await createLocalRestorePoint(scope, JSON.stringify(dbRef.current), {
+          label: 'Backup automático local antes de adotar versão do Google Drive',
+          reason: 'auto-pre-restore',
+          contentHash: beforeRestoreHash,
+          stats: {
+            laws: Object.keys(dbRef.current.laws || {}).length,
+            questions: (dbRef.current.questions || []).length,
+            contests: (dbRef.current.contests || []).length,
+            errors: (dbRef.current.annotations || []).length,
+          },
+        }).catch(() => {});
+
+        const latestCloud = await downloadLatestCloudSync(undefined, {
+          expectedEmail: googleUser?.email || getGasSession()?.username || undefined,
+          bypassCache: true,
+        });
+        if (!latestCloud?.payload) {
+          toast('Nenhum dado válido encontrado no Google Drive para restaurar.', true);
+          return false;
+        }
+
+        let remoteDb = normalizeAndMergeDatabase(latestCloud.payload);
+        if (latestCloud.incrementalDeltas?.length) {
+          for (const incDelta of latestCloud.incrementalDeltas) {
+            remoteDb = applyIncrementalDeltaToDatabase(remoteDb, incDelta);
+          }
+        }
+        const remoteHash = computeDatabaseContentHash(remoteDb);
+        const nowIso = latestCloud.file.modifiedTime || new Date().toISOString();
+
+        applyRestoredDatabaseForScope(scope, remoteDb, nowIso, {
+          skipFirestorePush: isGasSessionActive(),
+        });
+        saveSyncMeta(scope, {
+          lastCloudSyncAt: nowIso,
+          lastCloudContentHash: remoteHash,
+          hasPendingCloudSync: false,
+        });
+        lastCloudDbRef.current = remoteDb;
+        lastCloudHashRef.current = remoteHash;
+        pendingCloudSyncRef.current = false;
+        setHasPendingCloudChanges(false);
+        setLastCloudSyncAt(nowIso);
+
+        updateConflictHistoryStatus(
+          scope,
+          entryId || 'ALL_PENDING_VERSION',
+          'resolved-drive',
+          'Usuário escolheu restaurar a versão do Google Drive (ponto de segurança local salvo antes).',
+        );
+        if (isGasSessionActive()) {
+          void gasResolveConflict('ALL_PENDING', 'resolved-drive', 'Versão do Drive adotada pelo usuário');
+        }
+        recordSyncActivity({
+          category: 'drive-restore',
+          operation: 'Conflito resolvido (Versão do Drive mantida)',
+          status: 'success',
+          message: 'Versão do Google Drive restaurada neste dispositivo (backup local salvo nos Pontos de Restauração).',
+        });
+        toast('Versão do Google Drive restaurada com sucesso! Um ponto de segurança local foi salvo antes da troca.');
+        await checkLocalVsDriveDivergence();
+        return true;
+      } catch (err: any) {
+        toast(err?.message || 'Falha ao baixar versão do Google Drive.', true);
+        return false;
+      } finally {
+        setResolvingConflictAction(null);
+      }
+    },
+    [applyRestoredDatabaseForScope, checkLocalVsDriveDivergence, googleUser?.email, recordSyncActivity, toast],
+  );
+
+  const dismissConflictHistoryEntry = useCallback((entryId: string) => {
+    const scope = activeScopeRef.current;
+    updateConflictHistoryStatus(scope, entryId, 'dismissed', 'Dispensado manualmente pelo usuário.');
+  }, []);
+
+  const clearResolvedConflictHistory = useCallback(() => {
+    clearResolvedConflictHistoryForScope(activeScopeRef.current);
+  }, []);
+
   const disconnectGoogleDrive = useCallback(async () => {
+    if (isGasSessionActive()) {
+      await disconnectAppsScript();
+      return;
+    }
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
     const prevScope = activeScopeRef.current;
     const nowIso = new Date().toISOString();
@@ -15789,6 +16598,24 @@ function isEmailAuthorized(email?: string | null): boolean {
         pruneOldCloudBackups,
         syncActivityLogs,
         clearSyncActivityLogs,
+        gasSession,
+        gasConnected,
+        gasApiUrl: gasApiUrl || GAS_DEFAULT_API_URL,
+        setGasApiUrl,
+        connectAppsScript,
+        disconnectAppsScript,
+        testAppsScriptConnection,
+        setAppsScriptStudyFolder,
+        setupAppsScriptDailyBackup,
+        conflictHistory,
+        latestVersionComparison,
+        isCheckingDivergence,
+        resolvingConflictAction,
+        checkLocalVsDriveDivergence,
+        resolveVersionDivergenceKeepLocal,
+        resolveVersionDivergenceKeepDrive,
+        dismissConflictHistoryEntry,
+        clearResolvedConflictHistory,
         driveSyncConflicts,
         driveConflictErrors,
         resolvingDriveConflictId,

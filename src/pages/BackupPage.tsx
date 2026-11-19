@@ -26,6 +26,8 @@ import { CLOUD_SYNC_FILENAME, DriveFileInfo, DriveFolderSummary } from '../lib/g
 import { formatUploadSize } from '../lib/parsers';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 import { SyncActivityLogPanel } from '../components/backup/SyncActivityLogPanel';
+import { AppsScriptSetupPanel } from '../components/backup/AppsScriptSetupPanel';
+import { ConflictHistoryPanel } from '../components/backup/ConflictHistoryPanel';
 
 export const BackupPage: React.FC = () => {
   const {
@@ -408,6 +410,10 @@ export const BackupPage: React.FC = () => {
         onChange={(e) => void handleMobileQuickFilesImport(e)}
         className="hidden"
       />
+
+      <AppsScriptSetupPanel />
+
+      <ConflictHistoryPanel />
 
       <Panel
         title="Banco de Dados Principal em Nuvem — Firebase Firestore (Tempo Real)"

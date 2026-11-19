@@ -115,6 +115,8 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     disconnectGoogleDrive,
     authorizeDriveFolderViaPicker,
     firestoreConnectionMonitor,
+    gasConnected,
+    gasSession,
     toast,
   } = useStudy();
 
@@ -616,34 +618,50 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
           <button
             type="button"
             onClick={async () => {
+              if (gasConnected) {
+                setActivePage('Backup e Restauração');
+                return;
+              }
               await disconnectGoogleDrive();
               if (onExitToLogin) onExitToLogin();
             }}
-            aria-label="Desconectar do Google"
+            aria-label={gasConnected ? 'Salvo na nuvem (Google Apps Script)' : 'Desconectar do Google'}
             title={
-              firestoreConnectionMonitor.status === 'expired' ||
-              firestoreConnectionMonitor.status === 'inconsistent'
-                ? `Alerta de autenticação (${googleUser?.email || ''}): ${firestoreConnectionMonitor.message || 'Sessão expirada ou inconsistente'}`
-                : drivePermissionNeedsPicker
-                ? `Conectado (${googleUser?.email || ''}) · Aguardando autorização da pasta — Clique para sair`
-                : isRenewingDriveToken
-                ? `Conectado (${googleUser?.email || ''}) · Renovando sessão automaticamente…`
-                : !driveTokenReady
-                ? `Conta conectada (${googleUser?.email || ''}) · Clique em Reconectar se precisar enviar arquivos ao Drive`
-                : isSyncingDrive
-                ? `Sincronizando (${googleUser?.email || ''})…`
-                : `Sessão permanente ativa (${googleUser?.email || ''}) — Clique para sair`
+              gasConnected
+                ? isSyncingDrive
+                  ? `Salvando na nuvem (${gasSession?.username || ''})…`
+                  : `Salvo na nuvem via Google Apps Script (${gasSession?.username || ''}) — Clique para gerenciar em Backup`
+                : firestoreConnectionMonitor.status === 'expired' ||
+                    firestoreConnectionMonitor.status === 'inconsistent'
+                  ? `Alerta de autenticação (${googleUser?.email || ''}): ${firestoreConnectionMonitor.message || 'Sessão expirada ou inconsistente'}`
+                  : drivePermissionNeedsPicker
+                    ? `Conectado (${googleUser?.email || ''}) · Aguardando autorização da pasta — Clique para sair`
+                    : isRenewingDriveToken
+                      ? `Conectado (${googleUser?.email || ''}) · Renovando sessão automaticamente…`
+                      : !driveTokenReady
+                        ? `Conta conectada (${googleUser?.email || ''}) · Clique em Reconectar se precisar enviar arquivos ao Drive`
+                        : isSyncingDrive
+                          ? `Sincronizando (${googleUser?.email || ''})…`
+                          : `Sessão permanente ativa (${googleUser?.email || ''}) — Clique para sair`
             }
-            className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 ${
-              firestoreConnectionMonitor.status === 'expired' ||
-              firestoreConnectionMonitor.status === 'inconsistent'
+            className={`relative inline-flex items-center justify-center gap-1.5 h-9 sm:h-10 ${
+              gasConnected ? 'px-2.5' : 'w-9 sm:w-10'
+            } rounded-xl border transition-colors shrink-0 cursor-pointer ${
+              !gasConnected &&
+              (firestoreConnectionMonitor.status === 'expired' ||
+                firestoreConnectionMonitor.status === 'inconsistent')
                 ? 'border-[var(--bad)]/60 bg-[var(--bad)]/15 text-[var(--bad)]'
-                : drivePermissionNeedsPicker || (!driveTokenReady && !isRenewingDriveToken)
-                ? 'border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
-                : 'border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
+                : !gasConnected && (drivePermissionNeedsPicker || (!driveTokenReady && !isRenewingDriveToken))
+                  ? 'border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--bad)] hover:text-[var(--bad)]'
+                  : 'border-[var(--good)]/40 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--accent)]'
             }`}
           >
-            <Cloud className={`w-4 h-4 ${isSyncingDrive || isRenewingDriveToken ? 'animate-pulse' : ''}`} />
+            <Cloud className="w-4 h-4 shrink-0" />
+            {gasConnected && (
+              <span className="hidden lg:inline text-[11px] font-bold whitespace-nowrap">
+                {isSyncingDrive ? 'Salvando…' : 'Salvo na nuvem'}
+              </span>
+            )}
           </button>
         ) : (
           <button

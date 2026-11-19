@@ -12,10 +12,15 @@ export const FirestoreAuthAlertBanner: React.FC = () => {
     driveTokenReady,
     isRenewingDriveToken,
     hasPendingCloudChanges,
+    gasConnected,
     setActivePage,
   } = useStudy();
   const [checking, setChecking] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+
+  if (gasConnected) {
+    return null;
+  }
 
   const { status, code, message, lastCheckedAt, consecutiveFailures, oauthDriveExpired, dismissed } =
     firestoreConnectionMonitor;

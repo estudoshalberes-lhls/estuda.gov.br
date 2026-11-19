@@ -12,6 +12,22 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import { loadDriveJsonCacheEntry, saveDriveJsonCacheEntry } from './fileStorage';
 import { IncrementalBackupEnvelope, isIncrementalBackupPayload } from './incrementalBackup';
+import {
+  gasCreateBackup,
+  gasDeleteFile,
+  gasDownloadBackup,
+  gasDownloadFileBlob,
+  gasListBackups,
+  gasListFiles,
+  gasPruneBackups,
+  gasPullState,
+  gasPushState,
+  gasReadPostIt,
+  gasSavePostIt,
+  gasUploadFile,
+  getGasSession,
+  isGasSessionActive,
+} from './appsScriptBackend';
 
 export { firebaseConfig };
 export type { User };
@@ -1056,6 +1072,9 @@ export const getAccessToken = async (options?: {
   forceRefresh?: boolean;
   loginHint?: string | null;
 }): Promise<string | null> => {
+  if (isGasSessionActive()) {
+    return 'gas-session-active';
+  }
   if (!options?.forceRefresh) {
     if (!cachedAccessToken && auth.currentUser) {
       restorePersistedDriveAccessToken(auth.currentUser);
@@ -1409,6 +1428,14 @@ export async function verifyDriveFolderWritable(folderId: string, token?: string
  * Respects user-selected folder preference when configured; falls back to "Central de Estudos - Materiais".
  */
 export async function getOrCreateStudyFolder(token?: string): Promise<{ id: string; name: string; webViewLink?: string }> {
+  const gasSession = getGasSession();
+  if (gasSession) {
+    return {
+      id: gasSession.folderId || 'gas_root',
+      name: gasSession.folderName || DRIVE_FOLDER_NAME,
+      webViewLink: gasSession.folderUrl || undefined,
+    };
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('Usuário não autenticado no Google.');
@@ -1685,6 +1712,10 @@ export async function getOrCreateStudySubFolder(
   subfolderName: string | string[],
   token?: string,
 ): Promise<string> {
+  if (isGasSessionActive()) {
+    const label = Array.isArray(subfolderName) ? subfolderName.filter(Boolean).join('/') : String(subfolderName || '').trim();
+    return label || parentId;
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) throw new Error('Usuário não autenticado no Google.');
 
@@ -1707,6 +1738,9 @@ export async function syncStudySubFoldersInDrive(
   parentId: string,
   token?: string,
 ): Promise<Record<string, string>> {
+  if (isGasSessionActive()) {
+    return {};
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) throw new Error('Usuário não autenticado no Google.');
 
@@ -1756,6 +1790,10 @@ export async function uploadFileToDrive(
   subfolderName?: string | string[],
   options?: { existingFileId?: string; moduleTag?: string; sourceAction?: string },
 ): Promise<DriveFileInfo> {
+  if (isGasSessionActive()) {
+    const saved = await gasUploadFile(fileOrBlob, filename, subfolderName, options?.moduleTag);
+    return enrichDriveFileWithSyncTag(saved);
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
@@ -1866,6 +1904,11 @@ export async function upsertTextFileInDriveSubFolder(
   token?: string,
   options?: { moduleTag?: string },
 ): Promise<DriveFileInfo> {
+  if (isGasSessionActive()) {
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const saved = await gasUploadFile(blob, filename, subfolderName, options?.moduleTag);
+    return enrichDriveFileWithSyncTag(saved);
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
@@ -1993,6 +2036,18 @@ export async function listAllStudyFilesInDrive(
   token?: string,
   prefetchedGraph?: DriveFolderGraphResult,
 ): Promise<DriveFileInfo[]> {
+  if (isGasSessionActive()) {
+    const res = await gasListFiles();
+    return res.files.map((f) =>
+      enrichDriveFileWithSyncTag({
+        ...f,
+        isInStudyFolder: true,
+        isInActiveFolder: true,
+        subfolderName: (f as any).folderName || f.subfolderName,
+        folderPath: (f as any).folderName || f.folderPath || res.folderName,
+      }),
+    );
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para listar os arquivos do Drive.');
@@ -2083,6 +2138,25 @@ export async function listAllStudyFilesInDrive(
  * Inspects all folders associated with the user's Google Drive account along with their contained files.
  */
 export async function listDriveFoldersOverview(token?: string): Promise<DriveFolderSummary[]> {
+  if (isGasSessionActive()) {
+    const res = await gasListFiles();
+    return res.folders.map((folder) => {
+      const folderFiles = res.files.filter(
+        (f) => f.parents?.includes(folder.id) || (f as any).folderName === folder.fullPath,
+      );
+      return {
+        id: folder.id,
+        name: folder.name,
+        fullPath: folder.fullPath || folder.name,
+        webViewLink: folder.webViewLink,
+        isStudyRoot: folder.id === res.folderId,
+        isInsideStudyRoot: true,
+        fileCount: folderFiles.length,
+        studyFileCount: folderFiles.length,
+        files: folderFiles,
+      };
+    });
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para verificar as pastas do Drive.');
@@ -2234,6 +2308,43 @@ export async function saveCloudSyncSnapshot(
   token?: string,
   options?: { force?: boolean },
 ): Promise<DriveFileInfo> {
+  if (isGasSessionActive()) {
+    const payloadObj =
+      payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : null;
+    const res = await gasPushState(payload, {
+      force: options?.force,
+      contentHash: String(payloadObj?.contentHash || ''),
+    });
+    if (!res.ok) {
+      if (res.code === 'VERSION_CONFLICT') {
+        const err = new Error(
+          res.error ||
+            'DRIVE_CONFLICT_NEWER_REMOTE: Outro dispositivo salvou uma versão mais recente no Google Drive.',
+        ) as Error & {
+          code?: string;
+          conflictId?: string;
+          serverVersion?: number;
+          remoteUpdatedAt?: string | null;
+          remoteSummary?: unknown;
+        };
+        err.code = 'VERSION_CONFLICT';
+        err.conflictId = res.conflictId;
+        err.serverVersion = res.serverVersion;
+        err.remoteUpdatedAt = res.remoteUpdatedAt;
+        err.remoteSummary = res.remoteSummary;
+        throw err;
+      }
+      throw new Error(res.error || 'Falha ao sincronizar estado com Google Apps Script.');
+    }
+    return enrichDriveFileWithSyncTag(
+      res.file || {
+        id: 'gas_sync_latest',
+        name: CLOUD_SYNC_FILENAME,
+        mimeType: 'application/json',
+        modifiedTime: res.updatedAt || new Date().toISOString(),
+      },
+    );
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('Usuário não autenticado no Google Drive.');
@@ -2335,6 +2446,13 @@ export async function saveDatabaseBackupToDrive(
   dbSnapshot: unknown,
   token?: string,
 ): Promise<DriveFileInfo> {
+  if (isGasSessionActive()) {
+    const res = await gasCreateBackup(dbSnapshot);
+    if (!res.ok || !res.file) {
+      throw new Error(res.error || 'Falha ao salvar backup via Google Apps Script.');
+    }
+    return enrichDriveFileWithSyncTag(res.file);
+  }
   const jsonString = await encodeDriveSnapshotJson(dbSnapshot);
   const blob = new Blob([jsonString], { type: 'application/json' });
   const now = new Date();
@@ -2356,6 +2474,17 @@ export async function listDatabaseBackupsFromDrive(
   token?: string,
   options?: { activeFolderId?: string; onlyActiveFolder?: boolean },
 ): Promise<DriveFileInfo[]> {
+  if (isGasSessionActive()) {
+    const files = await gasListBackups();
+    return files.map((f) =>
+      enrichDriveFileWithSyncTag({
+        ...f,
+        isInStudyFolder: true,
+        isInActiveFolder: true,
+        folderPath: 'Backups',
+      }),
+    );
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para listar backups.');
@@ -2425,6 +2554,10 @@ export async function pruneOldDatabaseBackupsFromDrive(
   token?: string,
   maxKeep = 25,
 ): Promise<{ deleted: number; kept: number }> {
+  if (isGasSessionActive()) {
+    const deleted = await gasPruneBackups(maxKeep);
+    return { deleted, kept: maxKeep };
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) return { deleted: 0, kept: 0 };
 
@@ -2525,6 +2658,10 @@ export async function downloadBackupFileFromDrive(
   token?: string,
   cacheOptions?: { versionStamp?: string; bypassCache?: boolean },
 ): Promise<any> {
+  if (isGasSessionActive()) {
+    const res = await gasDownloadBackup(fileId);
+    return await decodeDriveSnapshotJson(res.payload);
+  }
   if (cacheOptions?.versionStamp && !cacheOptions.bypassCache) {
     const cached = await loadDriveJsonCacheEntry(fileId, cacheOptions.versionStamp);
     if (cached !== null) {
@@ -2617,6 +2754,30 @@ export async function downloadLatestCloudSync(
   permissionBlockedCount?: number;
   permissionBlockedFolderId?: string;
 } | null> {
+  if (isGasSessionActive()) {
+    const res = await gasPullState();
+    if (!res.ok || !res.payload) {
+      return null;
+    }
+    const decoded = await decodeDriveSnapshotJson(res.payload);
+    const syncFile: DriveFileInfo = enrichDriveFileWithSyncTag({
+      id: res.fileId || 'gas_sync_latest',
+      name: res.fileName || CLOUD_SYNC_FILENAME,
+      mimeType: 'application/json',
+      modifiedTime: res.updatedAt || new Date().toISOString(),
+      isInStudyFolder: true,
+      isInActiveFolder: true,
+      folderPath: 'Backups',
+    });
+    return {
+      file: syncFile,
+      payload: decoded,
+      incrementalDeltas: [],
+      fromActiveFolder: true,
+      folderPath: res.folderName || 'Backups',
+      scopedBackups: [syncFile],
+    };
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta Google para restaurar backup.');
@@ -2781,6 +2942,13 @@ export async function downloadDriveFileBlob(
   token?: string,
   fallbackMime?: string,
 ): Promise<Blob> {
+  if (isGasSessionActive()) {
+    const blob = await gasDownloadFileBlob(fileId, fallbackMime);
+    if (!blob) {
+      throw new Error('Arquivo não encontrado no Google Drive via Google Apps Script.');
+    }
+    return blob;
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) throw new Error('TOKEN_EXPIRED: Não autenticado no Google.');
 
@@ -2896,6 +3064,28 @@ export async function trashFileInDriveDetailed(
   const cleanId = String(fileId || '').replace(/^drive_/, '').trim();
   if (!cleanId) {
     return { ok: true, fileId: '', alreadyMissing: true };
+  }
+
+  if (isGasSessionActive()) {
+    try {
+      const res = await gasDeleteFile(cleanId);
+      if (res.ok) {
+        return { ok: true, fileId: cleanId };
+      }
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: res.code === 'OUTSIDE_STUDY_FOLDER' ? 'forbidden-readonly' : 'unknown',
+        detail: res.error || 'Falha ao mover arquivo para a lixeira via Apps Script.',
+      };
+    } catch (err: any) {
+      return {
+        ok: false,
+        fileId: cleanId,
+        reason: 'network',
+        detail: err?.message || 'Erro de rede ao apagar arquivo via Apps Script.',
+      };
+    }
   }
 
   const activeToken = token || (await getAccessToken());
@@ -3762,6 +3952,19 @@ export async function readPostItFileFromDrive(
   token?: string,
   knownFileId?: string | null,
 ): Promise<{ file: DriveFileInfo; content: string } | null> {
+  if (isGasSessionActive()) {
+    const res = await gasReadPostIt();
+    if (!res.exists || !res.fileId) return null;
+    return {
+      file: enrichDriveFileWithSyncTag({
+        id: res.fileId,
+        name: POST_IT_FILENAME,
+        mimeType: 'text/plain',
+        modifiedTime: res.modifiedTime || new Date().toISOString(),
+      }),
+      content: res.content,
+    };
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
@@ -3838,6 +4041,18 @@ export async function savePostItFileToDrive(
   token?: string,
   knownFileId?: string | null,
 ): Promise<DriveFileInfo> {
+  if (isGasSessionActive()) {
+    const res = await gasSavePostIt(content, { force: true });
+    if (!res.ok) {
+      throw new Error(res.error || 'Falha ao salvar Post-it.txt via Google Apps Script.');
+    }
+    return enrichDriveFileWithSyncTag({
+      id: res.fileId || knownFileId || 'gas_postit',
+      name: POST_IT_FILENAME,
+      mimeType: 'text/plain',
+      modifiedTime: res.modifiedTime || new Date().toISOString(),
+    });
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
     throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');

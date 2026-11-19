@@ -5,8 +5,12 @@ import {
   BookOpen,
   Check,
   Copy,
+  Eye,
+  EyeOff,
   ExternalLink,
+  KeyRound,
   Lock,
+  Server,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
 import firebaseConfig from '../../../firebase-applet-config.json';
@@ -49,6 +53,9 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
     googleUser,
     firebaseConnected,
     driveConnected,
+    gasConnected,
+    gasSession,
+    connectAppsScript,
     connectGoogleDrive,
     authError,
     toast,
@@ -56,9 +63,35 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
   } = useStudy();
 
   const [loading, setLoading] = useState(false);
+  const [gasLoading, setGasLoading] = useState(false);
+  const [gasUsername, setGasUsername] = useState('estudos.halberes@gmail.com');
+  const [gasPassword, setGasPassword] = useState('');
+  const [showGasPassword, setShowGasPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [copiedHost, setCopiedHost] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
+
+  const handleAppsScriptLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gasUsername.trim() || !gasPassword.trim()) {
+      setErrorMessage('Informe usuário e senha para acessar sua nuvem no Google Drive.');
+      return;
+    }
+    setGasLoading(true);
+    setErrorMessage(null);
+    try {
+      const res = await connectAppsScript(gasUsername.trim(), gasPassword.trim());
+      if (res.ok) {
+        onContinueOffline();
+      } else {
+        setErrorMessage(res.error || 'Usuário ou senha incorretos.');
+      }
+    } catch (err: any) {
+      setErrorMessage(err?.message || 'Falha ao conectar com o Google Apps Script.');
+    } finally {
+      setGasLoading(false);
+    }
+  };
 
   const currentHost = typeof window !== 'undefined' ? window.location.hostname : '';
   const currentOrigin = typeof window !== 'undefined' ? window.location.origin : '';
@@ -219,59 +252,92 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onContinueOffline }) =
               Identifique-se no estuda.gov.br com:
             </h2>
 
-            {/* Botão Principal: Entrar com Conta Google (Firebase + Google Drive) */}
+            {/* Acesso Universal 100% Google Apps Script (Usuário e Senha · Multi-Dispositivo) */}
             <div className="mt-4 pb-4 border-b border-[var(--line)]">
-              {(firebaseConnected || driveConnected) && googleUser?.email ? (
+              {gasConnected && gasSession ? (
                 <div className="flex flex-col gap-2">
                   <button
                     type="button"
                     onClick={onContinueOffline}
                     className="w-full min-h-[44px] px-5 py-2.5 rounded-full border border-[var(--good)] bg-[var(--good)] text-white text-[13.5px] font-bold flex items-center justify-center gap-2 hover:opacity-95 transition-opacity cursor-pointer shadow-xs"
                   >
-                    <span>Entrar no Portal ({googleUser.email})</span>
+                    <Server className="w-4 h-4 shrink-0" />
+                    <span>Entrar no Portal ({gasSession.username})</span>
                     <ArrowRight className="w-4 h-4 shrink-0" />
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleGoogleLogin(true)}
-                    disabled={loading}
-                    className="w-full py-1.5 text-[11.5px] font-semibold text-[var(--accent)] hover:underline bg-transparent border-0 cursor-pointer"
-                  >
-                    Trocar de conta Google
-                  </button>
+                  <p className="m-0 text-[11px] text-center text-[var(--muted)]">
+                    Modo 100% Google Apps Script ativo · Pasta {gasSession.folderName}
+                  </p>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => void handleGoogleLogin()}
-                  disabled={loading}
-                  className="w-full min-h-[44px] px-5 py-2.5 rounded-full border border-[var(--line-strong)] bg-white text-[#1f1f1f] hover:border-[var(--accent)] text-[13.5px] font-bold flex items-center justify-center gap-2.5 transition-colors cursor-pointer disabled:opacity-60 shadow-xs"
-                >
-                  <svg
-                    xmlns="http://www.w3.org/2000/svg"
-                    viewBox="0 0 48 48"
-                    className="w-4 h-4 shrink-0"
-                    aria-hidden="true"
+                <form onSubmit={handleAppsScriptLogin} className="space-y-3">
+                  <div className="flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--accent)]">
+                    <KeyRound className="w-3.5 h-3.5 shrink-0" />
+                    <span>Acesso Universal (Modo 100% Google Apps Script · Drive)</span>
+                  </div>
+
+                  <div>
+                    <label htmlFor="login-gas-user" className="block text-[11.5px] font-semibold text-[var(--muted)] mb-1">
+                      Usuário
+                    </label>
+                    <input
+                      id="login-gas-user"
+                      type="text"
+                      autoComplete="username"
+                      value={gasUsername}
+                      onChange={(e) => setGasUsername(e.target.value)}
+                      placeholder="estudos.halberes@gmail.com"
+                      className="ce-input"
+                    />
+                  </div>
+
+                  <div>
+                    <label htmlFor="login-gas-pass" className="block text-[11.5px] font-semibold text-[var(--muted)] mb-1">
+                      Senha
+                    </label>
+                    <div className="relative">
+                      <input
+                        id="login-gas-pass"
+                        type={showGasPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        value={gasPassword}
+                        onChange={(e) => setGasPassword(e.target.value)}
+                        placeholder="Digite sua senha de acesso"
+                        className="ce-input pr-10"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setShowGasPassword((v) => !v)}
+                        aria-label={showGasPassword ? 'Ocultar senha' : 'Mostrar senha'}
+                        className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--text)] bg-transparent border-0 p-1 cursor-pointer"
+                      >
+                        {showGasPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={gasLoading}
+                    className="w-full min-h-[44px] px-5 py-2.5 rounded-full border border-[var(--accent)] bg-[var(--accent)] text-white text-[13.5px] font-bold flex items-center justify-center gap-2 hover:bg-[var(--accent-hover)] transition-colors cursor-pointer disabled:opacity-60 shadow-xs"
                   >
-                    <path
-                      fill="#EA4335"
-                      d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"
-                    />
-                    <path
-                      fill="#4285F4"
-                      d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"
-                    />
-                    <path
-                      fill="#FBBC05"
-                      d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"
-                    />
-                    <path
-                      fill="#34A853"
-                      d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
-                    />
-                  </svg>
-                  <span>{loading ? 'Autenticando no Google…' : 'Entrar com Conta Google (Firebase & Drive)'}</span>
-                </button>
+                    <span>{gasLoading ? 'Sincronizando com o Drive…' : 'Entrar e Sincronizar Nuvem'}</span>
+                    <ArrowRight className="w-4 h-4 shrink-0" />
+                  </button>
+                </form>
+              )}
+
+              {(firebaseConnected || driveConnected) && !gasConnected && googleUser?.email && (
+                <div className="mt-3 pt-3 border-t border-[var(--line)] flex flex-col gap-1.5">
+                  <button
+                    type="button"
+                    onClick={onContinueOffline}
+                    className="w-full min-h-[40px] px-4 py-2 rounded-full border border-[var(--good)] bg-[var(--good)]/12 text-[var(--good)] text-[12.5px] font-bold flex items-center justify-center gap-2 hover:bg-[var(--good)] hover:text-white transition-colors cursor-pointer"
+                  >
+                    <span>Continuar com Google ({googleUser.email})</span>
+                    <ArrowRight className="w-4 h-4 shrink-0" />
+                  </button>
+                </div>
               )}
             </div>
 
