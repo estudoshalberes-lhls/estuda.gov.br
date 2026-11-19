@@ -911,13 +911,13 @@ export function reconcileCompletedAndArchivedItems(
       }
       exactDoneDatesByNoDateKey.get(keys.noDateKey)!.add(keys.date);
     }
-    if (!olderBaseDb || !olderCompletedIds.has(g.id)) {
+    if (olderBaseDb && !olderCompletedIds.has(g.id)) {
       newNoDateDoneOrArchivedKeys.add(keys.noDateKey);
     }
   }
 
   for (const inc of authIncomplete) {
-    if (!olderBaseDb || !olderIncompleteIds.has(inc.id)) {
+    if (olderBaseDb && !olderIncompleteIds.has(inc.id)) {
       const keys = getPendingMatchKeys(inc);
       if (!keys.materia) continue;
       if (keys.date) {
@@ -932,14 +932,19 @@ export function reconcileCompletedAndArchivedItems(
     day: WeekdayName,
     topics: ScheduleTopic[],
     dayDates?: Partial<Record<WeekdayName, string>>,
+    authoritativeDayTopicsOverride?: ScheduleTopic[],
   ): { nextTopics: ScheduleTopic[]; changed: boolean } => {
     if (!topics.length) return { nextTopics: topics, changed: false };
 
-    const authDayTopics = authoritativeDb.schedule?.[day] || [];
+    const authDayTopics = authoritativeDayTopicsOverride ?? (authoritativeDb.schedule?.[day] || []);
     const authTopicIds = new Set(authDayTopics.map((t) => t.id));
-    const authBaseCounts = authScheduleBaseCountsByDay.get(day) || new Map<string, number>();
-    const authNoDateCounts = authScheduleNoDateCountsByDay.get(day) || new Map<string, number>();
     const fallbackDate = dayDates?.[day] || '';
+    const authBaseCounts = authoritativeDayTopicsOverride
+      ? countByKey(authDayTopics, (t) => getPendingMatchKeys(t, day, fallbackDate).baseKey)
+      : authScheduleBaseCountsByDay.get(day) || new Map<string, number>();
+    const authNoDateCounts = authoritativeDayTopicsOverride
+      ? countByKey(authDayTopics, (t) => getPendingMatchKeys(t, day, fallbackDate).noDateKey)
+      : authScheduleNoDateCountsByDay.get(day) || new Map<string, number>();
 
     const usedExact = new Map<string, number>();
     const usedNoDate = new Map<string, number>();
@@ -950,6 +955,12 @@ export function reconcileCompletedAndArchivedItems(
     const keptTopicIds = new Set<string>();
 
     for (const topic of orderedTopics) {
+      // Never strip a topic that is explicitly present by ID in the authoritative schedule/week
+      if (topic.id && authTopicIds.has(topic.id)) {
+        keptTopicIds.add(topic.id);
+        continue;
+      }
+
       const keys = getPendingMatchKeys(topic, day, fallbackDate);
       const hasExplicitTopicDate = Boolean(normalizeGoalMatchPart(topic.data));
       const matchedExact =
@@ -1011,6 +1022,7 @@ export function reconcileCompletedAndArchivedItems(
   };
   for (const [wk, rec] of Object.entries(nextWeeklySchedules)) {
     if (!rec || !rec.schedule) continue;
+    const authWeekRec = authoritativeDb.weeklySchedules?.[wk];
     let recChanged = false;
     const updatedRecSchedule: ScheduleMap = { ...rec.schedule };
     for (const day of WEEKDAYS) {
@@ -1018,6 +1030,7 @@ export function reconcileCompletedAndArchivedItems(
         day,
         updatedRecSchedule[day] || [],
         rec.scheduleDayDates || mergedDb.scheduleDayDates,
+        authWeekRec?.schedule?.[day],
       );
       if (res.changed) {
         updatedRecSchedule[day] = res.nextTopics;
@@ -1325,18 +1338,10 @@ export function clearDeletedTombstones(scope: string): void {
 }
 
 function getScheduleTopicTombstoneKeys(day: WeekdayName, topic: ScheduleTopic): string[] {
-  if (!topic) return [];
-  const keys: string[] = [];
-  if (topic.id) {
-    keys.push(`id:${day}::${topic.id}`);
-    keys.push(`id:${topic.id}`);
-  }
-  const mat = normalizeGoalMatchPart(topic.materia);
-  const obs = normalizeGoalMatchPart(topic.observacoes);
-  if (mat || obs) {
-    keys.push(`sig:${day}::${mat}::${obs}`);
-  }
-  return keys;
+  if (!topic?.id) return [];
+  // Only match by unique topic ID — NEVER by subject/notes text signature,
+  // otherwise re-adding or importing the same subject on another week gets silently deleted!
+  return [`id:${day}::${topic.id}`, `id:${topic.id}`];
 }
 
 function collectActiveTombstoneKeys(activeDb: StudyDatabase): Map<string, Set<string>> {
@@ -1421,7 +1426,42 @@ function collectActiveTombstoneKeys(activeDb: StudyDatabase): Map<string, Set<st
     }
   }
 
+  // Also preserve topics that live inside any saved week in weeklySchedules so switching weeks never tombstones them
+  for (const rec of Object.values(activeDb.weeklySchedules || {})) {
+    if (!rec?.schedule) continue;
+    for (const day of WEEKDAYS) {
+      for (const topic of rec.schedule[day] || []) {
+        for (const k of getScheduleTopicTombstoneKeys(day, topic)) {
+          addActive('scheduleTopics', k);
+        }
+      }
+    }
+  }
+
   return activeKeysBySection;
+}
+
+export function stripActiveEntityTombstones(
+  tombstones: Record<string, number> | undefined,
+  activeDb: StudyDatabase,
+): Record<string, number> | undefined {
+  if (!tombstones || Object.keys(tombstones).length === 0) return tombstones;
+  const activeKeysBySection = collectActiveTombstoneKeys(activeDb);
+  const next: Record<string, number> = {};
+  let changed = false;
+  for (const [composite, ts] of Object.entries(tombstones)) {
+    const sepIdx = composite.indexOf('::');
+    if (sepIdx <= 0) continue;
+    const section = composite.slice(0, sepIdx);
+    const key = composite.slice(sepIdx + 2);
+    const activeSet = activeKeysBySection.get(section);
+    if (activeSet && activeSet.has(key)) {
+      changed = true;
+      continue;
+    }
+    next[composite] = ts;
+  }
+  return changed ? next : tombstones;
 }
 
 export function pruneActiveTombstonesForDatabase(
@@ -1613,14 +1653,28 @@ export function detectDeletedEntitiesBetweenDatabases(
     }
   }
 
-  // Track deleted schedule topics per day (only if topic.id was actually removed)
+  // Track deleted schedule topics per day ONLY when the topic ID disappeared from BOTH
+  // the active schedule AND all saved weeklySchedules (so switching weeks never tombstones saved weeks!)
+  const survivingScheduleTopicIds = new Set<string>();
+  for (const day of WEEKDAYS) {
+    for (const t of nextDb.schedule?.[day] || []) {
+      if (t?.id) survivingScheduleTopicIds.add(t.id);
+    }
+  }
+  for (const rec of Object.values(nextDb.weeklySchedules || {})) {
+    if (!rec?.schedule) continue;
+    for (const day of WEEKDAYS) {
+      for (const t of rec.schedule[day] || []) {
+        if (t?.id) survivingScheduleTopicIds.add(t.id);
+      }
+    }
+  }
+
   for (const day of WEEKDAYS) {
     const prevTopics = prevDb.schedule?.[day] || [];
-    const nextTopics = nextDb.schedule?.[day] || [];
     if (prevTopics.length === 0) continue;
-    const nextIds = new Set(nextTopics.map((t) => t.id).filter(Boolean));
     for (const t of prevTopics) {
-      if (t.id && nextIds.has(t.id)) continue;
+      if (!t?.id || survivingScheduleTopicIds.has(t.id)) continue;
       for (const k of getScheduleTopicTombstoneKeys(day, t)) {
         deleted.push({ section: 'scheduleTopics', key: k });
       }

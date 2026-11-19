@@ -302,8 +302,9 @@ void testConnection();
 
 const MAX_ITEMS_PER_CHUNK = 180;
 const MAX_RECORD_ENTRIES_PER_CHUNK = 80;
-const MAX_LAW_ITEMS_PER_SLICE = 75;
-const MAX_CHUNK_BYTES = 320_000;
+const MAX_LAW_ITEMS_PER_SLICE = 120;
+const MAX_CHUNK_BYTES = 420_000;
+const MAX_CHUNK_BYTES_COMPACT = 640_000;
 const SCHEMA_VERSION = 2;
 
 const ARRAY_SECTIONS = [
@@ -491,9 +492,12 @@ export function sanitizeForFirestore<T>(value: T): T {
   return clean as T;
 }
 
+const utf8Encoder = typeof TextEncoder !== 'undefined' ? new TextEncoder() : null;
+
 function estimatePayloadBytes(obj: unknown): number {
   try {
-    return JSON.stringify(obj).length * 2;
+    const serialized = JSON.stringify(obj);
+    return utf8Encoder ? utf8Encoder.encode(serialized).length : Math.ceil(serialized.length * 1.5);
   } catch {
     return 0;
   }
@@ -549,7 +553,11 @@ function buildSafeTimerState(timerState?: {
   return safe;
 }
 
-export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): StudyDbRecordChunk[] {
+export function decomposeDatabaseToFirestoreChunks(
+  studyDb: StudyDatabase,
+  options?: { maxChunkBytes?: number },
+): StudyDbRecordChunk[] {
+  const chunkByteBudget = options?.maxChunkBytes || MAX_CHUNK_BYTES;
   const chunks: StudyDbRecordChunk[] = [];
   const rawDb = studyDb as unknown as Record<string, any>;
 
@@ -583,7 +591,7 @@ export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): Stud
       currentCount += 1;
 
       const exceedsCount = currentCount >= MAX_ITEMS_PER_CHUNK;
-      const exceedsBytes = currentCount > 1 && estimatePayloadBytes(currentEntries) >= MAX_CHUNK_BYTES;
+      const exceedsBytes = currentCount > 1 && estimatePayloadBytes(currentEntries) >= chunkByteBudget;
 
       if (exceedsCount || exceedsBytes) {
         if (exceedsBytes && currentCount > 1) {
@@ -636,7 +644,7 @@ export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): Stud
       currentCount += 1;
 
       const exceedsCount = currentCount >= MAX_RECORD_ENTRIES_PER_CHUNK;
-      const exceedsBytes = currentCount > 1 && estimatePayloadBytes(currentMap) >= MAX_CHUNK_BYTES;
+      const exceedsBytes = currentCount > 1 && estimatePayloadBytes(currentMap) >= chunkByteBudget;
       if (exceedsCount || exceedsBytes) {
         if (exceedsBytes && currentCount > 1) {
           delete currentMap[k];
@@ -690,7 +698,7 @@ export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): Stud
   let curSliceCount = 0;
 
   const flushLawChunk = () => {
-    if (curSliceCount > 0 || lawPayloads.length === 0) {
+    if (curSliceCount > 0) {
       lawPayloads.push({
         kind: 'laws',
         count: curSliceCount,
@@ -701,51 +709,103 @@ export function decomposeDatabaseToFirestoreChunks(studyDb: StudyDatabase): Stud
     }
   };
 
+  const addLawSliceToChunk = (
+    folderKey: string,
+    sliceObj: { name: string; items: unknown[]; pdfs: unknown[] },
+  ) => {
+    // CRITICAL: Never overwrite an existing slice for the same folderKey inside curSliceMap!
+    if (folderKey in curSliceMap) {
+      flushLawChunk();
+    }
+
+    curSliceMap[folderKey] = sliceObj;
+    curSliceCount += 1;
+
+    const totalBytes = estimatePayloadBytes(curSliceMap);
+    if (totalBytes >= chunkByteBudget) {
+      if (curSliceCount > 1) {
+        delete curSliceMap[folderKey];
+        curSliceCount -= 1;
+        flushLawChunk();
+        curSliceMap[folderKey] = sliceObj;
+        curSliceCount = 1;
+        if (estimatePayloadBytes(curSliceMap) >= chunkByteBudget) {
+          flushLawChunk();
+        }
+      } else {
+        flushLawChunk();
+      }
+    } else if (curSliceCount >= 12) {
+      flushLawChunk();
+    }
+  };
+
   for (const [folderKey, folderData] of Object.entries(lawsMap)) {
     const safeFolderName = folderData?.name || folderKey;
     const allItems = Array.isArray(folderData?.items) ? sanitizeForFirestore(folderData.items) : [];
     const allPdfs = Array.isArray(folderData?.pdfs) ? sanitizeForFirestore(folderData.pdfs) : [];
 
     if (allItems.length === 0) {
-      curSliceMap[folderKey] = {
+      addLawSliceToChunk(folderKey, {
         name: safeFolderName,
         items: [],
         pdfs: allPdfs,
-      };
-      curSliceCount += 1;
-      if (curSliceCount >= 10 || estimatePayloadBytes(curSliceMap) >= MAX_CHUNK_BYTES) {
-        flushLawChunk();
-      }
+      });
       continue;
     }
 
-    for (let offset = 0; offset < allItems.length; offset += MAX_LAW_ITEMS_PER_SLICE) {
-      const sliceItems = allItems.slice(offset, offset + MAX_LAW_ITEMS_PER_SLICE);
-      const slicePdfs = offset === 0 ? allPdfs : [];
-      const sliceObj = {
+    // Dynamically pack items into byte-safe slices so a single slice never exceeds Firestore's 1 MiB doc limit
+    let sliceItems: unknown[] = [];
+    let isFirstSlice = true;
+    const maxSingleSliceBytes = Math.min(chunkByteBudget, 580_000);
+
+    for (let i = 0; i < allItems.length; i++) {
+      const nextItem = allItems[i];
+      sliceItems.push(nextItem);
+      const candidatePdfs = isFirstSlice ? allPdfs : [];
+      const candidateObj = {
         name: safeFolderName,
         items: sliceItems,
-        pdfs: slicePdfs,
+        pdfs: candidatePdfs,
       };
+      const exceedsBytes =
+        sliceItems.length > 1 && estimatePayloadBytes(candidateObj) >= maxSingleSliceBytes;
+      const exceedsCount = sliceItems.length >= MAX_LAW_ITEMS_PER_SLICE;
 
-      curSliceMap[folderKey] = sliceObj;
-      curSliceCount += 1;
-
-      if (curSliceCount >= 4 || estimatePayloadBytes(curSliceMap) >= MAX_CHUNK_BYTES) {
-        if (curSliceCount > 1 && estimatePayloadBytes(curSliceMap) >= MAX_CHUNK_BYTES) {
-          delete curSliceMap[folderKey];
-          curSliceCount -= 1;
-          flushLawChunk();
-          curSliceMap[folderKey] = sliceObj;
-          curSliceCount = 1;
-        } else {
-          flushLawChunk();
-        }
+      if (exceedsBytes) {
+        sliceItems.pop();
+        addLawSliceToChunk(folderKey, {
+          name: safeFolderName,
+          items: sliceItems,
+          pdfs: candidatePdfs,
+        });
+        isFirstSlice = false;
+        sliceItems = [nextItem];
+      } else if (exceedsCount) {
+        addLawSliceToChunk(folderKey, candidateObj);
+        isFirstSlice = false;
+        sliceItems = [];
       }
+    }
+
+    if (sliceItems.length > 0) {
+      addLawSliceToChunk(folderKey, {
+        name: safeFolderName,
+        items: sliceItems,
+        pdfs: isFirstSlice ? allPdfs : [],
+      });
     }
   }
 
   flushLawChunk();
+
+  if (lawPayloads.length === 0) {
+    lawPayloads.push({
+      kind: 'laws',
+      count: 0,
+      slices: {},
+    });
+  }
 
   lawPayloads.forEach((p, idx) => {
     pushChunk('laws', idx, lawPayloads.length, p);
@@ -833,6 +893,14 @@ function reassembleDatabaseFromDocs(
     const existingPdfs = coerceFirestoreArray(existingRaw?.pdfs);
     const nextItems = coerceFirestoreArray(slice.items);
     const nextPdfs = coerceFirestoreArray(slice.pdfs);
+    const seenItemIds = new Set(existingItems.map((it: any) => it?.id).filter(Boolean));
+    const mergedItems = [...existingItems];
+    for (const it of nextItems) {
+      if (!it) continue;
+      if (it.id && seenItemIds.has(it.id)) continue;
+      if (it.id) seenItemIds.add(it.id);
+      mergedItems.push(it);
+    }
     const mergedPdfs = [...existingPdfs];
     for (const p of nextPdfs) {
       if (p && !mergedPdfs.some((ep: any) => ep?.id && ep.id === p.id)) {
@@ -841,7 +909,7 @@ function reassembleDatabaseFromDocs(
     }
     reconstructed.laws[folderKey] = {
       name: slice.name || existingRaw?.name || folderKey,
-      items: [...existingItems, ...nextItems],
+      items: mergedItems,
       pdfs: mergedPdfs,
     };
   };
@@ -1299,7 +1367,12 @@ export async function saveDatabaseToFirestore(
   studyDb: StudyDatabase,
   contentHash: string,
   timerState?: { elapsed: number; startedAt: number; activeTopic?: unknown },
-  options?: { forceFullWrite?: boolean; forceRefreshToken?: boolean; bypassQuotaCooldown?: boolean },
+  options?: {
+    forceFullWrite?: boolean;
+    forceRefreshToken?: boolean;
+    bypassQuotaCooldown?: boolean;
+    _retriedAfterRehydrate?: boolean;
+  },
 ): Promise<{
   updatedAt: string;
   writtenChunks: number;
@@ -1333,10 +1406,17 @@ export async function saveDatabaseToFirestore(
   let rawChunks = decomposeDatabaseToFirestoreChunks(effectiveStudyDb);
   if (rawChunks.length > MAX_FIRESTORE_CHUNKS_SAFE) {
     effectiveStudyDb = compactStudyDatabaseForChunkBudget(studyDb);
-    rawChunks = decomposeDatabaseToFirestoreChunks(effectiveStudyDb);
+    rawChunks = decomposeDatabaseToFirestoreChunks(effectiveStudyDb, {
+      maxChunkBytes: MAX_CHUNK_BYTES_COMPACT,
+    });
   }
   if (rawChunks.length > 500) {
-    rawChunks = rawChunks.slice(0, 500);
+    // Prioritize preserving laws, schedules, and core user records if chunk cap is ever hit
+    const prioritized = [
+      ...rawChunks.filter((c) => c.section === 'laws' || c.section === 'schedule' || c.section === 'scheduleDayDates' || c.section === 'weeklySchedules' || c.section === 'preferences'),
+      ...rawChunks.filter((c) => c.section !== 'laws' && c.section !== 'schedule' && c.section !== 'scheduleDayDates' && c.section !== 'weeklySchedules' && c.section !== 'preferences'),
+    ];
+    rawChunks = prioritized.slice(0, 500);
   }
 
   const chunkHashesMapObj = buildChunkHashesMapObject(rawChunks);
@@ -1541,7 +1621,29 @@ export async function saveDatabaseToFirestore(
       if (includeWorkspaceMetaInBatch) {
         workspaceMetaCommittedInBatch = true;
       }
-    } catch (error) {
+    } catch (error: any) {
+      const errCode = String(error?.code || '').toLowerCase();
+      const errMsg = String(error?.message || '').toLowerCase();
+      const isRecoverableCacheDrift =
+        !options?._retriedAfterRehydrate &&
+        (errCode === 'not-found' ||
+          errCode === 'failed-precondition' ||
+          errCode === 'permission-denied' ||
+          errMsg.includes('no document to update'));
+      if (isRecoverableCacheDrift) {
+        console.warn('[Firebase Sync][Save] Cache local desalinhado detectado — reidratando do servidor e retentando gravação...', {
+          errCode,
+          workspacePath,
+        });
+        cache.hydratedFromServer = false;
+        cache.chunkHashes.clear();
+        cache.rawDocsById.clear();
+        return saveDatabaseToFirestore(userId, studyDb, contentHash, timerState, {
+          ...options,
+          forceRefreshToken: true,
+          _retriedAfterRehydrate: true,
+        });
+      }
       handleFirestoreError(error, OperationType.WRITE, recordsPath);
     }
 
@@ -1583,7 +1685,19 @@ export async function saveDatabaseToFirestore(
         updatedAt: serverTimestamp(),
       });
       recordFirestoreQuotaOps({ writes: 1 });
-    } catch (error) {
+    } catch (error: any) {
+      const errCode = String(error?.code || '').toLowerCase();
+      if (
+        !options?._retriedAfterRehydrate &&
+        (errCode === 'not-found' || errCode === 'failed-precondition' || errCode === 'permission-denied')
+      ) {
+        cache.hydratedFromServer = false;
+        return saveDatabaseToFirestore(userId, studyDb, contentHash, timerState, {
+          ...options,
+          forceRefreshToken: true,
+          _retriedAfterRehydrate: true,
+        });
+      }
       handleFirestoreError(error, OperationType.UPDATE, workspacePath);
     }
   }

@@ -80,6 +80,7 @@ import {
   queuePendingDriveDeletes,
   clearPendingDriveDeletes,
   removePendingDriveDeletesForDriveFile,
+  removePendingDriveDeletesForTarget,
   DriveDeleteTarget,
   getPreferredStudyFolder,
   setPreferredStudyFolder,
@@ -149,6 +150,7 @@ import {
   reconcileCompletedAndArchivedItems,
   recordDeletedTombstones,
   removeDeletedTombstoneKeys,
+  stripActiveEntityTombstones,
 } from '../lib/incrementalBackup';
 import {
   DeletedDriveConflict,
@@ -273,8 +275,8 @@ function playPomodoroChime(): void {
 }
 
 const EMAIL_SCOPE_MAP_KEY = 'central_estudos_email_scope_v1';
-const FIRESTORE_SYNC_DEBOUNCE_MS = 3000;
-const FIRESTORE_MIN_WRITE_INTERVAL_MS = 15000;
+const FIRESTORE_SYNC_DEBOUNCE_MS = 1500;
+const FIRESTORE_MIN_WRITE_INTERVAL_MS = 4000;
 const FIRESTORE_HIGH_USAGE_WRITE_INTERVAL_MS = 60000;
 const FIRESTORE_HIGH_USAGE_WRITE_THRESHOLD = 12000;
 const DRIVE_SYNC_DEBOUNCE_MS = 20000;
@@ -3009,20 +3011,24 @@ async function restoreFilesAndOrphansFromDriveList(
     const matchingActiveWeek = nextWeeklySchedules[activeWeekKey] || latestRecoveredWeek;
 
     // Only hydrate active schedule from .txt file if the database is still an untouched seed;
-    // never overwrite an existing database's schedule when the user intentionally deleted topics!
-    nextDb = reconcileCompletedAndArchivedItems(
-      {
+    // never overwrite an existing database's schedule when the user intentionally edited or deleted topics!
+    if (dbIsUntouchedSeed && !currentScheduleHasCustom && matchingActiveWeek) {
+      nextDb = reconcileCompletedAndArchivedItems(
+        {
+          ...nextDb,
+          weeklySchedules: nextWeeklySchedules,
+          schedule: matchingActiveWeek.schedule,
+          scheduleDayDates: matchingActiveWeek.scheduleDayDates,
+        },
+        nextDb,
+        nextDb,
+      );
+    } else {
+      nextDb = {
         ...nextDb,
         weeklySchedules: nextWeeklySchedules,
-        ...(dbIsUntouchedSeed && !currentScheduleHasCustom && matchingActiveWeek
-          ? {
-              schedule: matchingActiveWeek.schedule,
-              scheduleDayDates: matchingActiveWeek.scheduleDayDates,
-            }
-          : {}),
-      },
-      nextDb,
-    );
+      };
+    }
     nextDb = applyTombstonesToMergedDatabase(nextDb, scope);
   }
 
@@ -3438,6 +3444,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const lastUserEditMsRef = useRef<number>(0);
   const lastLocalWriteMsRef = useRef<number>(0);
   const lastDeletionMsRef = useRef<number>(0);
+  const lastUrgentSaveMsRef = useRef<number>(0);
   const loggedStartupMissingTokenScopeRef = useRef<string | null>(null);
   const lastFirestoreAutoWriteAtRef = useRef<number>(0);
   const lastServerWorkspaceHashRef = useRef<string>('');
@@ -4130,7 +4137,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 totalChunks: res.totalChunks,
                 updatedAt: res.updatedAt,
               });
-              const keepPendingForDrive = hasDriveWorkPending(latestScope, latestHash);
+              const editedWhileInFlight = computeDatabaseContentHash(dbRef.current) !== latestHash;
+              const keepPendingForDrive =
+                editedWhileInFlight || hasDriveWorkPending(latestScope, latestHash);
               setFirebaseLastError(null);
               setLastFirebaseSyncAt(res.updatedAt);
               setFirebaseChunkCount(res.totalChunks);
@@ -4159,11 +4168,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             } finally {
               firebaseInFlightRef.current = false;
               endFirebaseSyncOp();
+              // If the user edited laws or schedules while the previous save was in flight, reschedule immediately
+              if (
+                auth.currentUser?.uid === currentUser.uid &&
+                !firebaseSyncTimerRef.current &&
+                computeDatabaseContentHash(dbRef.current) !== latestHash
+              ) {
+                scheduleIncrementalFirebaseSave(600);
+              }
             }
           })();
         }, delayMs);
       };
-      // Camada 2 (Firebase Firestore): debounce rápido para exclusões (1200ms) ou padrão 3000ms com espaçamento adaptativo
+      // Camada 2 (Firebase Firestore): gravação imediata (600ms) para salvamentos críticos (leis/cronogramas),
+      // rápida (1200ms) para exclusões, ou debounce padrão (1500ms) com espaçamento adaptativo
+      const isUrgentSave = Date.now() - lastUrgentSaveMsRef.current < 10_000;
       const isRecentDeletion = Date.now() - lastDeletionMsRef.current < 15_000;
       const dailyUsage = getFirestoreDailyUsageEstimate();
       const minWriteInterval =
@@ -4171,11 +4190,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ? FIRESTORE_HIGH_USAGE_WRITE_INTERVAL_MS
           : FIRESTORE_MIN_WRITE_INTERVAL_MS;
       const elapsedSinceLastAutoWrite = Date.now() - lastFirestoreAutoWriteAtRef.current;
-      const scheduledDelayMs = isRecentDeletion
-        ? 1200
-        : lastFirestoreAutoWriteAtRef.current > 0 && elapsedSinceLastAutoWrite < minWriteInterval
-          ? Math.max(FIRESTORE_SYNC_DEBOUNCE_MS, minWriteInterval - elapsedSinceLastAutoWrite)
-          : FIRESTORE_SYNC_DEBOUNCE_MS;
+      const scheduledDelayMs = isUrgentSave
+        ? 600
+        : isRecentDeletion
+          ? 1200
+          : lastFirestoreAutoWriteAtRef.current > 0 && elapsedSinceLastAutoWrite < minWriteInterval
+            ? Math.max(FIRESTORE_SYNC_DEBOUNCE_MS, minWriteInterval - elapsedSinceLastAutoWrite)
+            : FIRESTORE_SYNC_DEBOUNCE_MS;
       scheduleIncrementalFirebaseSave(scheduledDelayMs);
     }
   }, [
@@ -5319,12 +5340,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   weeklySchedules: localDb.weeklySchedules,
                 };
               }
+              const localIsAuthoritativeForActiveEntities =
+                !localUntouched &&
+                (rescuedGuestEdits ||
+                  userEditedDuringHydrate ||
+                  localMeta.hasPendingCloudSync ||
+                  localEditMs > remoteMs + 1500);
+              const rawMergedTombstones = mergeTombstoneMaps(
+                remoteNormalized.deletedTombstones,
+                localDb.deletedTombstones,
+              );
               mergedDb = {
                 ...mergedDb,
-                deletedTombstones: mergeTombstoneMaps(
-                  remoteNormalized.deletedTombstones,
-                  localDb.deletedTombstones,
-                ),
+                deletedTombstones: localIsAuthoritativeForActiveEntities
+                  ? stripActiveEntityTombstones(rawMergedTombstones, localDb)
+                  : rawMergedTombstones,
               };
               mergedDb = applyTombstonesToMergedDatabase(mergedDb, scope);
               mergedDb = reconcileCompletedAndArchivedItems(mergedDb, localDb, remoteNormalized);
@@ -5651,9 +5681,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ) {
                 currentDb = {
                   ...firestoreNormalized,
-                  deletedTombstones: mergeTombstoneMaps(
-                    firestoreNormalized.deletedTombstones,
-                    currentDb.deletedTombstones,
+                  deletedTombstones: stripActiveEntityTombstones(
+                    mergeTombstoneMaps(
+                      firestoreNormalized.deletedTombstones,
+                      currentDb.deletedTombstones,
+                    ),
+                    firestoreNormalized,
                   ),
                 };
                 currentDb = applyTombstonesToMergedDatabase(currentDb, scope);
@@ -6191,9 +6224,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     schedule: currentDb.schedule,
                     scheduleDayDates: currentDb.scheduleDayDates,
                     weeklySchedules: currentDb.weeklySchedules,
-                    deletedTombstones: mergeTombstoneMaps(
-                      baseMergedCloudDb.deletedTombstones,
-                      currentDb.deletedTombstones,
+                    deletedTombstones: stripActiveEntityTombstones(
+                      mergeTombstoneMaps(
+                        baseMergedCloudDb.deletedTombstones,
+                        currentDb.deletedTombstones,
+                      ),
+                      currentDb,
                     ),
                   };
                   baseMergedCloudDb = applyTombstonesToMergedDatabase(baseMergedCloudDb, scope);
@@ -6692,9 +6728,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 remoteDb = applyIncrementalDeltaToDatabase(remoteDb, incDelta);
               }
             }
-            const mergedTombstones = mergeTombstoneMaps(
-              remoteDb.deletedTombstones,
-              currentDb.deletedTombstones,
+            const mergedTombstones = stripActiveEntityTombstones(
+              mergeTombstoneMaps(
+                remoteDb.deletedTombstones,
+                currentDb.deletedTombstones,
+              ),
+              currentDb,
             );
             reconciledDb = applyTombstonesToMergedDatabase(
               {
@@ -6983,6 +7022,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (hasCustomOfflineData) {
           pendingCloudSyncRef.current = true;
           setHasPendingCloudChanges(true);
+        }
+      }
+      if (scheduleTxtSyncTimerRef.current) {
+        window.clearTimeout(scheduleTxtSyncTimerRef.current);
+        scheduleTxtSyncTimerRef.current = null;
+        try {
+          const activeWeekKey = resolveActiveScheduleWeekKey(curDb.scheduleDayDates, curDb.schedule);
+          const meta = buildScheduleWeekMetadata(activeWeekKey, curDb.scheduleDayDates);
+          const txtContent = serializeScheduleWeekToText(meta.weekKey, curDb.schedule, meta.dayDates);
+          const blob = new Blob([txtContent], { type: 'text/plain;charset=utf-8' });
+          void saveFileBlob(`schedule_week_${meta.weekKey}`, blob, scope);
+        } catch {
+          // ignore
         }
       }
       // Immediately flush any pending debounced Firebase Firestore writes before tab hides/closes (only if dirty)
@@ -12255,6 +12307,7 @@ function isEmailAuthorized(email?: string | null): boolean {
           : curDb.scheduleDayDates;
 
       const meta = buildScheduleWeekMetadata(activeWeekKey, datesToSerialize);
+      removePendingDriveDeletesForTarget(scope, { names: [meta.fileName] });
       const txtContent = serializeScheduleWeekToText(
         meta.weekKey,
         scheduleToSerialize,
@@ -12268,7 +12321,21 @@ function isEmailAuthorized(email?: string | null): boolean {
         triggerBlobDownload(blob, meta.fileName);
       }
 
+      if (!options?.silent) {
+        lastUrgentSaveMsRef.current = Date.now();
+      }
+
       setDb((prev) => {
+        const prevRec = prev.weeklySchedules?.[meta.weekKey];
+        const scheduleUnchanged =
+          prevRec &&
+          prevRec.blobKey === blobKey &&
+          prevRec.fileName === meta.fileName &&
+          JSON.stringify(prevRec.schedule) === JSON.stringify(scheduleToSerialize) &&
+          JSON.stringify(prevRec.scheduleDayDates || {}) === JSON.stringify(meta.dayDates || {});
+        if (scheduleUnchanged && options?.silent) {
+          return prev;
+        }
         const nextRecord: WeeklyScheduleFileRecord = {
           weekKey: meta.weekKey,
           label: meta.label,
@@ -12343,6 +12410,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         toast('Semana não encontrada na pasta de cronogramas.', true);
         return false;
       }
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
         // Save current active week first before switching
         const curWeekKey = resolveActiveScheduleWeekKey(prev.scheduleDayDates, prev.schedule);
@@ -12409,6 +12477,9 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const saveScheduleDay = useCallback(
     (day: WeekdayName, topics: ScheduleTopic[], silent?: boolean) => {
+      if (!silent) {
+        lastUrgentSaveMsRef.current = Date.now();
+      }
       setDb((prev) => {
         const nextSchedule = { ...prev.schedule, [day]: topics };
         return buildUpdatedWeeklyScheduleState(prev, nextSchedule, prev.scheduleDayDates);
@@ -12428,6 +12499,9 @@ function isEmailAuthorized(email?: string | null): boolean {
       options?: { overwriteCustomized?: boolean; silent?: boolean },
     ) => {
       const cleanDate = dateBr.trim() || localDateBrazilian();
+      if (!options?.silent) {
+        lastUrgentSaveMsRef.current = Date.now();
+      }
       setDb((prev) => {
         const nextDayDates = { ...(prev.scheduleDayDates || {}), [day]: cleanDate };
         const curTopics = prev.schedule[day] || [];
@@ -12470,6 +12544,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         }
         return;
       }
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
         // Save the previous week's snapshot into weeklySchedules before switching
         const prevWeekKey = resolveActiveScheduleWeekKey(prev.scheduleDayDates, prev.schedule);
@@ -12740,8 +12815,34 @@ function isEmailAuthorized(email?: string | null): boolean {
       const text = await readStudyTextFile(file);
       const parsedWeek = parseScheduleWeekText(text, file.name);
       const imported = parseScheduleText(text);
+      const importedMeta = buildScheduleWeekMetadata(parsedWeek.weekKey, parsedWeek.scheduleDayDates);
+      removePendingDriveDeletesForTarget(activeScopeRef.current, { names: [importedMeta.fileName] });
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
-        const nextSchedule = { ...prev.schedule };
+        const curWeekKey = resolveActiveScheduleWeekKey(prev.scheduleDayDates, prev.schedule);
+        const curMeta = buildScheduleWeekMetadata(curWeekKey, prev.scheduleDayDates);
+        const isSwitchingWeek = parsedWeek.weekKey !== curMeta.weekKey;
+        const baseWeeklyMap: Record<string, WeeklyScheduleFileRecord> = isSwitchingWeek
+          ? {
+              ...(prev.weeklySchedules || {}),
+              [curMeta.weekKey]: {
+                weekKey: curMeta.weekKey,
+                label: curMeta.label,
+                fileName: curMeta.fileName,
+                updatedAt: localDateTimeBrazilian(),
+                blobKey: `schedule_week_${curMeta.weekKey}`,
+                schedule: prev.schedule,
+                scheduleDayDates: curMeta.dayDates,
+              },
+            }
+          : { ...(prev.weeklySchedules || {}) };
+
+        const emptyWeekSchedule = Object.fromEntries(WEEKDAYS.map((d) => [d, [] as ScheduleTopic[]])) as ScheduleMap;
+        const targetExistingSchedule = isSwitchingWeek
+          ? baseWeeklyMap[parsedWeek.weekKey]?.schedule || emptyWeekSchedule
+          : prev.schedule;
+        const nextSchedule: ScheduleMap = { ...targetExistingSchedule };
+
         const touchedDays = new Set(imported.map((item) => item.day));
         touchedDays.forEach((day) => {
           // Remove default untouched seed items (sch-1..sch-8) on days being imported
@@ -12750,14 +12851,28 @@ function isEmailAuthorized(email?: string | null): boolean {
           );
         });
         imported.forEach(({ day, topic }) => {
-          nextSchedule[day] = [...(nextSchedule[day] || []), topic];
+          const existingDay = nextSchedule[day] || [];
+          const dupKey = `${normalizeSearch(topic.data || '')}::${normalizeSearch(topic.materia || '')}::${normalizeSearch(topic.tempo || '')}::${normalizeSearch(topic.observacoes || '')}`;
+          const alreadyExists = existingDay.some(
+            (e) =>
+              `${normalizeSearch(e.data || '')}::${normalizeSearch(e.materia || '')}::${normalizeSearch(e.tempo || '')}::${normalizeSearch(e.observacoes || '')}` ===
+              dupKey,
+          );
+          if (!alreadyExists) {
+            nextSchedule[day] = [...existingDay, topic];
+          }
         });
-        const nextDayDates = {
-          ...(prev.scheduleDayDates || {}),
-          ...(parsedWeek.scheduleDayDates || {}),
-        };
+        const nextDayDates = isSwitchingWeek
+          ? {
+              ...(baseWeeklyMap[parsedWeek.weekKey]?.scheduleDayDates || {}),
+              ...(parsedWeek.scheduleDayDates || {}),
+            }
+          : {
+              ...(prev.scheduleDayDates || {}),
+              ...(parsedWeek.scheduleDayDates || {}),
+            };
         return buildUpdatedWeeklyScheduleState(
-          prev,
+          { ...prev, weeklySchedules: baseWeeklyMap },
           nextSchedule,
           nextDayDates,
           parsedWeek.weekKey,
@@ -12894,6 +13009,10 @@ function isEmailAuthorized(email?: string | null): boolean {
   const createLawFolder = useCallback(
     (rawName: string, options?: { silent?: boolean }): string => {
       const name = cleanSafeName(rawName, 'Legislacao').replace(/\s+/g, '_');
+      removePendingDriveDeletesForTarget(activeScopeRef.current, {
+        folderNames: [name, visibleName(name)],
+      });
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
         if (prev.laws[name]) return prev;
         return {
@@ -12929,16 +13048,18 @@ function isEmailAuthorized(email?: string | null): boolean {
         throw new Error(`Não foi possível extrair artigos ou texto legível de "${file.name}".`);
       }
 
+      const scope = activeScopeRef.current;
       const folder = dbRef.current.laws[rawFolder]
         ? rawFolder
         : resolveLawFolderKey(dbRef.current.laws, rawFolder);
 
-      const blobKey = lower.endsWith('.pdf') ? `lawpdf-${uid(16)}` : `lawfile-${uid(16)}`;
-      await saveFileBlob(blobKey, file);
+      removePendingDriveDeletesForTarget(scope, {
+        names: [file.name, `LEI - ${file.name}`],
+        folderNames: [folder, visibleName(folder)],
+      });
 
-      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-      const driveSubfolders = folderLabel ? ['Lei Seca', folderLabel] : 'Lei Seca';
-      await autoSyncFileToDrive(file, file.name, driveSubfolders);
+      const blobKey = lower.endsWith('.pdf') ? `lawpdf-${uid(16)}` : `lawfile-${uid(16)}`;
+      await saveFileBlob(blobKey, file, scope);
 
       const nowIso = new Date().toISOString();
       const fileEntry = {
@@ -12950,10 +13071,12 @@ function isEmailAuthorized(email?: string | null): boolean {
         updatedAt: nowIso,
       };
 
+      lastUrgentSaveMsRef.current = Date.now();
+      pendingCloudSyncRef.current = true;
       setDb((prev) => {
         const resolvedKey = prev.laws[folder] ? folder : resolveLawFolderKey(prev.laws, folder);
         const existing = prev.laws[resolvedKey] || { name: resolvedKey, items: [], pdfs: [] };
-        return {
+        const next: StudyDatabase = {
           ...prev,
           laws: {
             ...prev.laws,
@@ -12964,7 +13087,14 @@ function isEmailAuthorized(email?: string | null): boolean {
             },
           },
         };
+        dbRef.current = next;
+        return next;
       });
+
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+      const driveSubfolders = folderLabel ? ['Lei Seca', folderLabel] : 'Lei Seca';
+      void autoSyncFileToDrive(file, file.name, driveSubfolders, blobKey);
+
       if (!options?.silent) {
         toast(`Arquivo de legislação enviado (${parsedItems.length} dispositivo(s) extraído(s)).`);
       }
@@ -13245,6 +13375,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         artigo_base: artMatch ? artMatch[1] : '',
         tipo_dispositivo: 'Dispositivo',
       };
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
         const existing = prev.laws[folder] || { name: folder, items: [], pdfs: [] };
         return {
@@ -13316,7 +13447,10 @@ function isEmailAuthorized(email?: string | null): boolean {
           },
         };
       });
-      if (!silent) toast('Dispositivo atualizado.');
+      if (!silent) {
+        lastUrgentSaveMsRef.current = Date.now();
+        toast('Dispositivo atualizado.');
+      }
     },
     [toast],
   );
@@ -13900,6 +14034,9 @@ function isEmailAuthorized(email?: string | null): boolean {
           lawNotes: nextMap,
         };
       });
+      if (changed) {
+        lastUrgentSaveMsRef.current = Date.now();
+      }
       if (!silent && changed) {
         toast('Observações da lei salvas.');
       }

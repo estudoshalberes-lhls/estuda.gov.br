@@ -3109,6 +3109,70 @@ export function removePendingDriveDeletesForDriveFile(
   }
 }
 
+export function removePendingDriveDeletesForTarget(
+  scope: string,
+  target: { fileIds?: string[]; names?: string[]; folderNames?: string[] },
+): void {
+  const scopesToClean = scope !== 'offline_guest' ? [scope, 'offline_guest'] : [scope];
+  const idSet = new Set(
+    (target.fileIds || []).map((id) => String(id || '').replace(/^drive_/, '').trim()).filter(Boolean),
+  );
+  const nameSet = new Set<string>();
+  for (const n of target.names || []) {
+    const nf = normalizeDriveMatchName(n);
+    const ns = normalizeDriveMatchName(stripDriveMatchPrefix(n));
+    if (nf) nameSet.add(nf);
+    if (ns) nameSet.add(ns);
+  }
+  const folderSet = new Set(
+    (target.folderNames || []).map((f) => normalizeDriveMatchName(f)).filter(Boolean),
+  );
+  if (!idSet.size && !nameSet.size && !folderSet.size) return;
+
+  for (const s of scopesToClean) {
+    try {
+      const list = getPendingDriveDeletes(s);
+      if (!list.length) continue;
+      const updated = list
+        .map((entry) => {
+          const nextIds = (entry.fileIds || []).filter(
+            (id) => !idSet.has(String(id || '').replace(/^drive_/, '').trim()),
+          );
+          const nextNames = (entry.names || []).filter((n) => {
+            const nf = normalizeDriveMatchName(n);
+            const ns = normalizeDriveMatchName(stripDriveMatchPrefix(n));
+            return !nameSet.has(nf) && !nameSet.has(ns);
+          });
+          const nextFolders = (entry.folderNames || []).filter(
+            (f) => !folderSet.has(normalizeDriveMatchName(f)),
+          );
+          return {
+            ...entry,
+            ...(entry.fileIds ? { fileIds: nextIds } : {}),
+            ...(entry.names ? { names: nextNames } : {}),
+            ...(entry.folderNames ? { folderNames: nextFolders } : {}),
+          };
+        })
+        .filter(
+          (entry) =>
+            Boolean(entry.fileIds?.length) ||
+            Boolean(entry.names?.length) ||
+            Boolean(entry.folderNames?.length),
+        );
+
+      if (typeof window !== 'undefined' && window.localStorage) {
+        if (updated.length > 0) {
+          window.localStorage.setItem(getPendingDriveDeletesKey(s), JSON.stringify(updated));
+        } else {
+          window.localStorage.removeItem(getPendingDriveDeletesKey(s));
+        }
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }
+}
+
 export function queuePendingDriveDeletes(scope: string, target: DriveDeleteTarget): void {
   const hasContent =
     Boolean(target.fileIds?.length) ||

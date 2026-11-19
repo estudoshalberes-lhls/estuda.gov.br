@@ -150,19 +150,66 @@ export const LawsPage: React.FC = () => {
 
   const savedLawNote = activeFolder ? db.lawNotes?.[activeFolder] || '' : '';
   const [lawNoteDraft, setLawNoteDraft] = useState<string>(savedLawNote);
+  const activeFolderNoteRef = useRef<string>(activeFolder);
+  const lawNoteDraftRef = useRef<string>(savedLawNote);
+  const savedLawNoteRef = useRef<string>(savedLawNote);
+  const lastSyncedSavedNoteRef = useRef<string>(savedLawNote);
+  const lawNotesMapRef = useRef(db.lawNotes);
+  lawNoteDraftRef.current = lawNoteDraft;
+  savedLawNoteRef.current = savedLawNote;
+  lawNotesMapRef.current = db.lawNotes;
 
   useEffect(() => {
-    setLawNoteDraft((prev) => (prev === savedLawNote ? prev : savedLawNote));
-  }, [activeFolder, savedLawNote]);
+    const prevFolder = activeFolderNoteRef.current;
+    const folderChanged = prevFolder !== activeFolder;
+    if (prevFolder && folderChanged) {
+      const prevSaved = lawNotesMapRef.current?.[prevFolder] || '';
+      if (lawNoteDraftRef.current !== prevSaved) {
+        saveLawNote(prevFolder, lawNoteDraftRef.current, true);
+      }
+    }
+    activeFolderNoteRef.current = activeFolder;
+    if (folderChanged) {
+      lastSyncedSavedNoteRef.current = savedLawNote;
+      setLawNoteDraft(savedLawNote);
+      return;
+    }
+    if (savedLawNote !== lastSyncedSavedNoteRef.current) {
+      const hadUnsavedLocalEdits = lawNoteDraftRef.current !== lastSyncedSavedNoteRef.current;
+      lastSyncedSavedNoteRef.current = savedLawNote;
+      if (!hadUnsavedLocalEdits) {
+        setLawNoteDraft(savedLawNote);
+      }
+    }
+  }, [activeFolder, savedLawNote, saveLawNote]);
 
   useEffect(() => {
     if (!activeFolder) return;
     if (lawNoteDraft === savedLawNote) return;
     const t = window.setTimeout(() => {
       saveLawNote(activeFolder, lawNoteDraft, true);
-    }, 650);
+    }, 500);
     return () => window.clearTimeout(t);
   }, [activeFolder, lawNoteDraft, savedLawNote, saveLawNote]);
+
+  useEffect(() => {
+    const flushLawNoteDraft = () => {
+      const folder = activeFolderNoteRef.current;
+      if (!folder) return;
+      if (lawNoteDraftRef.current !== savedLawNoteRef.current) {
+        saveLawNote(folder, lawNoteDraftRef.current, true);
+      }
+    };
+    window.addEventListener('central-estudos:flush-drafts', flushLawNoteDraft);
+    window.addEventListener('beforeunload', flushLawNoteDraft);
+    window.addEventListener('pagehide', flushLawNoteDraft);
+    return () => {
+      window.removeEventListener('central-estudos:flush-drafts', flushLawNoteDraft);
+      window.removeEventListener('beforeunload', flushLawNoteDraft);
+      window.removeEventListener('pagehide', flushLawNoteDraft);
+      flushLawNoteDraft();
+    };
+  }, [saveLawNote]);
 
   const handleJumpToArticle = (articleKey: string) => {
     const canonicalKey = resolveCanonicalArticleKeyFromQuery(articleKey);

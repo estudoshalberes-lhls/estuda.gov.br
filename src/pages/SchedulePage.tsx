@@ -293,7 +293,7 @@ export const SchedulePage: React.FC = () => {
         const latestDay = draftRef.current[day] || nextDay;
         saveScheduleDay(day, latestDay, true);
         clearDayTopicDrafts(latestDay);
-      }, 1000);
+      }, 450);
     }
   };
 
@@ -322,6 +322,7 @@ export const SchedulePage: React.FC = () => {
           concurso_alvo: clean,
           disciplina_fixa: t.disciplina_fixa || inferFixedSubjectFromTopic(t, fixedSubjects),
         }));
+        clearDayTopicDrafts(updated);
         saveScheduleDay(d, updated, true);
       }
     });
@@ -336,7 +337,10 @@ export const SchedulePage: React.FC = () => {
       confirmLabel: 'Arquivar semana inteira',
     });
     if (!ok) return;
-    const count = archiveFullWeek(draft);
+    WEEKDAYS.forEach((d) => {
+      clearDayTopicDrafts(draftRef.current[d] || []);
+    });
+    const count = archiveFullWeek(draftRef.current);
     if (count === 0) {
       toast('Nenhum tópico pendente preenchido na semana para arquivar.', true);
     } else {
@@ -1066,7 +1070,13 @@ export const SchedulePage: React.FC = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => completeScheduleTopic(day, idx, topics)}
+                                  onClick={() => {
+                                    const latestDayTopics = draftRef.current[day] || topics;
+                                    if (latestDayTopics[idx]?.id) {
+                                      clearFieldDraft(`schedule_topic_${latestDayTopics[idx].id}`);
+                                    }
+                                    completeScheduleTopic(day, idx, latestDayTopics);
+                                  }}
                                   title={`Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')}`}
                                   aria-label="Concluir tópico"
                                   className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-[var(--good)]/50 bg-[var(--good)]/15 text-[var(--good)] hover:bg-[var(--good)] hover:text-white transition-colors"
@@ -1075,7 +1085,13 @@ export const SchedulePage: React.FC = () => {
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => archiveTopicAsIncomplete(day, idx, draft)}
+                                  onClick={() => {
+                                    const latestDayTopics = draftRef.current[day] || topics;
+                                    if (latestDayTopics[idx]?.id) {
+                                      clearFieldDraft(`schedule_topic_${latestDayTopics[idx].id}`);
+                                    }
+                                    archiveTopicAsIncomplete(day, idx, draftRef.current);
+                                  }}
                                   title="Arquivar em Metas Não Concluídas"
                                   className="inline-flex items-center gap-1 px-2.5 h-8 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--warning)] hover:border-[var(--warning)] whitespace-nowrap"
                                 >
@@ -1177,8 +1193,10 @@ export const SchedulePage: React.FC = () => {
                           window.clearTimeout(t);
                           delete saveTimersRef.current[day];
                         }
+                        const latestTopics = draftRef.current[day] || topics;
+                        clearDayTopicDrafts(latestTopics);
                         flushAllDirtyDays();
-                        saveScheduleDay(day, topics);
+                        saveScheduleDay(day, latestTopics);
                       }}
                       className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
                     >
