@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Clock,
   Cloud,
+  ExternalLink,
   EyeOff,
   Folder,
   FolderCheck,
@@ -254,15 +255,29 @@ export const DriveSyncConflictDialog: React.FC = () => {
 
                 <div className="flex flex-wrap items-center justify-end gap-2 pt-0.5">
                   {(conflictError || needsPickerAuth) && (
-                    <button
-                      type="button"
-                      disabled={isItemBusy}
-                      onClick={() => ignoreDriveConflict(conflict.id)}
-                      className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-semibold hover:text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-55 transition-colors cursor-pointer"
-                    >
-                      <EyeOff className="w-3.5 h-3.5 shrink-0" />
-                      <span>Ignorar neste app</span>
-                    </button>
+                    <>
+                      <a
+                        href={
+                          conflict.driveFile.webViewLink ||
+                          `https://drive.google.com/file/d/${encodeURIComponent(conflict.driveFile.id)}/view`
+                        }
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-semibold hover:border-[var(--accent)] transition-colors"
+                      >
+                        <ExternalLink className="w-3.5 h-3.5 shrink-0" />
+                        <span>Abrir no Drive</span>
+                      </a>
+                      <button
+                        type="button"
+                        disabled={isItemBusy}
+                        onClick={() => ignoreDriveConflict(conflict.id)}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-semibold hover:text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-55 transition-colors cursor-pointer"
+                      >
+                        <EyeOff className="w-3.5 h-3.5 shrink-0" />
+                        <span>Ignorar neste app</span>
+                      </button>
+                    </>
                   )}
                   {needsPickerAuth && (
                     <button

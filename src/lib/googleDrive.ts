@@ -25,6 +25,12 @@ export const GOOGLE_CLIENT_ID =
   String((firebaseConfig as { oAuthClientId?: string }).oAuthClientId || '').trim() ||
   '848919975785-6uthlnjqh75uodmirv21drrddqs969sv.apps.googleusercontent.com';
 
+// Numeric Google Cloud project number required by Google Picker .setAppId()
+// so selecting files/folders actually grants `drive.file` scope access to this OAuth app.
+export const GOOGLE_APP_ID =
+  String(GOOGLE_CLIENT_ID.split('-')[0] || '').replace(/\D/g, '') ||
+  String((firebaseConfig as { messagingSenderId?: string }).messagingSenderId || '').replace(/\D/g, '');
+
 export const DRIVE_FOLDER_NAME = 'Central de Estudos - Materiais';
 export const DEFAULT_STUDY_FOLDER_ID = '';
 export const DRIVE_SCOPES = [
@@ -39,8 +45,31 @@ const DRIVE_TOKEN_CACHE_KEY = 'central_estudos_drive_token_v1';
 const DRIVE_SESSION_TOKEN_KEY = 'central_estudos_drive_session_token_v1';
 const LAST_GOOGLE_EMAIL_KEY = 'central_estudos_last_google_email_v1';
 const DRIVE_BLOCKED_FILES_KEY = 'central_estudos_drive_blocked_files_v1';
+const DRIVE_CONSENT_NEEDED_KEY = 'central_estudos_drive_consent_needed_v1';
 const SILENT_REFRESH_FAILURE_COOLDOWN_MS = 10 * 60 * 1000;
-const DRIVE_TOKEN_DEFAULT_TTL_MS = 55 * 60 * 1000;
+const DRIVE_TOKEN_DEFAULT_TTL_MS = 58 * 60 * 1000;
+
+export function markDriveScopeConsentNeeded(needed: boolean): void {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return;
+    if (needed) {
+      window.localStorage.setItem(DRIVE_CONSENT_NEEDED_KEY, '1');
+    } else {
+      window.localStorage.removeItem(DRIVE_CONSENT_NEEDED_KEY);
+    }
+  } catch {
+    // ignore storage errors
+  }
+}
+
+export function isDriveScopeConsentNeeded(): boolean {
+  try {
+    if (typeof window === 'undefined' || !window.localStorage) return false;
+    return window.localStorage.getItem(DRIVE_CONSENT_NEEDED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
 
 void setPersistence(auth, browserLocalPersistence).catch(() => {
   // ignore persistence error in restricted contexts
@@ -867,9 +896,10 @@ async function throwDriveResponseError(res: Response, context: string): Promise<
       err.includes('insufficientPermissions') ||
       errLower.includes('insufficient authentication scopes'))
   ) {
+    markDriveScopeConsentNeeded(true);
     clearAccessTokenOnly();
     throw new Error(
-      'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+      'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Renovar Drive" e autorize o acesso ao Google Drive.',
     );
   }
   if (
@@ -952,6 +982,7 @@ export const initDriveAuth = (
 export const googleSignIn = async (options?: {
   loginHint?: string | null;
   forceAccountPicker?: boolean;
+  forceConsent?: boolean;
 }): Promise<{ user: User; accessToken: string } | null> => {
   const hint =
     (options?.loginHint || (!options?.forceAccountPicker ? auth.currentUser?.email || readLastGoogleEmail() : null) || null)?.trim() ||
@@ -959,10 +990,24 @@ export const googleSignIn = async (options?: {
 
   const provider = new GoogleAuthProvider();
   DRIVE_SCOPES.forEach((scope) => provider.addScope(scope));
-  provider.setCustomParameters({
-    prompt: options?.forceAccountPicker ? 'select_account consent' : hint ? 'consent' : 'select_account consent',
-    ...(hint ? { login_hint: hint } : {}),
-  });
+
+  // CRITICAL: Never force `prompt: 'consent'` on routine reconnects!
+  // Forcing `consent` makes Google repeatedly display "A Google não validou esta app"
+  // every single hour even though the user already authorized this app.
+  // Without `prompt: 'consent'`, Google automatically shows consent ONLY on first grant
+  // and skips it cleanly on subsequent reconnects.
+  const customParams: Record<string, string> = {};
+  if (hint) {
+    customParams.login_hint = hint;
+  }
+  if (options?.forceConsent) {
+    customParams.prompt = options?.forceAccountPicker ? 'select_account consent' : 'consent';
+  } else if (options?.forceAccountPicker || !hint) {
+    customParams.prompt = 'select_account';
+  }
+  if (Object.keys(customParams).length > 0) {
+    provider.setCustomParameters(customParams);
+  }
 
   try {
     isSigningIn = true;
@@ -977,8 +1022,16 @@ export const googleSignIn = async (options?: {
 
     rememberLastGoogleEmail(result.user.email);
     if (accessToken) {
+      markDriveScopeConsentNeeded(false);
       clearDrivePermissionBlockedFiles();
-      persistDriveAccessToken(accessToken, Date.now() + DRIVE_TOKEN_DEFAULT_TTL_MS, result.user);
+      const rawExpireSec = Number((result as any)?._tokenResponse?.oauthExpireIn || 0);
+      const ttlMs =
+        Number.isFinite(rawExpireSec) && rawExpireSec >= 600 && rawExpireSec <= 7200
+          ? Math.max(30 * 60 * 1000, (rawExpireSec - 60) * 1000)
+          : DRIVE_TOKEN_DEFAULT_TTL_MS;
+      persistDriveAccessToken(accessToken, Date.now() + ttlMs, result.user);
+    } else {
+      markDriveScopeConsentNeeded(true);
     }
 
     cachedFolderId = null;
@@ -1007,7 +1060,7 @@ export const getAccessToken = async (options?: {
     if (!cachedAccessToken && auth.currentUser) {
       restorePersistedDriveAccessToken(auth.currentUser);
     }
-    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(2 * 60 * 1000)) {
+    if (cachedAccessToken && !isDriveAccessTokenExpiringSoon(45 * 1000)) {
       return cachedAccessToken;
     }
   }
@@ -1094,9 +1147,10 @@ async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphRes
               errText.includes('insufficientPermissions') ||
               errText.toLowerCase().includes('insufficient authentication scopes')
             ) {
+              markDriveScopeConsentNeeded(true);
               clearAccessTokenOnly();
               throw new Error(
-                'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Reconectar" e autorize o acesso ao Google Drive.',
+                'TOKEN_EXPIRED: O login atual não possui permissão do Google Drive. Clique em "Renovar Drive" e autorize o acesso ao Google Drive.',
               );
             }
           }
@@ -2887,13 +2941,14 @@ export async function trashFileInDriveDetailed(
 
     const patchErrText = await res.clone().text().catch(() => '');
     if (res.status === 403 && isDriveScopeInsufficientText(patchErrText)) {
+      markDriveScopeConsentNeeded(true);
       clearAccessTokenOnly();
       return {
         ok: false,
         fileId: cleanId,
         reason: 'token-expired',
         httpStatus: 403,
-        detail: 'O token atual não possui permissão do Google Drive. Reconecte sua conta Google.',
+        detail: 'O token atual não possui permissão do Google Drive. Clique em "Renovar Drive".',
       };
     }
 
@@ -2929,13 +2984,14 @@ export async function trashFileInDriveDetailed(
 
     if (finalStatus === 403 || res.status === 403) {
       if (isDriveScopeInsufficientText(combinedErr)) {
+        markDriveScopeConsentNeeded(true);
         clearAccessTokenOnly();
         return {
           ok: false,
           fileId: cleanId,
           reason: 'token-expired',
           httpStatus: 403,
-          detail: 'O token atual não possui permissão do Google Drive. Reconecte sua conta Google.',
+          detail: 'O token atual não possui permissão do Google Drive. Clique em "Renovar Drive".',
         };
       }
 
@@ -3618,6 +3674,12 @@ export async function openDrivePicker(options?: {
               : 'Selecione uma pasta ou arquivos no Google Drive'),
       );
 
+    // CRITICAL: setAppId with the numeric Google Cloud project number is mandatory for
+    // Google Picker to grant `drive.file` read/write/trash permission to the selected items.
+    if (GOOGLE_APP_ID && typeof builder.setAppId === 'function') {
+      builder.setAppId(GOOGLE_APP_ID);
+    }
+
     if (options?.mode !== 'folders-only') {
       builder.enableFeature(pickerNs.Feature.MULTISELECT_ENABLED);
     }
@@ -3637,6 +3699,9 @@ export async function openDrivePicker(options?: {
       const docsView = new pickerNs.DocsView(pickerNs.ViewId.DOCS)
         .setIncludeFolders(true)
         .setSelectFolderEnabled(options?.mode !== 'files-only');
+      if (pickerNs.DocsViewMode?.LIST && typeof docsView.setMode === 'function') {
+        docsView.setMode(pickerNs.DocsViewMode.LIST);
+      }
       if (options?.parentFolderId && options.parentFolderId !== 'root') {
         docsView.setParent(options.parentFolderId);
       }
@@ -3646,6 +3711,9 @@ export async function openDrivePicker(options?: {
         const allDocsView = new pickerNs.DocsView(pickerNs.ViewId.DOCS)
           .setIncludeFolders(true)
           .setSelectFolderEnabled(false);
+        if (pickerNs.DocsViewMode?.LIST && typeof allDocsView.setMode === 'function') {
+          allDocsView.setMode(pickerNs.DocsViewMode.LIST);
+        }
         builder.addView(allDocsView);
       }
     }
@@ -3683,3 +3751,180 @@ export async function openDrivePicker(options?: {
     picker.setVisible(true);
   });
 }
+
+export const POST_IT_FILENAME = 'Post-it.txt';
+
+/**
+ * Finds and reads the standalone Post-it.txt directly inside the user's selected default Google Drive folder.
+ * Completely independent from the main database sync pipeline so database sync issues can never overwrite it.
+ */
+export async function readPostItFileFromDrive(
+  token?: string,
+  knownFileId?: string | null,
+): Promise<{ file: DriveFileInfo; content: string } | null> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
+  }
+
+  const parentFolder = await getOrCreateStudyFolder(activeToken);
+  const escapedName = POST_IT_FILENAME.replace(/'/g, "\\'");
+
+  let foundFile: DriveFileInfo | null = null;
+
+  // 1. Search inside the selected study folder first (most recently modified wins)
+  const inFolderRes = await fetchDriveFilesList(activeToken, {
+    q: `'${parentFolder.id}' in parents and name = '${escapedName}' and trashed = false`,
+    orderBy: 'modifiedTime desc',
+    fields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties)',
+    fallbackFields: 'files(id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents)',
+    pageSize: 5,
+  });
+
+  if (inFolderRes.ok) {
+    const data = await inFolderRes.json();
+    if (Array.isArray(data.files) && data.files.length > 0) {
+      foundFile = enrichDriveFileWithSyncTag(data.files[0] as DriveFileInfo);
+    }
+  }
+
+  // 2. Fallback: verify knownFileId if provided and not found in folder query
+  if (!foundFile && knownFileId) {
+    try {
+      const metaUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(knownFileId)}?supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,trashed,appProperties`;
+      const { res: metaRes } = await authorizedDriveFetch(
+        metaUrl,
+        (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+        activeToken,
+        { withRetry: true },
+      );
+      if (metaRes.ok) {
+        const meta = await metaRes.json();
+        if (meta?.id && !meta.trashed) {
+          foundFile = enrichDriveFileWithSyncTag(meta as DriveFileInfo);
+        }
+      }
+    } catch {
+      // ignore missing knownFileId
+    }
+  }
+
+  if (!foundFile?.id) {
+    return null;
+  }
+
+  const downloadUrl = `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(foundFile.id)}?alt=media&supportsAllDrives=true`;
+  const { res: mediaRes } = await authorizedDriveFetch(
+    downloadUrl,
+    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+    activeToken,
+    { withRetry: true },
+  );
+
+  if (!mediaRes.ok) {
+    await throwDriveResponseError(mediaRes, 'Falha ao ler Post-it.txt do Google Drive');
+  }
+
+  const content = await mediaRes.text();
+  return { file: foundFile, content };
+}
+
+/**
+ * Directly creates or updates Post-it.txt inside the user's selected default Google Drive folder.
+ * Bypasses main database serialization and backups completely to prevent overwrites or data loss.
+ */
+export async function savePostItFileToDrive(
+  content: string,
+  token?: string,
+  knownFileId?: string | null,
+): Promise<DriveFileInfo> {
+  const activeToken = token || (await getAccessToken());
+  if (!activeToken) {
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta do Google Drive primeiro.');
+  }
+
+  const parentFolder = await getOrCreateStudyFolder(activeToken);
+  const escapedName = POST_IT_FILENAME.replace(/'/g, "\\'");
+
+  let existingFileId: string | null = null;
+  const searchRes = await fetchDriveFilesList(activeToken, {
+    q: `'${parentFolder.id}' in parents and name = '${escapedName}' and trashed = false`,
+    orderBy: 'modifiedTime desc',
+    fields: 'files(id,name,modifiedTime)',
+    fallbackFields: 'files(id,name,modifiedTime)',
+    pageSize: 5,
+  });
+
+  if (searchRes.ok) {
+    const searchData = await searchRes.json();
+    existingFileId = searchData.files?.[0]?.id || null;
+  }
+  if (!existingFileId && knownFileId) {
+    existingFileId = knownFileId;
+  }
+
+  const performUpload = async (targetId: string | null): Promise<Response> => {
+    const boundary = '-------314159265358979323846PostItTxt';
+    const delimiter = `\r\n--${boundary}\r\n`;
+    const closeDelimiter = `\r\n--${boundary}--`;
+    const sentLocalMs = Date.now();
+
+    const appProperties = buildInternalDriveAppProperties({
+      moduleTag: 'Post-it',
+      sourceAction: targetId ? 'postit-update' : 'postit-create',
+      timestampMs: sentLocalMs,
+    });
+
+    const metadata: Record<string, any> = {
+      name: POST_IT_FILENAME,
+      mimeType: 'text/plain',
+      description: `Post-it pessoal salvo diretamente pela Central de Estudos em ${new Date().toLocaleString('pt-BR')}`,
+      appProperties,
+    };
+    if (!targetId) {
+      metadata.parents = [parentFolder.id];
+    }
+
+    const metadataPart = `${delimiter}Content-Type: application/json; charset=UTF-8\r\n\r\n${JSON.stringify(
+      metadata,
+    )}`;
+    const mediaPart = `${delimiter}Content-Type: text/plain; charset=UTF-8\r\n\r\n${content}${closeDelimiter}`;
+    const multipartBody = metadataPart + mediaPart;
+
+    const url = targetId
+      ? `https://www.googleapis.com/upload/drive/v3/files/${encodeURIComponent(targetId)}?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties`
+      : 'https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id,name,mimeType,size,webViewLink,createdTime,modifiedTime,parents,appProperties';
+
+    const { res } = await authorizedDriveFetch(
+      url,
+      (t) => ({
+        method: targetId ? 'PATCH' : 'POST',
+        headers: {
+          Authorization: `Bearer ${t}`,
+          'Content-Type': `multipart/related; boundary=${boundary}`,
+        },
+        body: multipartBody,
+      }),
+      activeToken,
+      { withRetry: true },
+    );
+    return res;
+  };
+
+  const sentAtMs = Date.now();
+  let res = await performUpload(existingFileId);
+
+  // If the previously cached fileId was deleted or moved outside access, recreate cleanly in the active folder
+  if (!res.ok && existingFileId && (res.status === 404 || res.status === 403)) {
+    res = await performUpload(null);
+  }
+
+  if (!res.ok) {
+    await throwDriveResponseError(res, 'Falha ao salvar Post-it.txt no Google Drive');
+  }
+
+  const saved = (await res.json()) as DriveFileInfo;
+  calibrateDriveClockOffsetFromServerIso(saved.modifiedTime || saved.createdTime, sentAtMs);
+  return enrichDriveFileWithSyncTag(saved);
+}
+

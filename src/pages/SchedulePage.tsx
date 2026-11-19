@@ -755,6 +755,50 @@ export const SchedulePage: React.FC = () => {
         </div>
       )}
 
+      {(() => {
+        const activeWeekTotalTopics = WEEKDAYS.reduce(
+          (sum, d) => sum + (draft[d]?.length || 0),
+          0,
+        );
+        const populatedOtherWeeks = savedWeeksList.filter((wk) => {
+          if (wk.weekKey === activeWeekMeta.weekKey) return false;
+          const cnt = WEEKDAYS.reduce((s, d) => s + (wk.schedule?.[d]?.length || 0), 0);
+          return cnt > 0;
+        });
+        if (activeWeekTotalTopics > 0 || populatedOtherWeeks.length === 0) return null;
+        return (
+          <div className="mb-3 rounded-2xl border border-[var(--warning)]/45 bg-[var(--warning)]/10 p-3.5 flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <strong className="block text-[13px] font-bold text-[var(--text)]">
+                Esta semana está vazia, mas encontramos {populatedOtherWeeks.length} semana(s) salva(s) com tópicos na Pasta Cronogramas
+              </strong>
+              <p className="m-0 mt-0.5 text-[11.5px] text-[var(--muted)]">
+                Restaure sua grade com 1 clique ou importe um arquivo .txt de cronograma.
+              </p>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              {populatedOtherWeeks.slice(0, 2).map((wk) => {
+                const cnt = WEEKDAYS.reduce((s, d) => s + (wk.schedule?.[d]?.length || 0), 0);
+                return (
+                  <button
+                    key={wk.weekKey}
+                    type="button"
+                    onClick={() => {
+                      flushAllDirtyDays();
+                      loadSavedScheduleWeek(wk.weekKey);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    Abrir {wk.label.split('(')[0].trim()} ({cnt} tópicos)
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })()}
+
       <div className="flex flex-col gap-3">
         {WEEKDAYS.map((day) => {
           const topics = draft[day] || [];

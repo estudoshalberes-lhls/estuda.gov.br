@@ -17,7 +17,8 @@ import { useStudy } from '../../context/StudyContext';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { WEEKDAYS, formatClock, formatScheduleDuration, visibleName } from '../../lib/parsers';
 import { ModuleName, WeekdayName } from '../../types/study';
-import { GlobalSearch } from './GlobalSearch';
+import { DailyGoalWidget } from './DailyGoalWidget';
+import { PostItWidget } from './PostItWidget';
 import { ModuleIcon } from '../ui/ModuleIcon';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 
@@ -206,9 +207,12 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
         </div>
       </div>
 
-      {/* Busca Geral */}
-      <div className="flex-1 min-w-[110px] sm:min-w-[170px] max-w-[300px] h-9 sm:h-10 flex items-center">
-        <GlobalSearch />
+      {/* Meta do Dia do Expediente + Post-it Permanente */}
+      <div className="flex-1 min-w-[180px] sm:min-w-[230px] max-w-[380px] h-9 sm:h-10 flex items-center gap-1.5">
+        <div className="flex-1 min-w-0 h-full">
+          <DailyGoalWidget />
+        </div>
+        <PostItWidget />
       </div>
 
       {/* Caixa do FOCO */}
@@ -585,12 +589,12 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             type="button"
             onClick={() => void connectGoogleDrive()}
             disabled={isSyncingDrive}
-            aria-label="Reconectar Google Drive"
-            title="Navegador bloqueou a renovação silenciosa — clique uma vez para renovar o acesso ao Google Drive"
+            aria-label="Renovar acesso ao Google Drive"
+            title="Sua conta continua conectada salvando na nuvem. O acesso aos arquivos do Google Drive expira após ~1h por política do Google — clique para renovar."
             className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
           >
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Reconectar</span>
+            <span className="hidden sm:inline">Renovar Drive</span>
           </button>
         ) : hasPendingCloudChanges ? (
           <button

@@ -57,6 +57,7 @@ import {
   ensureFirebaseSessionAlive,
   isDriveAccessTokenExpiringSoon,
   isDriveFilePermissionBlocked,
+  isDriveScopeConsentNeeded,
   DriveFileInfo,
   DriveFolderSummary,
   buildDriveSignatureMap,
@@ -1663,6 +1664,28 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     };
   });
 
+  // Safeguard: if active schedule is completely empty (0 topics) while weeklySchedules has
+  // populated topics for the active week, automatically recover them into normalizedSchedule.
+  const activeScheduleTopicCount = WEEKDAYS.reduce(
+    (sum, day) => sum + (normalizedSchedule[day]?.length || 0),
+    0,
+  );
+  if (activeScheduleTopicCount === 0 && Object.keys(normalizedWeeklySchedules).length > 0) {
+    const inferredActiveKey = resolveActiveScheduleWeekKey(
+      dataObj.scheduleDayDates,
+      normalizedSchedule,
+    );
+    const matchingSavedWeek = normalizedWeeklySchedules[inferredActiveKey];
+    const matchingCount = matchingSavedWeek
+      ? WEEKDAYS.reduce((sum, day) => sum + (matchingSavedWeek.schedule?.[day]?.length || 0), 0)
+      : 0;
+    if (matchingSavedWeek && matchingCount > 0) {
+      WEEKDAYS.forEach((day) => {
+        normalizedSchedule[day] = [...(matchingSavedWeek.schedule?.[day] || [])];
+      });
+    }
+  }
+
   const normalizedPdfFolders =
     dataObj.pdfFolders !== undefined
       ? normalizeArrayRecordMap<PersonalPdfFile>(dataObj.pdfFolders as Record<string, unknown>)
@@ -2044,6 +2067,7 @@ async function restoreFilesAndOrphansFromDriveList(
       pathSegments.includes('backups') ||
       pathSegments.includes('backup geral') ||
       lowerName === CLOUD_SYNC_FILENAME ||
+      lowerName === 'post-it.txt' ||
       lowerName.startsWith('backup_central_estudos') ||
       lowerName.startsWith('backup_incremental_central_estudos') ||
       lowerName.includes('central_estudos_sync') ||
@@ -2061,7 +2085,7 @@ async function restoreFilesAndOrphansFromDriveList(
     if (knownSyncedIds && knownSyncedIds.size > 0) {
       return !knownSyncedIds.has(df.id);
     }
-    return false;
+    return true;
   };
 
   const estimatedTotal = Math.max(
@@ -2984,11 +3008,14 @@ async function restoreFilesAndOrphansFromDriveList(
         await saveFileBlob(blobKey, blob, scope);
         const fileMs = Date.parse(df.modifiedTime || df.createdTime || '') || Date.now();
         const existingWeek = nextWeeklySchedules[parsedWeek.weekKey];
+        const existingTopicsCount = existingWeek
+          ? WEEKDAYS.reduce((s, d) => s + (existingWeek.schedule?.[d]?.length || 0), 0)
+          : 0;
         const parsedTopicsCount = WEEKDAYS.reduce(
           (s, d) => s + (parsedWeek.schedule?.[d]?.length || 0),
           0,
         );
-        if (!existingWeek) {
+        if (!existingWeek || (existingTopicsCount === 0 && parsedTopicsCount > 0)) {
           nextWeeklySchedules[parsedWeek.weekKey] = {
             ...parsedWeek,
             blobKey,
@@ -3003,16 +3030,31 @@ async function restoreFilesAndOrphansFromDriveList(
       }
     }
 
+    const currentScheduleTotalTopics = WEEKDAYS.reduce(
+      (sum, d) => sum + (nextDb.schedule?.[d]?.length || 0),
+      0,
+    );
     const currentScheduleHasCustom = WEEKDAYS.some((d) =>
       (nextDb.schedule?.[d] || []).some((t) => !/^sch-[1-8]$/.test(t.id || '')),
     );
     const dbIsUntouchedSeed = isUntouchedSeedDatabase(nextDb);
     const activeWeekKey = resolveActiveScheduleWeekKey(nextDb.scheduleDayDates, nextDb.schedule);
-    const matchingActiveWeek = nextWeeklySchedules[activeWeekKey] || latestRecoveredWeek;
+    const activeWeekRec = nextWeeklySchedules[activeWeekKey];
+    const activeWeekRecCount = activeWeekRec
+      ? WEEKDAYS.reduce((s, d) => s + (activeWeekRec.schedule?.[d]?.length || 0), 0)
+      : 0;
+    const matchingActiveWeek = activeWeekRecCount > 0 ? activeWeekRec : latestRecoveredWeek;
+    const matchingTopicsCount = matchingActiveWeek
+      ? WEEKDAYS.reduce((s, d) => s + (matchingActiveWeek.schedule?.[d]?.length || 0), 0)
+      : 0;
 
-    // Only hydrate active schedule from .txt file if the database is still an untouched seed;
-    // never overwrite an existing database's schedule when the user intentionally edited or deleted topics!
-    if (dbIsUntouchedSeed && !currentScheduleHasCustom && matchingActiveWeek) {
+    // Hydrate active schedule from .txt file when DB is untouched seed OR when the active schedule
+    // was completely emptied (0 topics) while Drive Cronogramas still holds a populated schedule.
+    if (
+      matchingActiveWeek &&
+      matchingTopicsCount > 0 &&
+      ((dbIsUntouchedSeed && !currentScheduleHasCustom) || currentScheduleTotalTopics === 0)
+    ) {
       nextDb = reconcileCompletedAndArchivedItems(
         {
           ...nextDb,
@@ -3976,6 +4018,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return;
     }
     if (db === lastPersistedDbRef.current) {
+      isRestoringRef.current = false;
       return;
     }
     const curHash = computeDatabaseContentHash(db);
@@ -4598,6 +4641,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       lastPersistedDbHashRef.current = nextHash;
       setDb(sanitizedDb);
       dbRef.current = sanitizedDb;
+      window.setTimeout(() => {
+        isRestoringRef.current = false;
+      }, 80);
       setFirebaseChunkCount(decomposeDatabaseToFirestoreChunks(sanitizedDb).length);
       const serialized = JSON.stringify(sanitizedDb);
       const ts = cloudTimestamp || new Date().toISOString();
@@ -5236,6 +5282,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 (rawRemoteDb?.submittedSimulations || []).length ||
               (remoteNormalized.proofFiles || []).length < (rawRemoteDb?.proofFiles || []).length;
 
+            const remoteIsStrictlyNewer =
+              !remoteUntouched &&
+              remoteMs > localEditMs + 2000 &&
+              !userEditedDuringHydrate &&
+              !rescuedGuestEdits;
+
             if (remoteUntouched && !localUntouched) {
               // Firestore only had default seed data while local/Drive has the user's real study database: push local/Drive DB to Firestore!
               applyRestoredDatabaseForScope(scope, localDb, new Date().toISOString(), { skipFirestorePush: true });
@@ -5285,7 +5337,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               !userEditedDuringHydrate &&
               Date.now() - lastDeletionMsRef.current > 15_000 &&
               getPendingDriveDeletes(scope).length === 0 &&
-              (localUntouched || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))
+              (localUntouched || remoteIsStrictlyNewer || (!localMeta.hasPendingCloudSync && remoteMs >= localEditMs - 1500))
             ) {
               if (!remoteUntouched && (remoteHash !== localHash || localDb !== dbRef.current || remoteHadDirtyClassification)) {
                 applyRestoredDatabaseForScope(scope, remoteNormalized, loadedFirestore.updatedAt, {
@@ -5296,7 +5348,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               } else {
                 setLastFirebaseSyncAt(loadedFirestore.updatedAt);
                 const keepPending =
-                  Boolean(localMeta.hasPendingCloudSync) ||
+                  Boolean(localMeta.hasPendingCloudSync && !remoteIsStrictlyNewer) ||
                   getPendingDriveDeletes(scope).length > 0 ||
                   (driveConnectedRef.current && lastCloudHashRef.current !== (remoteUntouched ? localHash : remoteHash));
                 markFirestoreBaselineSynced(
@@ -5310,8 +5362,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               }
               setFirebaseChunkCount(loadedFirestore.sectionCount);
             } else {
-              // Merge local/folder/Drive changes additively over Firestore baseline and push to Firestore only if delta changed vs remote
-              const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), localDb, {
+              // Merge changes additively, ALWAYS letting the newer side win conflicts so a stale computer
+              // never overwrites newer edits saved from another computer!
+              const localIsNewerOrActive =
+                !localUntouched &&
+                (userEditedDuringHydrate ||
+                  rescuedGuestEdits ||
+                  localEditMs >= remoteMs - 1500);
+              const baseDb = localIsNewerOrActive ? remoteNormalized : localDb;
+              const overlayDb = localIsNewerOrActive ? localDb : remoteNormalized;
+              const delta = buildIncrementalDatabaseBackup(createInitialDatabase(), overlayDb, {
                 updatedAt: new Date().toISOString(),
                 userEmail: googleEmail || undefined,
               });
@@ -5330,34 +5390,65 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 ),
               };
               let mergedDb = delta.hasChanges
-                ? applyIncrementalDeltaToDatabase(remoteNormalized, additiveEnvelope, { additiveMerge: true })
-                : localDb;
-              if (!localUntouched && (rescuedGuestEdits || userEditedDuringHydrate || localMeta.hasPendingCloudSync || localEditMs > remoteMs + 1500)) {
-                mergedDb = {
-                  ...mergedDb,
-                  schedule: localDb.schedule,
-                  scheduleDayDates: localDb.scheduleDayDates,
-                  weeklySchedules: localDb.weeklySchedules,
-                };
-              }
-              const localIsAuthoritativeForActiveEntities =
-                !localUntouched &&
-                (rescuedGuestEdits ||
-                  userEditedDuringHydrate ||
-                  localMeta.hasPendingCloudSync ||
-                  localEditMs > remoteMs + 1500);
+                ? applyIncrementalDeltaToDatabase(baseDb, additiveEnvelope, { additiveMerge: true })
+                : overlayDb;
+              const countTopicsInSchedule = (sched?: ScheduleMap): number =>
+                WEEKDAYS.reduce((sum, d) => sum + (sched?.[d]?.length || 0), 0);
+              const mergeWeeklyMapsSafely = (
+                secondaryMap?: Record<string, WeeklyScheduleFileRecord>,
+                primaryMap?: Record<string, WeeklyScheduleFileRecord>,
+              ): Record<string, WeeklyScheduleFileRecord> => {
+                const out: Record<string, WeeklyScheduleFileRecord> = { ...(secondaryMap || {}) };
+                for (const [wk, pRec] of Object.entries(primaryMap || {})) {
+                  const sRec = out[wk];
+                  if (
+                    sRec &&
+                    countTopicsInSchedule(pRec?.schedule) === 0 &&
+                    countTopicsInSchedule(sRec?.schedule) > 0 &&
+                    Date.now() - lastDeletionMsRef.current > 15_000
+                  ) {
+                    continue;
+                  }
+                  out[wk] = pRec;
+                }
+                return out;
+              };
+              const primarySchedDb = localIsNewerOrActive ? localDb : remoteNormalized;
+              const secondarySchedDb = localIsNewerOrActive ? remoteNormalized : localDb;
+              const primaryTopicsCount = countTopicsInSchedule(primarySchedDb.schedule);
+              const secondaryTopicsCount = countTopicsInSchedule(secondarySchedDb.schedule);
+              const keepSecondarySchedule =
+                primaryTopicsCount === 0 &&
+                secondaryTopicsCount > 0 &&
+                Date.now() - lastDeletionMsRef.current > 15_000;
+              mergedDb = {
+                ...mergedDb,
+                schedule: keepSecondarySchedule ? secondarySchedDb.schedule : primarySchedDb.schedule,
+                scheduleDayDates: keepSecondarySchedule
+                  ? secondarySchedDb.scheduleDayDates
+                  : primarySchedDb.scheduleDayDates,
+                weeklySchedules: mergeWeeklyMapsSafely(
+                  secondarySchedDb.weeklySchedules,
+                  primarySchedDb.weeklySchedules,
+                ),
+              };
               const rawMergedTombstones = mergeTombstoneMaps(
                 remoteNormalized.deletedTombstones,
                 localDb.deletedTombstones,
               );
               mergedDb = {
                 ...mergedDb,
-                deletedTombstones: localIsAuthoritativeForActiveEntities
-                  ? stripActiveEntityTombstones(rawMergedTombstones, localDb)
-                  : rawMergedTombstones,
+                deletedTombstones: stripActiveEntityTombstones(
+                  rawMergedTombstones,
+                  localIsNewerOrActive ? localDb : remoteNormalized,
+                ),
               };
               mergedDb = applyTombstonesToMergedDatabase(mergedDb, scope);
-              mergedDb = reconcileCompletedAndArchivedItems(mergedDb, localDb, remoteNormalized);
+              mergedDb = reconcileCompletedAndArchivedItems(
+                mergedDb,
+                localIsNewerOrActive ? localDb : remoteNormalized,
+                localIsNewerOrActive ? remoteNormalized : localDb,
+              );
               const mergedHash = computeDatabaseContentHash(mergedDb);
 
               if (!remoteHadDirtyClassification && mergedHash === remoteHash) {
@@ -5485,19 +5576,23 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       googleUid,
       (remoteMeta) => {
         const nowMs = Date.now();
+        const curHash = computeDatabaseContentHash(dbRef.current);
+        const firestoreLocallyDirty = isFirestoreDatabaseDirty(googleUid, scope, curHash);
+        const remoteMetaMs = Date.parse(remoteMeta.updatedAt || '') || 0;
+        const localEditMs = Date.parse(loadSyncMeta(scope).lastLocalEditAt || '') || 0;
+        const remoteIsNewerThanLocal = remoteMetaMs > localEditMs + 2000;
         if (
           cancelled ||
           getFirestoreQuotaCooldownStatus().blocked ||
           firebaseInFlightRef.current ||
           firebaseSyncTimerRef.current !== null ||
-          pendingCloudSyncRef.current ||
+          (firestoreLocallyDirty && !remoteIsNewerThanLocal) ||
           nowMs - lastLocalWriteMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
           nowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
           nowMs - lastDeletionMsRef.current < 15_000
         ) {
           return;
         }
-        const curHash = computeDatabaseContentHash(dbRef.current);
         if (
           remoteMeta.contentHash &&
           remoteMeta.contentHash !== curHash &&
@@ -5516,12 +5611,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           )
             .then((reloaded) => {
               const applyNowMs = Date.now();
+              const applyCurHash = computeDatabaseContentHash(dbRef.current);
+              const applyFirestoreDirty = isFirestoreDatabaseDirty(googleUid, scope, applyCurHash);
+              const reloadedMs = Date.parse(reloaded?.updatedAt || '') || 0;
+              const applyLocalEditMs = Date.parse(loadSyncMeta(scope).lastLocalEditAt || '') || 0;
               if (
                 !reloaded ||
                 cancelled ||
                 firebaseInFlightRef.current ||
                 firebaseSyncTimerRef.current !== null ||
-                pendingCloudSyncRef.current ||
+                (applyFirestoreDirty && !(reloadedMs > applyLocalEditMs + 2000)) ||
                 applyNowMs - lastLocalWriteMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
                 applyNowMs - lastUserEditMsRef.current < REMOTE_WRITE_SHIELD_WINDOW_MS ||
                 applyNowMs - lastDeletionMsRef.current < 15_000
@@ -5534,6 +5633,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               );
               if (isUntouchedSeedDatabase(normalized) && !isUntouchedSeedDatabase(dbRef.current)) {
                 return;
+              }
+              const remoteFolderPref = normalized.preferences?.default_drive_folder;
+              if (remoteFolderPref?.id) {
+                const localFolderPref = getPreferredStudyFolder(googleEmail || googleUid);
+                const remoteFolderMs = Date.parse(remoteFolderPref.updatedAt || '') || 0;
+                const localFolderMs = Date.parse(localFolderPref.updatedAt || '') || 0;
+                if (!localFolderPref.id || (remoteFolderPref.id !== localFolderPref.id && remoteFolderMs >= localFolderMs)) {
+                  setPreferredStudyFolder(remoteFolderPref, googleEmail || googleUid);
+                }
               }
               lastServerWorkspaceHashRef.current = reloaded.contentHash || '';
               applyRestoredDatabaseForScope(scope, normalized, reloaded.updatedAt, {
@@ -5598,18 +5706,38 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         try {
           if (user.uid && firebaseHydratedUidRef.current !== user.uid) {
             if (!activeHydratePromiseRef.current) {
-              await new Promise((r) => window.setTimeout(r, 40));
+              await new Promise((r) => window.setTimeout(r, 80));
             }
             if (activeHydratePromiseRef.current) {
               await activeHydratePromiseRef.current.catch(() => null);
             }
           }
+
+          // Load Firestore state FIRST so every computer resolves the EXACT SAME default Google Drive folder
+          // before querying or creating folders in Drive!
+          const firestoreLoaded = user.uid
+            ? await loadDatabaseFromFirestore(user.uid, user.email).catch(() => null)
+            : null;
+
           const dbAtSyncStart = dbRef.current;
-          const persistedDbFolder = dbAtSyncStart.preferences?.default_drive_folder;
+          const firestoreFolderPref = (firestoreLoaded?.db as StudyDatabase | undefined)?.preferences?.default_drive_folder;
+          const localDbFolderPref = dbAtSyncStart.preferences?.default_drive_folder;
           const localAccountPref = getPreferredStudyFolder(user.email || user.uid);
-          if (persistedDbFolder?.id && !localAccountPref.id) {
-            setPreferredStudyFolder(persistedDbFolder, user.email || user.uid);
+
+          // Pick the newest configured folder preference across Firestore and localStorage
+          const candidateFolderPrefs = [firestoreFolderPref, localDbFolderPref, localAccountPref].filter(
+            (p): p is { id: string; name: string; url?: string; updatedAt?: string } => Boolean(p?.id),
+          );
+          if (candidateFolderPrefs.length > 0) {
+            candidateFolderPrefs.sort(
+              (a, b) => (Date.parse(b.updatedAt || '') || 0) - (Date.parse(a.updatedAt || '') || 0),
+            );
+            const winningFolder = candidateFolderPrefs[0];
+            if (winningFolder.id !== localAccountPref.id) {
+              setPreferredStudyFolder(winningFolder, user.email || user.uid);
+            }
           }
+
           const folder = await getOrCreateStudyFolder(token);
           const resolvedFolderName = folder.name || getPreferredStudyFolder(user.email || user.uid).name;
           rememberKnownStudyDriveFolderName(resolvedFolderName);
@@ -5629,8 +5757,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const flushedPreDeletedCount = 0;
           const flushedPreDeletedNames: string[] = [];
 
-          // Fetch Drive file/backup metadata and Firebase Firestore state in parallel
-          const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta, firestoreLoaded] = await Promise.all([
+          // Fetch Drive file/backup metadata and IndexedDB snapshots in parallel
+          const [, backupsList, driveFiles, idbSnap, idbMeta, guestIdbSnap, guestIdbMeta] = await Promise.all([
             skipSubfolderEnsure || !folderWritable
               ? Promise.resolve({})
               : syncStudySubFoldersInDrive(folder.id, token).catch(() => ({})),
@@ -5640,7 +5768,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             loadScopedSyncMeta<ScopeSyncMeta>(scope),
             loadScopedDatabaseJson('offline_guest'),
             loadScopedSyncMeta<ScopeSyncMeta>('offline_guest'),
-            user.uid ? loadDatabaseFromFirestore(user.uid, user.email).catch(() => null) : Promise.resolve(null),
           ]);
 
           let currentDb = applyTombstonesToMergedDatabase(dbRef.current, scope);
@@ -5670,14 +5797,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               scope,
             );
             firestoreNormalizedHash = computeDatabaseContentHash(firestoreNormalized);
+            const firestoreStrictlyNewerThanLocal =
+              firestoreUpdatedMs > idbEditMs + 2000 &&
+              Date.now() - lastUserEditMsRef.current > 15_000 &&
+              Date.now() - lastDeletionMsRef.current > 15_000 &&
+              getPendingDriveDeletes(scope).length === 0;
             const hasLocalUnflushedWork =
-              hasPersistedPendingSync(preSyncMeta) ||
-              getPendingDriveDeletes(scope).length > 0 ||
-              Date.now() - lastDeletionMsRef.current < 15_000;
+              !firestoreStrictlyNewerThanLocal &&
+              (hasPersistedPendingSync(preSyncMeta) ||
+                getPendingDriveDeletes(scope).length > 0 ||
+                Date.now() - lastDeletionMsRef.current < 15_000);
             if (!isUntouchedSeedDatabase(firestoreNormalized)) {
               if (
-                !hasLocalUnflushedWork &&
-                (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500)
+                firestoreStrictlyNewerThanLocal ||
+                (!hasLocalUnflushedWork &&
+                  (!hasLocalAny || isUntouchedSeedDatabase(currentDb) || firestoreUpdatedMs >= idbEditMs - 1500))
               ) {
                 currentDb = {
                   ...firestoreNormalized,
@@ -5936,6 +6070,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               lastPersistedDbRef.current = currentDb;
               setDb(currentDb);
               dbRef.current = currentDb;
+              window.setTimeout(() => {
+                isRestoringRef.current = false;
+              }, 80);
               persistLocalDatabaseForScope(scope, JSON.stringify(currentDb), new Date().toISOString(), {
                 hasPendingCloudSync: !isUntouchedSeedDatabase(currentDb),
               });
@@ -6044,8 +6181,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               sameSessionRenewal ||
               offlineLocalContinuation ||
               firestoreIsNewerThanDrive ||
-              (syncedScopeOnceRef.current === scope && pendingCloudSyncRef.current && hashesDiffer && !cloudOutsideActiveFolder) ||
-              (hasPersistedUnsyncedLocal && localHasNewerDeletes && !cloudOutsideActiveFolder)
+              (localIsNewer && !cloudOutsideActiveFolder) ||
+              (syncedScopeOnceRef.current === scope && pendingCloudSyncRef.current && hashesDiffer && !cloudOutsideActiveFolder && localEditMs >= cloudMs - 1500) ||
+              (hasPersistedUnsyncedLocal && localHasNewerDeletes && !cloudOutsideActiveFolder && localEditMs >= cloudMs - 1500)
             ) {
               useCloudSnapshot = false;
               let baseLocalDb = currentDb;
@@ -6193,10 +6331,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 localHasCustom &&
                 hashesDiffer &&
                 (rescuedGuestEdits ||
-                  localHasNewerDeletes ||
                   firestoreUpdatedMs > cloudMs + 1500 ||
+                  localIsNewer ||
                   (hasPersistedUnsyncedLocal &&
-                    (localIsNewer || localHasUnsavedEdge || (lastCloudSyncMs > 0 && localEditMs > lastCloudSyncMs + 1500))));
+                    localEditMs >= cloudMs - 1500 &&
+                    (localHasNewerDeletes || localHasUnsavedEdge || (lastCloudSyncMs > 0 && localEditMs > lastCloudSyncMs + 1500))));
               if (localEditedAfterLastSync) {
                 const localDiff = buildIncrementalDatabaseBackup(baseMergedCloudDb, currentDb, {
                   updatedAt: new Date(localEditMs || Date.now()).toISOString(),
@@ -6219,11 +6358,37 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   };
                   const preMergeCloud = baseMergedCloudDb;
                   baseMergedCloudDb = applyIncrementalDeltaToDatabase(baseMergedCloudDb, additiveLocalEnvelope, { additiveMerge: true });
+                  const countSchedTopics = (s?: ScheduleMap) =>
+                    WEEKDAYS.reduce((sum, d) => sum + (s?.[d]?.length || 0), 0);
+                  const localSchedCount = countSchedTopics(currentDb.schedule);
+                  const cloudSchedCount = countSchedTopics(preMergeCloud.schedule);
+                  const mergedWeeklySafe: Record<string, WeeklyScheduleFileRecord> = {
+                    ...(preMergeCloud.weeklySchedules || {}),
+                  };
+                  for (const [wk, locRec] of Object.entries(currentDb.weeklySchedules || {})) {
+                    const cloudRec = mergedWeeklySafe[wk];
+                    if (
+                      cloudRec &&
+                      countSchedTopics(locRec?.schedule) === 0 &&
+                      countSchedTopics(cloudRec?.schedule) > 0 &&
+                      Date.now() - lastDeletionMsRef.current > 15_000
+                    ) {
+                      continue;
+                    }
+                    mergedWeeklySafe[wk] = locRec;
+                  }
+                  const preferLocalSchedule =
+                    (localEditMs >= cloudMs - 1500 || rescuedGuestEdits) &&
+                    !(localSchedCount === 0 && cloudSchedCount > 0 && Date.now() - lastDeletionMsRef.current > 15_000);
                   baseMergedCloudDb = {
                     ...baseMergedCloudDb,
-                    schedule: currentDb.schedule,
-                    scheduleDayDates: currentDb.scheduleDayDates,
-                    weeklySchedules: currentDb.weeklySchedules,
+                    ...(preferLocalSchedule
+                      ? {
+                          schedule: currentDb.schedule,
+                          scheduleDayDates: currentDb.scheduleDayDates,
+                        }
+                      : {}),
+                    weeklySchedules: mergedWeeklySafe,
                     deletedTombstones: stripActiveEntityTombstones(
                       mergeTombstoneMaps(
                         baseMergedCloudDb.deletedTombstones,
@@ -7193,6 +7358,9 @@ function isEmailAuthorized(email?: string | null): boolean {
           }
           setDb(nextDb);
           dbRef.current = nextDb;
+          window.setTimeout(() => {
+            isRestoringRef.current = false;
+          }, 80);
 
           const nextTimer = loadTimer(newScope);
           setTimerState(nextTimer);
@@ -7232,6 +7400,9 @@ function isEmailAuthorized(email?: string | null): boolean {
               lastPersistedDbHashRef.current = computeDatabaseContentHash(idbParsed);
               setDb(idbParsed);
               dbRef.current = idbParsed;
+              window.setTimeout(() => {
+                isRestoringRef.current = false;
+              }, 80);
             } catch {
               // ignore
             }
@@ -7736,6 +7907,7 @@ function isEmailAuthorized(email?: string | null): boolean {
       const res = await googleSignIn({
         loginHint: options?.forceAccountPicker ? null : currentUser?.email,
         forceAccountPicker: options?.forceAccountPicker,
+        forceConsent: isDriveScopeConsentNeeded(),
       });
       if (res?.user) {
         const userEmail = res.user.email || '';
@@ -7797,6 +7969,9 @@ function isEmailAuthorized(email?: string | null): boolean {
           }
           setDb(nextDb);
           dbRef.current = nextDb;
+          window.setTimeout(() => {
+            isRestoringRef.current = false;
+          }, 80);
           const nextTimer = loadTimer(newScope);
           setTimerState(nextTimer);
           timerStateRef.current = nextTimer;
@@ -9473,9 +9648,18 @@ function isEmailAuthorized(email?: string | null): boolean {
         );
         const primaryDeleteId = pickedIds.has(target.driveFile.id)
           ? target.driveFile.id
-          : pickedMatchingName?.id || target.driveFile.id;
+          : pickedMatchingName?.id || picked.files[0]?.id || target.driveFile.id;
 
-        const trashRes = await trashFileInDriveDetailed(primaryDeleteId, activeToken);
+        let trashRes = await trashFileInDriveDetailed(primaryDeleteId, activeToken);
+        // Google Drive ACL propagation after Picker selection can take ~500-800ms; retry once automatically
+        if (!trashRes.ok && trashRes.reason === 'picker-permission') {
+          await new Promise((r) => window.setTimeout(r, 800));
+          trashRes = await trashFileInDriveDetailed(primaryDeleteId, activeToken);
+        }
+        // If user selected a duplicate copy with matching name whose ID differed from target.driveFile.id, also try trashing target.driveFile.id if it was picked
+        if (trashRes.ok && primaryDeleteId !== target.driveFile.id && pickedIds.has(target.driveFile.id)) {
+          void trashFileInDriveDetailed(target.driveFile.id, activeToken).catch(() => {});
+        }
         if (!trashRes.ok) {
           if (trashRes.reason === 'token-expired') setDriveTokenReady(false);
           const notSelectedHint =
@@ -9483,7 +9667,9 @@ function isEmailAuthorized(email?: string | null): boolean {
             !pickedMatchingName &&
             trashRes.reason === 'picker-permission'
               ? `Selecione especificamente o arquivo "${target.displayName}" no seletor do Drive para liberar a exclusão.`
-              : trashRes.detail || 'Não foi possível mover o arquivo para a lixeira após a seleção.';
+              : trashRes.reason === 'picker-permission'
+                ? 'O Google Drive manteve a restrição neste arquivo (ele pode pertencer a outra conta ou estar em pasta compartilhada). Use "Abrir no Drive" para apagá-lo diretamente ou clique em "Ignorar neste app".'
+                : trashRes.detail || 'Não foi possível mover o arquivo para a lixeira após a seleção.';
           setDriveConflictErrors((prev) => ({
             ...prev,
             [conflictId]: {
@@ -12462,10 +12648,13 @@ function isEmailAuthorized(email?: string | null): boolean {
       setDb((prev) => {
         const nextMap = { ...(prev.weeklySchedules || {}) };
         delete nextMap[cleanKey];
-        return {
+        const next: StudyDatabase = {
           ...prev,
           weeklySchedules: nextMap,
         };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
       });
       lastDeletionMsRef.current = Date.now();
       pendingCloudSyncRef.current = true;
@@ -12562,19 +12751,27 @@ function isEmailAuthorized(email?: string | null): boolean {
           },
         };
 
-        // If switching to another week that already has a saved schedule (and not forcing date overwrite on current), load it
+        // If switching to another week that already has a saved schedule WITH topics (and not forcing date overwrite), load it.
+        // Never wipe a populated active schedule with an empty placeholder record!
         const existingTargetWeek =
           cleanWeekKey !== prevMeta.weekKey && !options?.overwriteCustomized
             ? mapWithPrev[cleanWeekKey]
             : undefined;
+        const existingTargetTopics = existingTargetWeek
+          ? WEEKDAYS.reduce((sum, d) => sum + (existingTargetWeek.schedule?.[d]?.length || 0), 0)
+          : 0;
+        const prevTopics = WEEKDAYS.reduce((sum, d) => sum + (prev.schedule?.[d]?.length || 0), 0);
 
-        if (existingTargetWeek) {
-          return {
+        if (existingTargetWeek && (existingTargetTopics > 0 || prevTopics === 0)) {
+          const next: StudyDatabase = {
             ...prev,
             schedule: existingTargetWeek.schedule,
             scheduleDayDates: existingTargetWeek.scheduleDayDates,
             weeklySchedules: mapWithPrev,
           };
+          dbRef.current = next;
+          pendingCloudSyncRef.current = true;
+          return next;
         }
 
         const nextDayDates: Partial<Record<WeekdayName, string>> = {};
@@ -12595,7 +12792,7 @@ function isEmailAuthorized(email?: string | null): boolean {
         });
 
         const targetMeta = buildScheduleWeekMetadata(cleanWeekKey, nextDayDates);
-        return {
+        const next: StudyDatabase = {
           ...prev,
           schedule: nextSchedule,
           scheduleDayDates: targetMeta.dayDates,
@@ -12612,6 +12809,9 @@ function isEmailAuthorized(email?: string | null): boolean {
             },
           },
         };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
       });
       scheduleAutoScheduleTxtSync(cleanWeekKey);
       if (!options?.silent) {
@@ -12689,6 +12889,7 @@ function isEmailAuthorized(email?: string | null): boolean {
 
   const completeScheduleTopic = useCallback(
     (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => {
+      lastUrgentSaveMsRef.current = Date.now();
       setDb((prev) => {
         const list = [...(currentDayTopics || prev.schedule[day] || [])];
         const [removed] = list.splice(index, 1);

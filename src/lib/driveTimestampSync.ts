@@ -228,6 +228,7 @@ function isDriveBackupOrSystemFile(df: DriveFileInfo): boolean {
     pathSegments.includes('backups') ||
     pathSegments.includes('backup geral') ||
     lowerName === CLOUD_SYNC_FILENAME ||
+    lowerName === 'post-it.txt' ||
     lowerName.startsWith('backup_central_estudos') ||
     lowerName.startsWith('backup_incremental_central_estudos') ||
     lowerName.includes('central_estudos_sync') ||
