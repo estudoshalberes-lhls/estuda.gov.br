@@ -279,8 +279,6 @@ export const SyncActivityLogPanel: React.FC = () => {
     clearSyncActivityLogs,
     googleUser,
     driveConnected,
-    driveTokenReady,
-    isRenewingDriveToken,
     isSyncingDrive,
     connectGoogleDrive,
     checkDriveTimestampConflictsNow,
@@ -336,44 +334,41 @@ export const SyncActivityLogPanel: React.FC = () => {
     return labels;
   }, [googleUser, syncActivityLogs]);
 
-  const showSessionDiagnosticBanner =
-    driveConnected && !driveTokenReady && !isRenewingDriveToken;
+  const showQueuedDeletesOfflineBanner = !driveConnected && pendingDeleteLabels.length > 0;
 
   return (
     <Panel
       title="Log de atividades e diagnóstico de sincronização"
-      subtitle="Histórico recente de sincronizações, restaurações, exclusões na lixeira do Drive e sessão OAuth para diagnosticar arquivos restaurados ou falhas."
+      subtitle="Histórico recente de sincronizações, restaurações e exclusões na lixeira do Google Drive para diagnosticar arquivos ou falhas."
       className="mb-4"
     >
       <div className="flex flex-col gap-3 min-w-0">
-        {showSessionDiagnosticBanner && (
+        {showQueuedDeletesOfflineBanner && (
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl border border-[var(--warning)]/45 bg-[var(--warning)]/10 min-w-0">
             <div className="flex items-start gap-2.5 min-w-0 flex-1">
               <ShieldAlert className="w-4 h-4 text-[var(--warning)] shrink-0 mt-0.5" />
               <div className="min-w-0 text-[11.5px] leading-relaxed text-[var(--text)]">
                 <strong className="font-bold block">
-                  Sessão OAuth do Google Drive pendente nesta aba ({pendingDeleteLabels.length} exclusão(ões) aguardando envio)
+                  {pendingDeleteLabels.length} exclusão(ões) aguardando conexão com o Google Drive
                 </strong>
                 <span className="text-[var(--muted)]">
-                  Por segurança do navegador, a permissão temporária do Google Drive precisa ser confirmada quando uma nova aba é aberta ou após expirar (~1h). Enquanto não reconectar, exclusões ficam na fila local e o Drive remoto ainda mantém os arquivos antigos.
+                  Você está no modo local/offline. Assim que fizer login no Modo 100% Google Apps Script, os itens abaixo serão enviados automaticamente para a lixeira do Google Drive.
                 </span>
-                {pendingDeleteLabels.length > 0 && (
-                  <div className="mt-1.5 flex flex-wrap gap-1">
-                    {pendingDeleteLabels.slice(0, 6).map((label, idx) => (
-                      <span
-                        key={`${label}_${idx}`}
-                        className="px-1.5 py-0.5 rounded border border-[var(--warning)]/35 bg-[var(--panel)] text-[10.5px] font-semibold text-[var(--text)]"
-                      >
-                        {label}
-                      </span>
-                    ))}
-                    {pendingDeleteLabels.length > 6 && (
-                      <span className="text-[10.5px] text-[var(--muted)] font-semibold self-center">
-                        +{pendingDeleteLabels.length - 6} outro(s)
-                      </span>
-                    )}
-                  </div>
-                )}
+                <div className="mt-1.5 flex flex-wrap gap-1">
+                  {pendingDeleteLabels.slice(0, 6).map((label, idx) => (
+                    <span
+                      key={`${label}_${idx}`}
+                      className="px-1.5 py-0.5 rounded border border-[var(--warning)]/35 bg-[var(--panel)] text-[10.5px] font-semibold text-[var(--text)]"
+                    >
+                      {label}
+                    </span>
+                  ))}
+                  {pendingDeleteLabels.length > 6 && (
+                    <span className="text-[10.5px] text-[var(--muted)] font-semibold self-center">
+                      +{pendingDeleteLabels.length - 6} outro(s)
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
             <button
@@ -383,7 +378,7 @@ export const SyncActivityLogPanel: React.FC = () => {
               className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap shrink-0 cursor-pointer"
             >
               <RefreshCcw className="w-3.5 h-3.5 shrink-0" />
-              <span>Reconectar Conta Google</span>
+              <span>Conectar à Nuvem</span>
             </button>
           </div>
         )}

@@ -145,6 +145,16 @@ const cachedSubFolderIds: Record<string, string> = {};
 const inflightSubFolderPromises = new Map<string, Promise<string>>();
 
 function notifyDriveTokenListeners(): void {
+  if (isGasSessionActive()) {
+    driveTokenListeners.forEach((listener) => {
+      try {
+        listener(true, 'gas-session-active');
+      } catch {
+        // ignore listener error
+      }
+    });
+    return;
+  }
   const valid = Boolean(cachedAccessToken && (!cachedAccessTokenExpiresAt || Date.now() < cachedAccessTokenExpiresAt - 15_000));
   const token = valid ? cachedAccessToken : null;
   driveTokenListeners.forEach((listener) => {
@@ -402,7 +412,9 @@ export function clearAccessTokenOnly(): void {
   } catch {
     // ignore storage errors
   }
-  notifyDriveTokenListeners();
+  if (!isGasSessionActive()) {
+    notifyDriveTokenListeners();
+  }
 }
 
 export function isDriveAccessTokenExpiringSoon(bufferMs = 5 * 60 * 1000): boolean {
@@ -767,8 +779,11 @@ async function authorizedDriveFetch(
   options?: { withRetry?: boolean; retries?: number },
 ): Promise<{ res: Response; usedToken: string }> {
   let tokenToUse = explicitToken || (await getAccessToken()) || '';
+  if (isGasSessionActive() || tokenToUse === 'gas-session-active') {
+    throw new Error('Operação OAuth direta ignorada no Modo 100% Google Apps Script.');
+  }
   if (!tokenToUse) {
-    throw new Error('TOKEN_EXPIRED: Sua sessão do Google Drive expirou. Reconecte sua conta Google.');
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta no Modo Google Apps Script.');
   }
 
   const exec = (t: string) =>
@@ -954,6 +969,16 @@ interface DriveFolderGraphResult {
 const inflightFolderGraphByToken = new Map<string, Promise<DriveFolderGraphResult>>();
 
 async function fetchDriveFolderGraph(token: string): Promise<DriveFolderGraphResult> {
+  if (isGasSessionActive() || token === 'gas-session-active') {
+    return {
+      foldersById: new Map(),
+      fullPathById: new Map(),
+      ancestorIdsByFolderId: new Map(),
+      studyRootIds: new Set(),
+      studyDescendantIds: new Set(),
+      canonicalCategoryByFolderId: new Map(),
+    };
+  }
   const inflight = inflightFolderGraphByToken.get(token);
   if (inflight) return inflight;
 
@@ -1132,12 +1157,21 @@ export async function getDriveFolderMetadata(
   folderIdOrUrl: string,
   token?: string,
 ): Promise<{ id: string; name: string; webViewLink?: string } | null> {
+  const extractedId = extractDriveFolderId(folderIdOrUrl);
+  if (isGasSessionActive()) {
+    const session = getGasSession();
+    const id = extractedId || session?.folderId || 'gas_root';
+    return {
+      id,
+      name: session?.folderName || DRIVE_FOLDER_NAME,
+      webViewLink: session?.folderUrl || (extractedId ? `https://drive.google.com/drive/folders/${extractedId}` : undefined),
+    };
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
-    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google primeiro.');
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta primeiro.');
   }
 
-  const extractedId = extractDriveFolderId(folderIdOrUrl);
   if (!extractedId) return null;
 
   const { res } = await authorizedDriveFetch(
@@ -1178,13 +1212,16 @@ export async function getDriveFolderMetadata(
 }
 
 /**
- * Verifies whether the OAuth token currently has drive.file write permission inside `folderId`.
- * Creates and immediately removes a 0-byte probe file to test actual API write permission.
+ * Verifies whether write permission is available inside `folderId`.
+ * In Google Apps Script mode, the script always runs as the Drive owner with full write access.
  */
 export async function verifyDriveFolderWritable(folderId: string, token?: string): Promise<boolean> {
+  if (isGasSessionActive()) {
+    return true;
+  }
   const activeToken = token || (await getAccessToken());
   if (!activeToken) {
-    throw new Error('TOKEN_EXPIRED: Conecte sua conta Google primeiro.');
+    throw new Error('TOKEN_EXPIRED: Conecte sua conta primeiro.');
   }
 
   const { res, usedToken } = await authorizedDriveFetch(
@@ -1815,6 +1852,7 @@ export async function stampDriveFileSyncTag(
   token?: string,
   moduleTag?: string,
 ): Promise<DriveFileInfo | null> {
+  if (isGasSessionActive()) return null;
   const activeToken = token || (await getAccessToken());
   if (!activeToken || !fileId) return null;
 

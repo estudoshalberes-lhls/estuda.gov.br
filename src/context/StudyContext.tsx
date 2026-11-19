@@ -3431,8 +3431,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const quizTimerBaselineRef = useRef<number>(0);
   const finishQuizSessionRef = useRef<() => void>(() => {});
 
-  const [driveConnected, setDriveConnected] = useState<boolean>(false);
-  const [driveTokenReady, setDriveTokenReady] = useState<boolean>(false);
+  const [driveConnected, setDriveConnected] = useState<boolean>(() => Boolean(initialGasSession));
+  const [driveTokenReady, setDriveTokenReady] = useState<boolean>(() => Boolean(initialGasSession));
   const [isRenewingDriveToken, setIsRenewingDriveToken] = useState<boolean>(false);
   const [activeDriveFolderId, setActiveDriveFolderId] = useState<string | null>(
     () => db.preferences?.default_drive_folder?.id || getPreferredStudyFolder().id,
@@ -5164,10 +5164,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ? 'Sessão OAuth do Google Drive sem permissão ou expirada. Clique em "Reconectar conta Google" para restaurar backups e exclusões na nuvem.'
               : msg || 'Erro desconhecido ao acessar pasta do Google Drive.',
           });
-          if (isTokenErr) {
+          if (isTokenErr && !isGasSessionActive()) {
             setDriveTokenReady(false);
             toast(
-              'Sessão OAuth do Google Drive sem permissão ou expirada. Clique em "Reconectar" para autorizar o Google Drive.',
+              'Sessão do Google Apps Script encerrada. Faça login novamente com Usuário e Senha para sincronizar.',
               true,
             );
           } else if (isPickerErr) {
@@ -5782,7 +5782,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Keep React driveTokenReady synchronized whenever Drive/Apps Script session changes
   useEffect(() => {
     return subscribeDriveTokenChanges((hasToken) => {
-      setDriveTokenReady(hasToken);
+      setDriveTokenReady(isGasSessionActive() ? true : hasToken);
     });
   }, []);
 
@@ -7702,18 +7702,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       const token = await getAccessToken();
       if (!token) {
-        setDriveTokenReady(false);
-        await queueForRetry('Sessão OAuth expirada');
+        if (!isGasSessionActive()) {
+          setDriveTokenReady(false);
+        }
+        await queueForRetry('Sessão em nuvem desconectada');
         recordSyncActivity({
           category: 'drive-upload',
           operation: 'Envio automático enfileirado (Outbox)',
           status: 'warning',
-          errorCode: 'oauth/drive-token-expired',
-          message: `Sessão OAuth do Google Drive indisponível para enviar "${filename}". O arquivo foi salvo na Fila Persistente (Outbox) e será enviado ao reconectar.`,
+          message: `Sem sessão ativa para enviar "${filename}". O arquivo foi salvo na Fila Persistente (Outbox) e será enviado ao conectar.`,
           affectedFiles: [{ name: filename, action: 'failed', detail: 'Salvo na fila Outbox' }],
         });
         notifyThrottle(
-          'Sua permissão temporária do Google Drive expirou. O arquivo foi guardado na fila segura e será enviado assim que reconectar.',
+          'Você está desconectado da nuvem. O arquivo foi guardado na fila segura e será enviado assim que fizer login.',
         );
         return false;
       }

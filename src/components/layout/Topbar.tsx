@@ -105,13 +105,11 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     commitTimerToSchedule,
     googleUser,
     driveConnected,
-    driveTokenReady,
     isRenewingDriveToken,
     isSyncingDrive,
     hasPendingCloudChanges,
     drivePermissionNeedsPicker,
     restoreProgress,
-    connectGoogleDrive,
     disconnectGoogleDrive,
     authorizeDriveFolderViaPicker,
     gasConnected,
@@ -578,25 +576,13 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
           </button>
         ) : driveConnected && isRenewingDriveToken ? (
           <span
-            aria-label="Renovando sessão do Google Drive"
-            title="Renovando automaticamente a permissão do Google Drive em segundo plano…"
+            aria-label="Sincronizando sessão do Google Drive"
+            title="Validando conexão com o Google Drive em segundo plano…"
             className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold shrink-0 whitespace-nowrap"
           >
             <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
-            <span className="hidden sm:inline">Renovando…</span>
+            <span className="hidden sm:inline">Sincronizando…</span>
           </span>
-        ) : driveConnected && !driveTokenReady ? (
-          <button
-            type="button"
-            onClick={() => void connectGoogleDrive()}
-            disabled={isSyncingDrive}
-            aria-label="Renovar acesso ao Google Drive"
-            title="Sua conta continua conectada salvando na nuvem. O acesso aos arquivos do Google Drive expira após ~1h por política do Google — clique para renovar."
-            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
-          >
-            <CloudOff className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Renovar Drive</span>
-          </button>
         ) : hasPendingCloudChanges ? (
           <button
             type="button"
