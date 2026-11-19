@@ -13,6 +13,7 @@ import {
   Zap,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
+import { useStudyTimer } from '../../lib/timerTickStore';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { WEEKDAYS, formatClock, formatScheduleDuration, visibleName } from '../../lib/parsers';
 import { ModuleName, WeekdayName } from '../../types/study';
@@ -32,6 +33,23 @@ const DEFAULT_QUICK_MODULES: [ModuleName, ModuleName, ModuleName] = [
   'Matriz de Incidência',
 ];
 
+const WALL_TIME_FMT = new Intl.DateTimeFormat('pt-BR', {
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+  hour12: false,
+});
+const WALL_DATE_FMT = new Intl.DateTimeFormat('pt-BR', {
+  day: '2-digit',
+  month: '2-digit',
+});
+const WALL_FULL_DATE_FMT = new Intl.DateTimeFormat('pt-BR', {
+  weekday: 'long',
+  day: '2-digit',
+  month: 'long',
+  year: 'numeric',
+});
+
 const TopbarWallClock: React.FC = React.memo(() => {
   const [wallSecond, setWallSecond] = useState<number>(() => Math.floor(Date.now() / 1000));
 
@@ -46,22 +64,9 @@ const TopbarWallClock: React.FC = React.memo(() => {
   const { clockText, dateText, fullDateTitle } = useMemo(() => {
     const now = new Date(wallSecond * 1000);
     return {
-      clockText: new Intl.DateTimeFormat('pt-BR', {
-        hour: '2-digit',
-        minute: '2-digit',
-        second: '2-digit',
-        hour12: false,
-      }).format(now),
-      dateText: new Intl.DateTimeFormat('pt-BR', {
-        day: '2-digit',
-        month: '2-digit',
-      }).format(now),
-      fullDateTitle: new Intl.DateTimeFormat('pt-BR', {
-        weekday: 'long',
-        day: '2-digit',
-        month: 'long',
-        year: 'numeric',
-      }).format(now),
+      clockText: WALL_TIME_FMT.format(now),
+      dateText: WALL_DATE_FMT.format(now),
+      fullDateTitle: WALL_FULL_DATE_FMT.format(now),
     };
   }, [wallSecond]);
 
@@ -80,24 +85,71 @@ const TopbarWallClock: React.FC = React.memo(() => {
   );
 });
 
-export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
+const TopbarTimerReadout: React.FC = React.memo(() => {
+  const { timerSeconds, timerRunning, pomodoroMode, pomodoroPhase, pomodoroRemainingSeconds } =
+    useStudyTimer();
+
+  return (
+    <div
+      className={`flex flex-col justify-center leading-none h-8 px-2.5 rounded-lg transition-colors shrink-0 ${
+        timerRunning
+          ? 'border border-[var(--accent)] bg-[var(--accent)] shadow-xs'
+          : 'border border-transparent'
+      }`}
+    >
+      <span
+        className={`text-[8px] font-extrabold tracking-[0.14em] uppercase whitespace-nowrap leading-none mb-1 transition-colors ${
+          timerRunning ? 'text-white' : 'text-[var(--muted)]'
+        }`}
+      >
+        {pomodoroMode === 'continuous'
+          ? 'CRONÔMETRO'
+          : pomodoroPhase === 'focus'
+          ? `POMO ${pomodoroMode}`
+          : `PAUSA`}
+      </span>
+      <strong
+        className={`font-mono-num text-[13px] font-extrabold tabular-nums leading-none transition-colors ${
+          timerRunning ? 'text-white' : 'text-[var(--text)]'
+        }`}
+      >
+        {pomodoroMode === 'continuous'
+          ? formatClock(timerSeconds)
+          : formatClock(pomodoroRemainingSeconds)}
+      </strong>
+    </div>
+  );
+});
+
+const TopbarSaveTimerButton: React.FC<{ onClick: () => void }> = React.memo(({ onClick }) => {
+  const { timerSeconds } = useStudyTimer();
+  if (timerSeconds <= 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title="Contabilizar tempo"
+      className="grid place-items-center w-7 h-7 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[10.5px] font-bold shrink-0"
+    >
+      <Check className="w-3.5 h-3.5 shrink-0" />
+    </button>
+  );
+});
+
+export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
   const {
     db,
-    disciplines,
-    fixedSubjects,
     activePage,
     setActivePage,
     setMobileOpen,
     focusQuote,
     changeFocusQuote,
     updatePreferences,
-    timerSeconds,
+    getCurrentTimerSeconds,
     timerRunning,
     toggleTimer,
     resetTimer,
     pomodoroMode,
-    pomodoroPhase,
-    pomodoroRemainingSeconds,
     setPomodoroMode,
     activeTimerTopic,
     linkTimerToScheduleTopic,
@@ -108,7 +160,6 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
     isSyncingDrive,
     hasPendingCloudChanges,
     drivePermissionNeedsPicker,
-    restoreProgress,
     authorizeDriveFolderViaPicker,
     toast,
   } = useStudy();
@@ -370,34 +421,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
       >
         <TopbarWallClock />
 
-        <div
-          className={`flex flex-col justify-center leading-none h-8 px-2.5 rounded-lg transition-colors shrink-0 ${
-            timerRunning
-              ? 'border border-[var(--accent)] bg-[var(--accent)] shadow-xs'
-              : 'border border-transparent'
-          }`}
-        >
-          <span
-            className={`text-[8px] font-extrabold tracking-[0.14em] uppercase whitespace-nowrap leading-none mb-1 transition-colors ${
-              timerRunning ? 'text-white' : 'text-[var(--muted)]'
-            }`}
-          >
-            {pomodoroMode === 'continuous'
-              ? 'CRONÔMETRO'
-              : pomodoroPhase === 'focus'
-              ? `POMO ${pomodoroMode}`
-              : `PAUSA`}
-          </span>
-          <strong
-            className={`font-mono-num text-[13px] font-extrabold tabular-nums leading-none transition-colors ${
-              timerRunning ? 'text-white' : 'text-[var(--text)]'
-            }`}
-          >
-            {pomodoroMode === 'continuous'
-              ? formatClock(timerSeconds)
-              : formatClock(pomodoroRemainingSeconds)}
-          </strong>
-        </div>
+        <TopbarTimerReadout />
 
         <div className="flex items-center gap-1 sm:gap-1.5 pl-2 sm:pl-2.5 border-l border-[var(--line)] h-7 shrink-0">
           <button
@@ -445,16 +469,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
             {timerRunning ? 'Pausar' : 'Iniciar'}
           </button>
 
-          {timerSeconds > 0 && (
-            <button
-              type="button"
-              onClick={handleSaveTimerClick}
-              title="Contabilizar tempo"
-              className="grid place-items-center w-7 h-7 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[10.5px] font-bold shrink-0"
-            >
-              <Check className="w-3.5 h-3.5 shrink-0" />
-            </button>
-          )}
+          <TopbarSaveTimerButton onClick={handleSaveTimerClick} />
 
           <button
             type="button"
@@ -534,7 +549,7 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
                       <button
                         type="button"
                         onClick={() => {
-                          linkTimerToScheduleTopic(pickerDay, topic, timerSeconds === 0);
+                          linkTimerToScheduleTopic(pickerDay, topic, getCurrentTimerSeconds() === 0);
                           setLinkMenuOpen(false);
                         }}
                         className="inline-flex items-center justify-center h-6 px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[10px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
@@ -611,5 +626,5 @@ export const Topbar: React.FC<TopbarProps> = ({ onExitToLogin }) => {
       </div>
     </header>
   );
-};
+});
 

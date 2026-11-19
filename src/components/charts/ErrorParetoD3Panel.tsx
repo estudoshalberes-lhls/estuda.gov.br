@@ -47,7 +47,7 @@ interface ErrorParetoD3PanelProps {
   defaultExpanded?: boolean;
 }
 
-export const ErrorParetoD3Panel: React.FC<ErrorParetoD3PanelProps> = ({
+export const ErrorParetoD3Panel: React.FC<ErrorParetoD3PanelProps> = React.memo(({
   title,
   subtitle,
   items,
@@ -613,4 +613,4 @@ export const ErrorParetoD3Panel: React.FC<ErrorParetoD3PanelProps> = ({
       )}
     </Panel>
   );
-};
+});

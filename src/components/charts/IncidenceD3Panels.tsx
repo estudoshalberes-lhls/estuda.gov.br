@@ -56,7 +56,7 @@ function compactArticleLabel(raw: string): string {
   return `${trimmed.slice(0, 6)}…`;
 }
 
-export const IncidenceD3Panels: React.FC<IncidenceD3PanelsProps> = ({
+export const IncidenceD3Panels: React.FC<IncidenceD3PanelsProps> = React.memo(({
   laws,
   readLawItems,
   activeFolder,
@@ -638,4 +638,4 @@ export const IncidenceD3Panels: React.FC<IncidenceD3PanelsProps> = ({
       )}
     </Panel>
   );
-};
+});

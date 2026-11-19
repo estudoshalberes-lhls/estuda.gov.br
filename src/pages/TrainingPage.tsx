@@ -13,7 +13,7 @@ export const TrainingPage: React.FC = () => {
     allQuestions,
     quiz,
     setQuiz,
-    timerSeconds,
+    getCurrentTimerSeconds,
     ensureTimerRunning,
     updateQuestion,
     deleteQuestion,
@@ -107,7 +107,7 @@ export const TrainingPage: React.FC = () => {
       index: 0,
       answers: Array(chosen.length),
       studySeconds: 0,
-      timerBaseline: timerSeconds,
+      timerBaseline: getCurrentTimerSeconds(),
     });
   };
 

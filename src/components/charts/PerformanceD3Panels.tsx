@@ -48,7 +48,7 @@ interface PerformanceEvolutionD3ChartProps {
   fixedSubjects: string[];
 }
 
-export const PerformanceEvolutionD3Chart: React.FC<PerformanceEvolutionD3ChartProps> = ({
+export const PerformanceEvolutionD3Chart: React.FC<PerformanceEvolutionD3ChartProps> = React.memo(({
   db,
   subjectFilter = 'Todas',
   fixedSubjects,
@@ -619,7 +619,7 @@ export const PerformanceEvolutionD3Chart: React.FC<PerformanceEvolutionD3ChartPr
       </div>
     </Panel>
   );
-};
+});
 
 // ============================================================================
 // 2. D3 Calendar Heatmap: Constância Diária (Questões + Tempo + Lei Seca)
@@ -645,7 +645,7 @@ interface ConsistencyCalendarHeatmapProps {
 const HEATMAP_WEEKDAYS = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
 const MONTH_LABELS_PT = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
 
-export const ConsistencyCalendarHeatmap: React.FC<ConsistencyCalendarHeatmapProps> = ({ db }) => {
+export const ConsistencyCalendarHeatmap: React.FC<ConsistencyCalendarHeatmapProps> = React.memo(({ db }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const width = useContainerWidth(containerRef, 560);
   const [hoveredCell, setHoveredCell] = useState<CalendarDayCell | null>(null);
@@ -920,7 +920,7 @@ export const ConsistencyCalendarHeatmap: React.FC<ConsistencyCalendarHeatmapProp
       </div>
     </Panel>
   );
-};
+});
 
 // ============================================================================
 // 3. D3 Scatter / Bubble Plot: Quadrante de Prioridade (Volume × Acerto %)
@@ -943,7 +943,7 @@ interface PriorityQuadrantD3ChartProps {
   onSelectSubject: (subject: string) => void;
 }
 
-export const PriorityQuadrantD3Chart: React.FC<PriorityQuadrantD3ChartProps> = ({
+export const PriorityQuadrantD3Chart: React.FC<PriorityQuadrantD3ChartProps> = React.memo(({
   rows,
   selectedSubject,
   onSelectSubject,
@@ -1218,7 +1218,7 @@ export const PriorityQuadrantD3Chart: React.FC<PriorityQuadrantD3ChartProps> = (
       </div>
     </Panel>
   );
-};
+});
 
 // ============================================================================
 // 4. Tabela Analítica com D3: Sparklines + Bullet Charts + Escala de Calor + Quartis
@@ -1352,7 +1352,7 @@ const InlineBulletChart: React.FC<{ pct: number | null; target?: number }> = ({
   );
 };
 
-export const AnalyticalSubjectsD3Table: React.FC<AnalyticalSubjectsD3TableProps> = ({
+export const AnalyticalSubjectsD3Table: React.FC<AnalyticalSubjectsD3TableProps> = React.memo(({
   rows,
   selectedSubject,
   onSelectSubject,
@@ -1576,4 +1576,4 @@ export const AnalyticalSubjectsD3Table: React.FC<AnalyticalSubjectsD3TableProps>
       )}
     </Panel>
   );
-};
+});

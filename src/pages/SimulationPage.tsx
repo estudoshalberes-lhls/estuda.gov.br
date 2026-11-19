@@ -13,7 +13,7 @@ export const SimulationPage: React.FC = () => {
     questionsByDiscipline,
     quiz,
     setQuiz,
-    timerSeconds,
+    getCurrentTimerSeconds,
     ensureTimerRunning,
     setActivePage,
     deleteSubmittedSimulation,
@@ -70,7 +70,7 @@ export const SimulationPage: React.FC = () => {
       index: 0,
       answers: Array(questions.length),
       studySeconds: 0,
-      timerBaseline: timerSeconds,
+      timerBaseline: getCurrentTimerSeconds(),
       startedAt: Date.now(),
       timeLimitSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : undefined,
     });
@@ -94,7 +94,7 @@ export const SimulationPage: React.FC = () => {
       index: 0,
       answers: Array(ordered.length),
       studySeconds: 0,
-      timerBaseline: timerSeconds,
+      timerBaseline: getCurrentTimerSeconds(),
       startedAt: Date.now(),
       timeLimitSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : undefined,
     });

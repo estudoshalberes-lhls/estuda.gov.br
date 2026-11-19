@@ -12,26 +12,38 @@ export function useContainerWidth(
     const el = ref.current;
     if (!el) return;
 
-    const update = () => {
-      const next = Math.floor(el.getBoundingClientRect().width);
-      if (next > 0) setWidth(next);
+    let rafId = 0;
+    const commitWidth = (raw: number) => {
+      const next = Math.floor(raw);
+      if (next <= 0) return;
+      if (rafId) window.cancelAnimationFrame(rafId);
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        setWidth((prev) => (Math.abs(prev - next) >= 2 ? next : prev));
+      });
     };
 
-    update();
+    const initial = Math.floor(el.getBoundingClientRect().width);
+    if (initial > 0) setWidth(initial);
 
     if (typeof ResizeObserver !== 'undefined') {
       const observer = new ResizeObserver((entries) => {
-        for (const entry of entries) {
-          const next = Math.floor(entry.contentRect.width);
-          if (next > 0) setWidth(next);
-        }
+        const last = entries[entries.length - 1];
+        if (last) commitWidth(last.contentRect.width);
       });
       observer.observe(el);
-      return () => observer.disconnect();
+      return () => {
+        if (rafId) window.cancelAnimationFrame(rafId);
+        observer.disconnect();
+      };
     }
 
-    window.addEventListener('resize', update);
-    return () => window.removeEventListener('resize', update);
+    const onResize = () => commitWidth(el.getBoundingClientRect().width);
+    window.addEventListener('resize', onResize);
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      window.removeEventListener('resize', onResize);
+    };
   }, [ref]);
 
   return width;

@@ -38,6 +38,65 @@ import {
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ScheduleMap, ScheduleTopic, WeekdayName, WeeklyScheduleFileRecord } from '../types/study';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
+import { useStudyTimer } from '../lib/timerTickStore';
+
+const ScheduleBannerTimerActions: React.FC<{
+  targetLabel: string;
+  onCommit: () => void;
+  onClear: () => void;
+}> = React.memo(({ targetLabel, onCommit, onClear }) => {
+  const { timerSeconds } = useStudyTimer();
+  return (
+    <div className="flex flex-wrap items-center gap-2 shrink-0">
+      <span className="font-mono-num text-[16px] font-extrabold text-[var(--text)] px-2.5 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)]">
+        {formatClock(timerSeconds)}
+      </span>
+      {timerSeconds > 0 && (
+        <button
+          type="button"
+          onClick={onCommit}
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12px] font-bold hover:opacity-90"
+        >
+          <Check className="w-3.5 h-3.5" />
+          Lançar tempo em {targetLabel}
+        </button>
+      )}
+      <button
+        type="button"
+        onClick={onClear}
+        className="px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
+      >
+        Desvincular
+      </button>
+    </div>
+  );
+});
+
+const ScheduleTopicLiveClock: React.FC = React.memo(() => {
+  const { timerSeconds } = useStudyTimer();
+  return (
+    <span className="font-bold text-[var(--accent)] font-mono-num">
+      · Cronômetro atual: {formatClock(timerSeconds)}
+    </span>
+  );
+});
+
+const ScheduleTopicCommitButton: React.FC<{ label: string; onCommit: () => void }> = React.memo(
+  ({ label, onCommit }) => {
+    const { timerSeconds } = useStudyTimer();
+    if (timerSeconds <= 0) return null;
+    return (
+      <button
+        type="button"
+        onClick={onCommit}
+        className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--good)] bg-[var(--good)] text-white text-[10.5px] font-bold hover:opacity-90"
+      >
+        <Check className="w-3 h-3" />
+        Lançar em {label}
+      </button>
+    );
+  },
+);
 
 export const SchedulePage: React.FC = () => {
   const {
@@ -60,7 +119,6 @@ export const SchedulePage: React.FC = () => {
     addFixedSubject,
     removeFixedSubject,
     activeTimerTopic,
-    timerSeconds,
     timerRunning,
     linkTimerToScheduleTopic,
     commitTimerToSchedule,
@@ -730,28 +788,11 @@ export const SchedulePage: React.FC = () => {
             </div>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2 shrink-0">
-            <span className="font-mono-num text-[16px] font-extrabold text-[var(--text)] px-2.5 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel)]">
-              {formatClock(timerSeconds)}
-            </span>
-            {timerSeconds > 0 && (
-              <button
-                type="button"
-                onClick={() => commitTimerToSchedule()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12px] font-bold hover:opacity-90"
-              >
-                <Check className="w-3.5 h-3.5" />
-                Lançar tempo em {visibleName(activeTimerTopic.disciplinaFixa || activeTimerTopic.materia)}
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={clearTimerLink}
-              className="px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
-            >
-              Desvincular
-            </button>
-          </div>
+          <ScheduleBannerTimerActions
+            targetLabel={visibleName(activeTimerTopic.disciplinaFixa || activeTimerTopic.materia)}
+            onCommit={() => commitTimerToSchedule()}
+            onClear={clearTimerLink}
+          />
         </div>
       )}
 
@@ -1179,21 +1220,13 @@ export const SchedulePage: React.FC = () => {
                                       Tempo contabilizado em {visibleName(effectiveFixedSubject || topic.materia)}: {formatScheduleDuration(studiedSec)}
                                     </span>
                                   )}
-                                  {isLinked && (
-                                    <span className="font-bold text-[var(--accent)] font-mono-num">
-                                      · Cronômetro atual: {formatClock(timerSeconds)}
-                                    </span>
-                                  )}
+                                  {isLinked && <ScheduleTopicLiveClock />}
                                 </div>
-                                {isLinked && timerSeconds > 0 && (
-                                  <button
-                                    type="button"
-                                    onClick={() => commitTimerToSchedule()}
-                                    className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--good)] bg-[var(--good)] text-white text-[10.5px] font-bold hover:opacity-90"
-                                  >
-                                    <Check className="w-3 h-3" />
-                                    Lançar em {visibleName(effectiveFixedSubject || topic.materia)}
-                                  </button>
+                                {isLinked && (
+                                  <ScheduleTopicCommitButton
+                                    label={visibleName(effectiveFixedSubject || topic.materia)}
+                                    onCommit={() => commitTimerToSchedule()}
+                                  />
                                 )}
                               </div>
                             )}

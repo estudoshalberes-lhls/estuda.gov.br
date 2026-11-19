@@ -20,6 +20,7 @@ import {
 } from 'lucide-react';
 import heroStudyDesk from '../assets/images/gov_portal_hero_1794760858327.jpg';
 import { useStudy } from '../context/StudyContext';
+import { useStudyTimer } from '../lib/timerTickStore';
 import { getGovModuleLabel } from '../data/seedData';
 import { WEEKDAYS, formatScheduleDuration, localDateIso, paymentDateValue, visibleName } from '../lib/parsers';
 import { exportStudentClearanceCertificatePdf } from '../lib/pdfExport';
@@ -36,6 +37,21 @@ const QUICK_ACCESS: ReadonlyArray<{ page: ModuleName; caption: string; icon: str
   { page: 'Utilidades', caption: 'Protocolar .txt e converter PDF', icon: 'tools' },
 ];
 
+const HomeSaveTimerButton: React.FC<{ onCommit: () => void }> = React.memo(({ onCommit }) => {
+  const { timerSeconds } = useStudyTimer();
+  if (timerSeconds <= 0) return null;
+  return (
+    <button
+      type="button"
+      onClick={onCommit}
+      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors cursor-pointer"
+    >
+      <Timer className="w-3 h-3" />
+      Salvar tempo
+    </button>
+  );
+});
+
 export const HomePage: React.FC = () => {
   const {
     db,
@@ -44,7 +60,6 @@ export const HomePage: React.FC = () => {
     openContestEdital,
     allErrorEntries,
     activeTimerTopic,
-    timerSeconds,
     linkTimerToScheduleTopic,
     commitTimerToSchedule,
     logQuickStudyMinutes,
@@ -973,15 +988,8 @@ export const HomePage: React.FC = () => {
                         <Plus className="w-3 h-3" aria-hidden="true" />
                         <span>30m</span>
                       </button>
-                      {isLinked && timerSeconds > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => commitTimerToSchedule()}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11px] font-bold hover:opacity-90 cursor-pointer"
-                        >
-                          <Check className="w-3 h-3" />
-                          Salvar tempo
-                        </button>
+                      {isLinked && (
+                        <HomeSaveTimerButton onCommit={commitTimerToSchedule} />
                       )}
                       <button
                         type="button"

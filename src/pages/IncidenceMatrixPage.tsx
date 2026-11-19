@@ -112,6 +112,7 @@ export const IncidenceMatrixPage: React.FC = () => {
     'all' | 'stale-7' | 'stale-15' | 'stale-30' | 'today'
   >('all');
   const [editalFilterContestId, setEditalFilterContestId] = useState<string>('all');
+  const [visibleGroupLimit, setVisibleGroupLimit] = useState<number>(40);
   const [drafts, setDrafts] = useState<Record<string, { grau: IncidenceGrade; observacao: string }>>({});
   const draftsRef = useRef(drafts);
   draftsRef.current = drafts;
@@ -551,15 +552,62 @@ export const IncidenceMatrixPage: React.FC = () => {
     setShowSaveFilterForm(false);
   };
 
-  const handleJumpToArticle = (articleKey: string) => {
-    if (activeFolder) {
-      setLawLastPosition(activeFolder, articleKey);
+  const groupedFilteredItems = useMemo(() => {
+    const groups: Array<{ key: string; title: string; items: typeof filteredItems }> = [];
+    const byKey = new Map<string, (typeof groups)[number]>();
+    for (const item of filteredItems) {
+      const groupKey = item.artigo_base || item.dispositivo || 'Outros';
+      const existing = byKey.get(groupKey);
+      if (existing) {
+        existing.items.push(item);
+      } else {
+        const created = { key: groupKey, title: groupKey, items: [item] };
+        byKey.set(groupKey, created);
+        groups.push(created);
+      }
     }
-    const anchorId = buildArticleAnchorId('matrix-art', articleKey);
-    const el = document.getElementById(anchorId);
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    } else {
+    return groups;
+  }, [filteredItems]);
+
+  useEffect(() => {
+    setVisibleGroupLimit(40);
+  }, [
+    activeFolder,
+    gradeFilter,
+    editalFilterContestId,
+    readStatusFilter,
+    search,
+    multiArticleQuery,
+    selectedArticleKeys,
+  ]);
+
+  const visibleGroupedItems = useMemo(
+    () => groupedFilteredItems.slice(0, visibleGroupLimit),
+    [groupedFilteredItems, visibleGroupLimit],
+  );
+
+  const todayIsoRender = localDateIso();
+  const todayMsRender = new Date(`${todayIsoRender}T00:00:00`).getTime();
+
+  const handleJumpToArticle = useCallback(
+    (articleKey: string) => {
+      if (activeFolder) {
+        setLawLastPosition(activeFolder, articleKey);
+      }
+      const anchorId = buildArticleAnchorId('matrix-art', articleKey);
+      const el = document.getElementById(anchorId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      const targetIdx = groupedFilteredItems.findIndex((g) => g.key === articleKey);
+      if (targetIdx >= 0) {
+        setVisibleGroupLimit((prev) => Math.max(prev, targetIdx + 15));
+        window.setTimeout(() => {
+          document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        }, 60);
+        return;
+      }
       // Article is currently hidden by active filters — reset blocking filters and focus this article
       setGradeFilter('Todas');
       setReadStatusFilter('all');
@@ -570,36 +618,26 @@ export const IncidenceMatrixPage: React.FC = () => {
       window.setTimeout(() => {
         document.getElementById(anchorId)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
       }, 60);
-    }
-  };
+    },
+    [activeFolder, groupedFilteredItems, setLawLastPosition],
+  );
 
-  const handleSelectLawAndGradeFromD3 = (folder: string, grade: 'Todas' | IncidenceGrade) => {
-    if (folder && folder !== activeFolder && db.laws[folder]) {
-      skipResetOnFolderSwitchRef.current = true;
-      setSelectedFolder(folder);
-      setSelectedArticleKeys([]);
-      setMultiArticleQuery('');
-      setReadStatusFilter('all');
-      setEditalFilterContestId('all');
-      setSearch('');
-    }
-    setGradeFilter(grade);
-    setActiveSavedFilterId(null);
-  };
-
-  const groupedFilteredItems = useMemo(() => {
-    const groups: Array<{ key: string; title: string; items: typeof filteredItems }> = [];
-    filteredItems.forEach((item) => {
-      const groupKey = item.artigo_base || item.dispositivo || 'Outros';
-      const existing = groups.find((g) => g.key === groupKey);
-      if (existing) {
-        existing.items.push(item);
-      } else {
-        groups.push({ key: groupKey, title: groupKey, items: [item] });
+  const handleSelectLawAndGradeFromD3 = useCallback(
+    (folder: string, grade: 'Todas' | IncidenceGrade) => {
+      if (folder && folder !== activeFolder && db.laws[folder]) {
+        skipResetOnFolderSwitchRef.current = true;
+        setSelectedFolder(folder);
+        setSelectedArticleKeys([]);
+        setMultiArticleQuery('');
+        setReadStatusFilter('all');
+        setEditalFilterContestId('all');
+        setSearch('');
       }
-    });
-    return groups;
-  }, [filteredItems]);
+      setGradeFilter(grade);
+      setActiveSavedFilterId(null);
+    },
+    [activeFolder, db.laws],
+  );
 
   const handleExportPdf = (onlyFiltered = false) => {
     if (!activeFolder || !folderData) return;
@@ -1115,8 +1153,8 @@ export const IncidenceMatrixPage: React.FC = () => {
               readingPrefs.comfortableWidth ? 'max-w-[82ch] mx-auto' : ''
             }`}
           >
-            {groupedFilteredItems.length ? (
-              groupedFilteredItems.map((group) => {
+            {visibleGroupedItems.length ? (
+              visibleGroupedItems.map((group) => {
                 const groupDates = group.items
                   .flatMap((it) => it.leituras || [])
                   .sort((a, b) => b.data.localeCompare(a.data));
@@ -1124,7 +1162,7 @@ export const IncidenceMatrixPage: React.FC = () => {
                 const anchorId = buildArticleAnchorId('matrix-art', group.key);
 
                 return (
-                  <div key={group.key} id={anchorId} className="scroll-mt-20">
+                  <div key={group.key} id={anchorId} className="scroll-mt-20 ce-cv-card">
                     <Panel
                       title={group.title}
                       action={
@@ -1350,10 +1388,9 @@ export const IncidenceMatrixPage: React.FC = () => {
                             b.data.localeCompare(a.data),
                           );
                           const latestItemDate = itemDates[0]?.data;
-                          const todayIso = localDateIso();
                           const itemDiffDays = latestItemDate
                             ? Math.round(
-                                (new Date(`${todayIso}T00:00:00`).getTime() -
+                                (todayMsRender -
                                   new Date(`${latestItemDate}T00:00:00`).getTime()) /
                                   86400000,
                               )
@@ -1716,6 +1753,32 @@ export const IncidenceMatrixPage: React.FC = () => {
               })
             ) : (
               <EmptyState message="Nenhum dispositivo corresponde aos filtros aplicados." />
+            )}
+
+            {groupedFilteredItems.length > visibleGroupLimit && (
+              <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-3 text-[12px]">
+                <span className="text-[var(--muted)]">
+                  Exibindo <strong className="text-[var(--text)]">{visibleGroupedItems.length}</strong> de{' '}
+                  <strong className="text-[var(--text)]">{groupedFilteredItems.length}</strong> artigos
+                  desta lei para manter a rolagem fluida.
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setVisibleGroupLimit((prev) => prev + 40)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)]"
+                  >
+                    Carregar +40 artigos
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setVisibleGroupLimit(groupedFilteredItems.length)}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
+                  >
+                    Mostrar todos ({groupedFilteredItems.length})
+                  </button>
+                </div>
+              </div>
             )}
           </div>
         </>

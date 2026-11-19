@@ -95,10 +95,9 @@ export interface IncrementalBackupEnvelope {
 }
 
 /**
- * Deterministic fast hash of StudyDatabase content (used to avoid redundant Drive writes).
+ * Deterministic fast hash of an already-serialized JSON string (avoids double JSON.stringify).
  */
-export function computeDatabaseContentHash(db: StudyDatabase): string {
-  const str = JSON.stringify(db);
+export function computeSerializedContentHash(str: string): string {
   let h1 = 0x811c9dc5;
   let h2 = 0x811c9dc5;
   for (let i = 0; i < str.length; i++) {
@@ -109,6 +108,13 @@ export function computeDatabaseContentHash(db: StudyDatabase): string {
     h2 = Math.imul(h2, 0x01000193);
   }
   return `${(h1 >>> 0).toString(16).padStart(8, '0')}${(h2 >>> 0).toString(16).padStart(8, '0')}`;
+}
+
+/**
+ * Deterministic fast hash of StudyDatabase content (used to avoid redundant Drive writes).
+ */
+export function computeDatabaseContentHash(db: StudyDatabase): string {
+  return computeSerializedContentHash(JSON.stringify(db));
 }
 
 function stableJson(val: unknown): string {

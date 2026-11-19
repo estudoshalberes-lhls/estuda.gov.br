@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { useStudy } from '../../context/StudyContext';
+import { useStudyTimer } from '../../lib/timerTickStore';
 import { formatClock } from '../../lib/parsers';
 import { ModuleName } from '../../types/study';
 import { ModuleIcon } from '../ui/ModuleIcon';
@@ -46,13 +47,21 @@ interface SidebarProps {
   onExitToLogin?: () => void;
 }
 
-export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
+const SidebarTimerClock: React.FC = React.memo(() => {
+  const { timerSeconds } = useStudyTimer();
+  return (
+    <strong className="block font-mono-num text-[21px] font-bold tracking-[0.02em] text-[var(--text)]">
+      {formatClock(timerSeconds)}
+    </strong>
+  );
+});
+
+export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) => {
   const {
     db,
     activePage,
     setActivePage,
     setMobileOpen,
-    timerSeconds,
     timerRunning,
     toggleTimer,
     resetTimer,
@@ -112,9 +121,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
             </span>
           )}
         </div>
-        <strong className="block font-mono-num text-[21px] font-bold tracking-[0.02em] text-[var(--text)]">
-          {formatClock(timerSeconds)}
-        </strong>
+        <SidebarTimerClock />
         <div className="grid grid-cols-[1fr_auto] gap-1.5 mt-2">
           <button
             type="button"
@@ -287,4 +294,4 @@ export const Sidebar: React.FC<SidebarProps> = ({ onExitToLogin }) => {
       </div>
     </aside>
   );
-};
+});

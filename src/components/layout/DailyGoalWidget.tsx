@@ -35,7 +35,7 @@ export const DailyGoalWidget: React.FC = () => {
     completeScheduleTopic,
     linkTimerToScheduleTopic,
     activeTimerTopic,
-    timerSeconds,
+    getCurrentTimerSeconds,
     setActivePage,
   } = useStudy();
 
@@ -241,7 +241,7 @@ export const DailyGoalWidget: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                linkTimerToScheduleTopic(todayWeekday, currentGoal, timerSeconds === 0);
+                linkTimerToScheduleTopic(todayWeekday, currentGoal, getCurrentTimerSeconds() === 0);
                 setOpen(false);
               }}
               className={`inline-flex items-center justify-center gap-1.5 h-8 px-2.5 rounded-lg border text-[11.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${

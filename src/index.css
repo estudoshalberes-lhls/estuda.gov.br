@@ -655,3 +655,9 @@ html[data-theme="reading-comfort"] .brand-mark {
 details summary::-webkit-details-marker {
   display: none;
 }
+
+/* Performance: Skip off-screen layout/paint for long virtualizable card lists */
+.ce-cv-card {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
+}

@@ -87,6 +87,7 @@ export const ErrorNotebookPage: React.FC = () => {
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
   const [filterStatus, setFilterStatus] = useState<'pending' | 'corrected' | 'all'>('pending');
   const [search, setSearch] = useState('');
+  const [visibleEntryLimit, setVisibleEntryLimit] = useState<number>(35);
   const [flashcardMode, setFlashcardMode] = useState(false);
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardRevealed, setFlashcardRevealed] = useState(false);
@@ -124,6 +125,10 @@ export const ErrorNotebookPage: React.FC = () => {
   const correctedCount = useMemo(() => {
     return allErrorEntries.filter((e) => Boolean(e.corrigido)).length;
   }, [allErrorEntries]);
+
+  useEffect(() => {
+    setVisibleEntryLimit(35);
+  }, [filterSubject, filterMode, filterStatus, search]);
 
   // Same registered subjects used in Cronômetro / Cronograma / Utilidades
   const registeredSubjects = useMemo(() => {
@@ -1133,7 +1138,7 @@ export const ErrorNotebookPage: React.FC = () => {
 
       <div className="flex flex-col gap-3">
         {filteredEntries.length ? (
-          filteredEntries.map((entry) => {
+          filteredEntries.slice(0, visibleEntryLimit).map((entry) => {
             const isEditing = editingEntry?.id === entry.id;
             const isCorrected = Boolean(entry.corrigido);
             const selectedSubjectVal =
@@ -1146,7 +1151,7 @@ export const ErrorNotebookPage: React.FC = () => {
                 ) || editingEntry.materia
               : '';
             return (
-              <Panel key={entry.id}>
+              <Panel key={entry.id} className="ce-cv-card">
                 <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
                   <div className="flex flex-wrap items-center gap-2">
                     {/* Status badge: Pendente de Correção vs Já Corrigido */}
@@ -1462,6 +1467,31 @@ export const ErrorNotebookPage: React.FC = () => {
           })
         ) : (
           <EmptyState message="Nenhum registro encontrado para os filtros aplicados." />
+        )}
+
+        {filteredEntries.length > visibleEntryLimit && (
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-3 text-[12px]">
+            <span className="text-[var(--muted)]">
+              Exibindo <strong className="text-[var(--text)]">{Math.min(visibleEntryLimit, filteredEntries.length)}</strong> de{' '}
+              <strong className="text-[var(--text)]">{filteredEntries.length}</strong> registros para manter a navegação fluida.
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setVisibleEntryLimit((prev) => prev + 40)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)]"
+              >
+                Carregar +40 registros
+              </button>
+              <button
+                type="button"
+                onClick={() => setVisibleEntryLimit(filteredEntries.length)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
+              >
+                Mostrar todos ({filteredEntries.length})
+              </button>
+            </div>
+          </div>
         )}
       </div>
     </div>

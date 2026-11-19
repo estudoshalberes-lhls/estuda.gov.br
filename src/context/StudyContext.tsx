@@ -135,6 +135,7 @@ import {
   buildIncrementalDatabaseBackup,
   clearDeletedTombstones,
   computeDatabaseContentHash,
+  computeSerializedContentHash,
   detectDeletedEntitiesBetweenDatabases,
   isContestOrScheduleTombstoned,
   isDriveFileTombstoned,
@@ -226,6 +227,7 @@ import {
   loadSyncActivityLogs,
   subscribeSyncActivityLogs,
 } from '../lib/syncActivityLog';
+import { publishTimerTickSnapshot } from '../lib/timerTickStore';
 import {
   ActiveTimerLink,
   AppPreferences,
@@ -422,6 +424,38 @@ function getDbBackupStorageKey(scope: string): string {
   return `central-estudos-db-backup-${scope}`;
 }
 
+const pendingBackupWriteTimers = new Map<string, number>();
+
+function scheduleSecondaryBackupWrite(scope: string, serialized: string): void {
+  const backupKey = getDbBackupStorageKey(scope);
+  const existing = pendingBackupWriteTimers.get(scope);
+  if (existing !== undefined) {
+    window.clearTimeout(existing);
+  }
+  const timerId = window.setTimeout(() => {
+    pendingBackupWriteTimers.delete(scope);
+    const run = () => {
+      try {
+        localStorage.setItem(backupKey, serialized);
+      } catch {
+        try {
+          localStorage.removeItem(backupKey);
+        } catch {
+          // ignore
+        }
+      }
+    };
+    const ric = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+      .requestIdleCallback;
+    if (typeof ric === 'function') {
+      ric(run, { timeout: 2000 });
+    } else {
+      run();
+    }
+  }, 1500);
+  pendingBackupWriteTimers.set(scope, timerId);
+}
+
 function persistLocalDatabaseForScope(
   scope: string,
   serialized: string,
@@ -434,17 +468,10 @@ function persistLocalDatabaseForScope(
   try {
     localStorage.setItem(primaryKey, serialized);
     lsSaved = true;
-    // Keep a secondary redundant recovery copy in localStorage when payload fits comfortably (<1.8 MB)
+    // Keep a secondary redundant recovery copy in localStorage when payload fits comfortably (<1.8 MB),
+    // deferred to idle time so edits never block the main thread with two synchronous multi-MB writes.
     if (serialized.length < 1_800_000) {
-      try {
-        localStorage.setItem(backupKey, serialized);
-      } catch {
-        try {
-          localStorage.removeItem(backupKey);
-        } catch {
-          // ignore
-        }
-      }
+      scheduleSecondaryBackupWrite(scope, serialized);
     }
   } catch {
     // IndexedDB remains primary persistence when localStorage hits ~5 MB quota;
@@ -696,6 +723,7 @@ interface StudyContextValue {
   changeFocusQuote: () => void;
   nowTick: number;
   timerSeconds: number;
+  getCurrentTimerSeconds: () => number;
   timerRunning: boolean;
   toggleTimer: () => void;
   resetTimer: () => void;
@@ -4179,7 +4207,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     })();
   }, []);
 
-  // Persist DB to IndexedDB (unlimited capacity) and localStorage (fast cache) only on real user changes
+  const localPersistTimerRef = useRef<number | null>(null);
+
+  // Persist DB to IndexedDB (unlimited capacity) and localStorage (fast cache) only on real user changes.
+  // Debounced slightly (280ms) with single-pass JSON.stringify + hashing to eliminate main-thread UI freezes
+  // during rapid clicks/edits, while visibilitychange/beforeunload flushes immediately.
   useEffect(() => {
     if (db === skipPersistDbRef.current) {
       skipPersistDbRef.current = null;
@@ -4192,33 +4224,52 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       isRestoringRef.current = false;
       return;
     }
-    const curHash = computeDatabaseContentHash(db);
-    if (curHash === lastPersistedDbHashRef.current) {
-      lastPersistedDbRef.current = db;
-      isRestoringRef.current = false;
-      return;
-    }
-    const wasRestoring = isRestoringRef.current;
-    isRestoringRef.current = false;
-    lastPersistedDbRef.current = db;
-    lastPersistedDbHashRef.current = curHash;
-    if (!wasRestoring) {
-      registerLocalWriteShield();
+
+    if (localPersistTimerRef.current !== null) {
+      window.clearTimeout(localPersistTimerRef.current);
+      localPersistTimerRef.current = null;
     }
 
-    const scope = activeScopeRef.current;
-    const serialized = JSON.stringify(db);
-    const nowIso = new Date().toISOString();
-    const hasCustomOfflineData = scope !== 'offline_guest' || !isUntouchedSeedDatabase(db);
-    // Camada 1 (localStorage + IndexedDB): salvamento imediato (0ms)
-    persistLocalDatabaseForScope(scope, serialized, nowIso, {
-      lastLocalEditAt: nowIso,
-      ...(hasCustomOfflineData ? { hasPendingCloudSync: true } : {}),
-    });
-    if (hasCustomOfflineData) {
-      pendingCloudSyncRef.current = true;
-      setHasPendingCloudChanges((prev) => (prev ? prev : true));
-    }
+    const wasRestoring = isRestoringRef.current;
+    isRestoringRef.current = false;
+
+    localPersistTimerRef.current = window.setTimeout(() => {
+      localPersistTimerRef.current = null;
+      const targetDb = dbRef.current;
+      if (targetDb === lastPersistedDbRef.current) return;
+
+      const serialized = JSON.stringify(targetDb);
+      const curHash = computeSerializedContentHash(serialized);
+      if (curHash === lastPersistedDbHashRef.current) {
+        lastPersistedDbRef.current = targetDb;
+        return;
+      }
+
+      lastPersistedDbRef.current = targetDb;
+      lastPersistedDbHashRef.current = curHash;
+      if (!wasRestoring) {
+        registerLocalWriteShield();
+      }
+
+      const scope = activeScopeRef.current;
+      const nowIso = new Date().toISOString();
+      const hasCustomOfflineData = scope !== 'offline_guest' || !isUntouchedSeedDatabase(targetDb);
+      persistLocalDatabaseForScope(scope, serialized, nowIso, {
+        lastLocalEditAt: nowIso,
+        ...(hasCustomOfflineData ? { hasPendingCloudSync: true } : {}),
+      });
+      if (hasCustomOfflineData) {
+        pendingCloudSyncRef.current = true;
+        setHasPendingCloudChanges((prev) => (prev ? prev : true));
+      }
+    }, 280);
+
+    return () => {
+      if (localPersistTimerRef.current !== null) {
+        window.clearTimeout(localPersistTimerRef.current);
+        localPersistTimerRef.current = null;
+      }
+    };
   }, [db, registerLocalWriteShield]);
 
   // Apply theme attribute & meta color
@@ -4258,6 +4309,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [],
   );
 
+  const getCurrentTimerSeconds = useCallback(
+    () => computeCurrentTimerSeconds(timerStateRef.current, Date.now()),
+    [computeCurrentTimerSeconds],
+  );
+
   const timerSeconds = computeCurrentTimerSeconds(timerState, nowTick);
   const timerRunning = timerState.startedAt > 0;
 
@@ -4271,13 +4327,33 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const pomodoroModeRef = useRef<PomodoroMode>(pomodoroMode);
   const pomodoroPhaseRef = useRef<'focus' | 'break'>(pomodoroPhase);
+  const pomodoroRemainingRef = useRef<number>(pomodoroRemainingSeconds);
   const lastWallSecRef = useRef<number>(Math.floor(Date.now() / 1000));
   const lastTimerSecRef = useRef<number>(computeCurrentTimerSeconds(timerState, Date.now()));
   pomodoroModeRef.current = pomodoroMode;
   pomodoroPhaseRef.current = pomodoroPhase;
 
-  // Precision ticker: ONLY ticks when the study timer/Pomodoro or a quiz is actively running!
-  // Never calls setNowTick when idle so the app never suffers 1Hz background re-render storms.
+  useEffect(() => {
+    pomodoroRemainingRef.current = pomodoroRemainingSeconds;
+  }, [pomodoroRemainingSeconds]);
+
+  // Keep external timerTickStore synchronized whenever timer state or Pomodoro config changes
+  useEffect(() => {
+    const now = Date.now();
+    const sec = computeCurrentTimerSeconds(timerState, now);
+    lastTimerSecRef.current = sec;
+    publishTimerTickSnapshot({
+      nowTick: now,
+      timerSeconds: sec,
+      timerRunning: timerState.startedAt > 0,
+      pomodoroMode,
+      pomodoroPhase,
+      pomodoroRemainingSeconds: pomodoroRemainingRef.current,
+    });
+  }, [computeCurrentTimerSeconds, pomodoroMode, pomodoroPhase, pomodoroRemainingSeconds, timerState]);
+
+  // Precision ticker: publishes 1Hz updates ONLY to timerTickStore (useSyncExternalStore),
+  // completely eliminating 1Hz re-renders of StudyProvider and full-page trees!
   useEffect(() => {
     const id = window.setInterval(() => {
       const t = timerStateRef.current;
@@ -4301,20 +4377,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const deltaSec = t.startedAt > 0 ? Math.max(0, curTimerSec - prevTimerSec) : 0;
       lastTimerSecRef.current = curTimerSec;
 
-      if (t.startedAt > 0) {
-        setNowTick(now);
-      }
-
       if (pomodoroModeRef.current !== 'continuous' && t.startedAt > 0 && deltaSec > 0) {
         const mode = pomodoroModeRef.current;
         const focusSec = mode === '25-5' ? 25 * 60 : 50 * 60;
         const breakSec = mode === '25-5' ? 5 * 60 : 10 * 60;
-        setPomodoroRemainingSeconds((prev) => {
-          if (prev > deltaSec) return prev - deltaSec;
+        const prevRem = pomodoroRemainingRef.current;
+        if (prevRem > deltaSec) {
+          pomodoroRemainingRef.current = prevRem - deltaSec;
+        } else {
           playPomodoroChime();
           const nextPhase = pomodoroPhaseRef.current === 'focus' ? 'break' : 'focus';
           pomodoroPhaseRef.current = nextPhase;
+          const nextRem = nextPhase === 'break' ? breakSec : focusSec;
+          pomodoroRemainingRef.current = nextRem;
           setPomodoroPhase(nextPhase);
+          setPomodoroRemainingSeconds(nextRem);
           window.setTimeout(() => {
             toast(
               nextPhase === 'break'
@@ -4322,7 +4399,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 : 'Pausa encerrada! Hora de voltar ao foco.',
             );
           }, 0);
-          return nextPhase === 'break' ? breakSec : focusSec;
+        }
+      }
+
+      if (t.startedAt > 0) {
+        publishTimerTickSnapshot({
+          nowTick: now,
+          timerSeconds: curTimerSec,
+          timerRunning: true,
+          pomodoroMode: pomodoroModeRef.current,
+          pomodoroPhase: pomodoroPhaseRef.current,
+          pomodoroRemainingSeconds: pomodoroRemainingRef.current,
         });
       }
 
@@ -6001,8 +6088,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       } catch {
         // ignore
       }
+      if (localPersistTimerRef.current !== null) {
+        window.clearTimeout(localPersistTimerRef.current);
+        localPersistTimerRef.current = null;
+      }
       const curDb = dbRef.current;
-      const curHash = computeDatabaseContentHash(curDb);
+      const serializedCurDb = JSON.stringify(curDb);
+      const curHash = computeSerializedContentHash(serializedCurDb);
       const hasFlushedDraftChange = curHash !== lastPersistedDbHashRef.current;
       const hasCustomOfflineData = scope !== 'offline_guest' || !isUntouchedSeedDatabase(curDb);
       if (hasFlushedDraftChange) {
@@ -6010,7 +6102,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         lastPersistedDbHashRef.current = curHash;
         registerLocalWriteShield();
         const nowIso = new Date().toISOString();
-        persistLocalDatabaseForScope(scope, JSON.stringify(curDb), nowIso, {
+        persistLocalDatabaseForScope(scope, serializedCurDb, nowIso, {
           lastLocalEditAt: nowIso,
           ...(hasCustomOfflineData ? { hasPendingCloudSync: true } : {}),
         });
@@ -11097,12 +11189,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         index: 0,
         answers: Array(questions.length),
         studySeconds: 0,
-        timerBaseline: timerSeconds,
+        timerBaseline: getCurrentTimerSeconds(),
       });
       setActivePage('Treino Diário');
       toast(`Iniciando bateria com ${questions.length} questão(ões) do Caderno de Erros!`);
     },
-    [allErrorEntries, ensureTimerRunning, timerSeconds, toast],
+    [allErrorEntries, ensureTimerRunning, getCurrentTimerSeconds, toast],
   );
 
   // Case Law
@@ -14981,6 +15073,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         changeFocusQuote,
         nowTick,
         timerSeconds,
+        getCurrentTimerSeconds,
         timerRunning,
         toggleTimer,
         resetTimer,

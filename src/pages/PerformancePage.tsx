@@ -39,6 +39,7 @@ import {
   PriorityQuadrantD3Chart,
   SubjectAnalyticsDatum,
 } from '../components/charts/PerformanceD3Panels';
+import { CareerAchievementsBanner } from '../components/performance/CareerAchievementsBanner';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
@@ -144,7 +145,7 @@ export const PerformancePage: React.FC = () => {
     );
   }, [db.studyTimeRecords]);
 
-  // 14-day history with correct vs wrong and completed simulations
+  // 14-day history with correct vs wrong and completed simulations (O(N) single-pass index)
   const dailySeries = useMemo(() => {
     const days: Array<{
       iso: string;
@@ -155,6 +156,8 @@ export const PerformancePage: React.FC = () => {
       simulations: number;
       studySeconds: number;
     }> = [];
+    const byIso = new Map<string, (typeof days)[number]>();
+    const brToIso = new Map<string, string>();
     const today = new Date();
     for (let i = 13; i >= 0; i--) {
       const d = new Date(today);
@@ -164,26 +167,45 @@ export const PerformancePage: React.FC = () => {
         2,
         '0',
       )}`;
-      const fullBrDate = `${label}/${d.getFullYear()}`;
-      const hist = db.history.filter((h) => h.date === iso);
-      const correct = hist.filter((h) => h.correct).length;
-      const wrong = hist.length - correct;
-      const sims = db.completedSimulations.filter(
-        (s) => s.criado_em?.slice(0, 10) === iso || (s.data || '').startsWith(fullBrDate),
-      ).length;
-      const sec = db.studyTimeRecords
-        .filter((r) => r.date === iso)
-        .reduce((sum, r) => sum + r.allocations.reduce((s, a) => s + a.seconds, 0), 0);
-      days.push({
+      const entry = {
         iso,
         label,
-        answered: hist.length,
-        correct,
-        wrong,
-        simulations: sims,
-        studySeconds: sec,
-      });
+        answered: 0,
+        correct: 0,
+        wrong: 0,
+        simulations: 0,
+        studySeconds: 0,
+      };
+      days.push(entry);
+      byIso.set(iso, entry);
+      brToIso.set(`${label}/${d.getFullYear()}`, iso);
     }
+
+    for (const h of db.history) {
+      const bucket = byIso.get(h.date);
+      if (!bucket) continue;
+      bucket.answered += 1;
+      if (h.correct) bucket.correct += 1;
+      else bucket.wrong += 1;
+    }
+
+    for (const s of db.completedSimulations) {
+      const isoKey =
+        (s.criado_em && byIso.has(s.criado_em.slice(0, 10)) ? s.criado_em.slice(0, 10) : null) ||
+        (s.data ? brToIso.get(s.data.slice(0, 10)) || null : null);
+      if (!isoKey) continue;
+      const bucket = byIso.get(isoKey);
+      if (bucket) bucket.simulations += 1;
+    }
+
+    for (const rec of db.studyTimeRecords) {
+      const bucket = byIso.get(rec.date);
+      if (!bucket) continue;
+      for (const a of rec.allocations) {
+        bucket.studySeconds += a.seconds;
+      }
+    }
+
     return days;
   }, [db.history, db.completedSimulations, db.studyTimeRecords]);
 
@@ -768,6 +790,9 @@ export const PerformancePage: React.FC = () => {
           </div>
         }
       />
+
+      {/* Níveis de Carreira e Medalhas de Mérito */}
+      <CareerAchievementsBanner db={db} />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
         <article className="ce-panel p-4">

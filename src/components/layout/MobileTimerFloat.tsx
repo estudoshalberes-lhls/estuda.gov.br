@@ -1,18 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import { Clock3, Pause, Play, Save } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
+import { useStudyTimer } from '../../lib/timerTickStore';
 import { formatClock, visibleName } from '../../lib/parsers';
 
-export const MobileTimerFloat: React.FC = () => {
+export const MobileTimerFloat: React.FC = React.memo(() => {
   const {
-    timerSeconds,
-    timerRunning,
     toggleTimer,
     activeTimerTopic,
     commitTimerToSchedule,
     setActivePage,
     examFocusMode,
   } = useStudy();
+  const { timerSeconds, timerRunning } = useStudyTimer();
 
   const [scrolledPastTop, setScrolledPastTop] = useState(false);
 
@@ -86,4 +86,4 @@ export const MobileTimerFloat: React.FC = () => {
       </div>
     </aside>
   );
-};
+});
