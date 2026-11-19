@@ -31,6 +31,7 @@ import { exportErrorNotebookPdf } from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ErrorNotebookEntry } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 
 const NOTE_TYPES = [
   'Erro Frequente',
@@ -96,6 +97,7 @@ export const ErrorNotebookPage: React.FC = () => {
   const [statsExpanded, setStatsExpanded] = useState(true);
   const [statsShowAll, setStatsShowAll] = useState(false);
   const [statsSortBy, setStatsSortBy] = useState<'rate' | 'count'>('rate');
+  const [paretoMode, setParetoMode] = useState<'notebook' | 'wrong_questions' | 'by_type'>('notebook');
 
   const [editingEntry, setEditingEntry] = useState<{
     id: string;
@@ -282,6 +284,49 @@ export const ErrorNotebookPage: React.FC = () => {
       totalNotebookAll,
     };
   }, [allErrorEntries, db.completedSimulations, db.history, resolveStatsSubject, statsSortBy]);
+
+  const paretoItems = useMemo<ParetoDatum[]>(() => {
+    if (paretoMode === 'by_type') {
+      const byType = new Map<string, { count: number; pending: number }>();
+      allErrorEntries.forEach((e) => {
+        const key = visibleName(e.tipo || 'Outros') || 'Outros';
+        const cur = byType.get(key) || { count: 0, pending: 0 };
+        cur.count += 1;
+        if (!e.corrigido) cur.pending += 1;
+        byType.set(key, cur);
+      });
+      return [...byType.entries()].map(([label, stats]) => ({
+        key: label,
+        label,
+        count: stats.count,
+        pendingCount: stats.pending,
+      }));
+    }
+
+    if (paretoMode === 'wrong_questions') {
+      return subjectErrorStats.rows
+        .filter((r) => r.wrongQuestions > 0)
+        .map((r) => ({
+          key: r.subject,
+          label: visibleName(r.subject),
+          count: r.wrongQuestions,
+          pendingCount: r.pendingCount,
+          ratePct: r.errorRatePct,
+          rateDetail: `${r.wrongQuestions}/${r.answeredQuestions}`,
+        }));
+    }
+
+    return subjectErrorStats.rows
+      .filter((r) => r.notebookTotal > 0)
+      .map((r) => ({
+        key: r.subject,
+        label: visibleName(r.subject),
+        count: r.notebookTotal,
+        pendingCount: r.pendingCount,
+        ratePct: r.errorRatePct,
+        rateDetail: r.answeredQuestions ? `${r.wrongQuestions}/${r.answeredQuestions}` : undefined,
+      }));
+  }, [allErrorEntries, paretoMode, subjectErrorStats.rows]);
 
   const filteredEntries = useMemo(() => {
     const term = normalizeSearch(search);
@@ -546,6 +591,56 @@ export const ErrorNotebookPage: React.FC = () => {
           </div>
         </Panel>
       </div>
+
+      {/* D3 Pareto 80/20 + Tabela Analítica de Concentração de Erros */}
+      <ErrorParetoD3Panel
+        title="Análise de Pareto 80/20 · Concentração de Erros"
+        subtitle="Identifique rapidamente as poucas matérias ou tipos de falha que geram ~80% dos seus erros. Clique em uma barra ou linha para filtrar."
+        items={paretoItems}
+        unitLabel={paretoMode === 'wrong_questions' ? 'erros' : 'registros'}
+        selectedKey={
+          paretoMode === 'by_type'
+            ? search || null
+            : filterSubject !== 'Todas as Matérias'
+              ? filterSubject
+              : null
+        }
+        onSelectKey={(key) => {
+          if (paretoMode === 'by_type') {
+            setSearch((prev) => (normalizeSearch(prev) === normalizeSearch(key) ? '' : key));
+          } else {
+            setFilterSubject((prev) =>
+              normalizeSearch(prev) === normalizeSearch(key) ? 'Todas as Matérias' : key,
+            );
+          }
+        }}
+        showRateColumn={paretoMode !== 'by_type' && subjectErrorStats.hasAttemptData}
+        showPendingColumn
+        headerExtra={
+          <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
+            {(
+              [
+                { id: 'notebook', label: 'No caderno' },
+                { id: 'wrong_questions', label: 'Questões erradas' },
+                { id: 'by_type', label: 'Por tipo' },
+              ] as const
+            ).map((opt) => (
+              <button
+                key={opt.id}
+                type="button"
+                onClick={() => setParetoMode(opt.id)}
+                className={`px-2 py-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap ${
+                  paretoMode === opt.id
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                {opt.label}
+              </button>
+            ))}
+          </div>
+        }
+      />
 
       {/* Subject Error Rate Statistics Panel */}
       <Panel

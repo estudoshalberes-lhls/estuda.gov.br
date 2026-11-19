@@ -46,6 +46,7 @@ import {
   useLawReadingPrefs,
 } from '../components/ui/LawReadingTools';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { IncidenceD3Panels } from '../components/charts/IncidenceD3Panels';
 
 export const IncidenceMatrixPage: React.FC = () => {
   const {
@@ -572,6 +573,20 @@ export const IncidenceMatrixPage: React.FC = () => {
     }
   };
 
+  const handleSelectLawAndGradeFromD3 = (folder: string, grade: 'Todas' | IncidenceGrade) => {
+    if (folder && folder !== activeFolder && db.laws[folder]) {
+      skipResetOnFolderSwitchRef.current = true;
+      setSelectedFolder(folder);
+      setSelectedArticleKeys([]);
+      setMultiArticleQuery('');
+      setReadStatusFilter('all');
+      setEditalFilterContestId('all');
+      setSearch('');
+    }
+    setGradeFilter(grade);
+    setActiveSavedFilterId(null);
+  };
+
   const groupedFilteredItems = useMemo(() => {
     const groups: Array<{ key: string; title: string; items: typeof filteredItems }> = [];
     filteredItems.forEach((item) => {
@@ -704,6 +719,15 @@ export const IncidenceMatrixPage: React.FC = () => {
 
       {folderNames.length ? (
         <>
+          <IncidenceD3Panels
+            laws={db.laws}
+            readLawItems={db.readLawItems}
+            activeFolder={activeFolder}
+            activeGradeFilter={gradeFilter}
+            onSelectLawAndGrade={handleSelectLawAndGradeFromD3}
+            onSelectArticle={handleJumpToArticle}
+          />
+
           {/* Filtros Salvos com Leis Predefinidas */}
           <div className="mb-3 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-3.5 py-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2">

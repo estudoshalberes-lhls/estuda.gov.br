@@ -3635,25 +3635,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const gasConnectionHealthRef = useRef<GasConnectionHealth>(gasConnectionHealth);
   gasConnectionHealthRef.current = gasConnectionHealth;
 
-  const [activeSyncMeta, setActiveSyncMeta] = useState<Omit<ActiveSyncState, 'localChecksum'>>(() => ({
-    status: initialGasSession?.token ? 'idle' : 'idle',
-    baseChecksum: initialGasSession?.lastContentHash || null,
-    remoteChecksum: initialGasSession?.lastContentHash || null,
-    localBaseVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : 0,
-    remoteVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : null,
-    remoteDevice: null,
-    remoteUpdatedAt: initialGasSession?.lastSyncedAt || null,
-    lastCheckedAt: null,
-    lastGuardOutcome: null,
-    blockedReason: null,
-    writesProtectedCount: 0,
-    controlSheetTable: 'tb_estado',
-  }));
+  const [activeSyncMeta, setActiveSyncMeta] = useState<Omit<ActiveSyncState, 'localChecksum'>>(() => {
+    const initialPersistedHash =
+      initialGasSession?.lastContentHash || loadSyncMeta(initialScope).lastCloudContentHash || null;
+    return {
+      status: 'idle',
+      baseChecksum: initialPersistedHash,
+      remoteChecksum: initialPersistedHash,
+      localBaseVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : 0,
+      remoteVersion: typeof initialGasSession?.serverVersion === 'number' ? initialGasSession.serverVersion : null,
+      remoteDevice: null,
+      remoteUpdatedAt: initialGasSession?.lastSyncedAt || null,
+      lastCheckedAt: null,
+      lastGuardOutcome: null,
+      blockedReason: null,
+      writesProtectedCount: 0,
+      controlSheetTable: 'tb_estado',
+    };
+  });
 
   const currentLocalChecksum = useMemo(() => computeDatabaseContentHash(db), [db]);
 
   const activeSyncState = useMemo<ActiveSyncState>(() => {
-    const baseChecksum = activeSyncMeta.baseChecksum || gasSession?.lastContentHash || lastCloudHashRef.current || null;
+    const baseChecksum = activeSyncMeta.baseChecksum || gasSession?.lastContentHash || null;
     const localBaseVersion = typeof gasSession?.serverVersion === 'number' ? gasSession.serverVersion : activeSyncMeta.localBaseVersion;
     let derivedStatus: ActiveSyncGuardStatus = activeSyncMeta.status;
 

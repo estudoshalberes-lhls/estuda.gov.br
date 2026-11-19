@@ -109,6 +109,109 @@ export const LawsPage: React.FC = () => {
     : folderNames[0] || '';
   const folderData = activeFolder ? db.laws[activeFolder] : undefined;
 
+  const [lawQuery, setLawQuery] = useState('');
+  const [lawSearchOpen, setLawSearchOpen] = useState(false);
+  const [lawHighlightIdx, setLawHighlightIdx] = useState(0);
+  const lawSearchBoxRef = useRef<HTMLDivElement | null>(null);
+
+  const folderEntries = useMemo(() => {
+    const today = localDateIso();
+    const todayMs = new Date(`${today}T00:00:00`).getTime();
+    return folderNames.map((name) => {
+      const display = visibleName(name);
+      const dates = [...(db.lawReadDates?.[name] || [])].sort((a, b) =>
+        b.data.localeCompare(a.data),
+      );
+      const latest = dates[0]?.data;
+      let freshTag = '';
+      if (latest) {
+        if (latest === today) {
+          freshTag = ' · lida hoje';
+        } else {
+          const diff = Math.round(
+            (todayMs - new Date(`${latest}T00:00:00`).getTime()) / 86400000,
+          );
+          freshTag =
+            Number.isFinite(diff) && diff > 0
+              ? ` · há ${diff}d`
+              : ` · ${formatIsoDateBr(latest)}`;
+        }
+      }
+      const norm = normalizeSearch(`${display} ${name}`);
+      const compact = norm.replace(/[.\-/]/g, '');
+      return {
+        name,
+        display,
+        count: db.laws[name]?.items.length || 0,
+        freshTag,
+        norm,
+        compact,
+      };
+    });
+  }, [folderNames, db.laws, db.lawReadDates]);
+
+  const matchedLawEntries = useMemo(() => {
+    const raw = lawQuery.trim();
+    if (!raw) return folderEntries;
+    const qNorm = normalizeSearch(raw);
+    const qCompact = qNorm.replace(/[.\-/]/g, '');
+    const tokens = qNorm.split(/\s+/).filter(Boolean);
+
+    const scored = folderEntries
+      .map((entry) => {
+        const displayNorm = normalizeSearch(entry.display);
+        const displayCompact = displayNorm.replace(/[.\-/]/g, '');
+        let score = 0;
+        if (displayNorm === qNorm || displayCompact === qCompact) {
+          score = 100;
+        } else if (displayNorm.startsWith(qNorm) || (qCompact && displayCompact.startsWith(qCompact))) {
+          score = 80;
+        } else if (entry.norm.includes(qNorm) || (qCompact && entry.compact.includes(qCompact))) {
+          score = 60;
+        } else if (
+          tokens.length > 1 &&
+          tokens.every((tk) => {
+            const tkCompact = tk.replace(/[.\-/]/g, '');
+            return entry.norm.includes(tk) || (tkCompact.length > 0 && entry.compact.includes(tkCompact));
+          })
+        ) {
+          score = 40;
+        }
+        return { entry, score };
+      })
+      .filter((item) => item.score > 0);
+
+    scored.sort((a, b) => b.score - a.score || a.entry.display.localeCompare(b.entry.display, 'pt-BR'));
+    return scored.map((item) => item.entry);
+  }, [folderEntries, lawQuery]);
+
+  useEffect(() => {
+    setLawHighlightIdx(0);
+  }, [lawQuery, lawSearchOpen]);
+
+  useEffect(() => {
+    if (!lawSearchOpen) return;
+    const handleClickOutside = (event: MouseEvent) => {
+      if (
+        lawSearchBoxRef.current &&
+        event.target instanceof Node &&
+        !lawSearchBoxRef.current.contains(event.target)
+      ) {
+        setLawSearchOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [lawSearchOpen]);
+
+  const handleSelectLawFolder = (folderName: string) => {
+    setSelectedFolder(folderName);
+    setPreviewPdf(null);
+    setFocusSearchTerm('');
+    setLawQuery('');
+    setLawSearchOpen(false);
+  };
+
   const [search, setSearch] = useState('');
   const [focusSearchTerm, setFocusSearchTerm] = useState('');
   const [filterOnlyMatches, setFilterOnlyMatches] = useState(false);
@@ -877,35 +980,122 @@ export const LawsPage: React.FC = () => {
               }}
               className="ce-select w-auto min-w-[230px]"
             >
-              {folderNames.map((name) => {
-                const dates = [...(db.lawReadDates?.[name] || [])].sort((a, b) =>
-                  b.data.localeCompare(a.data),
-                );
-                const latest = dates[0]?.data;
-                let freshTag = '';
-                if (latest) {
-                  const today = localDateIso();
-                  if (latest === today) {
-                    freshTag = ' · lida hoje';
-                  } else {
-                    const diff = Math.round(
-                      (new Date(`${today}T00:00:00`).getTime() - new Date(`${latest}T00:00:00`).getTime()) /
-                        86400000,
-                    );
-                    freshTag =
-                      Number.isFinite(diff) && diff > 0
-                        ? ` · há ${diff}d`
-                        : ` · ${formatIsoDateBr(latest)}`;
-                  }
-                }
-                return (
-                  <option key={name} value={name}>
-                    {visibleName(name)} ({db.laws[name].items.length}
-                    {freshTag})
-                  </option>
-                );
-              })}
+              {folderEntries.map((entry) => (
+                <option key={entry.name} value={entry.name}>
+                  {entry.display} ({entry.count}
+                  {entry.freshTag})
+                </option>
+              ))}
             </select>
+
+            <div ref={lawSearchBoxRef} className="relative min-w-[210px] w-full sm:w-[250px]">
+              <Search className="w-3.5 h-3.5 text-[var(--muted)] absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <input
+                type="text"
+                role="combobox"
+                aria-label="Buscar lei diretamente"
+                aria-expanded={lawSearchOpen}
+                aria-controls="direct-law-search-listbox"
+                aria-autocomplete="list"
+                value={lawQuery}
+                onFocus={() => setLawSearchOpen(true)}
+                onChange={(e) => {
+                  setLawQuery(e.target.value);
+                  setLawSearchOpen(true);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    setLawSearchOpen(true);
+                    setLawHighlightIdx((prev) =>
+                      matchedLawEntries.length ? (prev + 1) % matchedLawEntries.length : 0,
+                    );
+                  } else if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    setLawSearchOpen(true);
+                    setLawHighlightIdx((prev) =>
+                      matchedLawEntries.length
+                        ? (prev - 1 + matchedLawEntries.length) % matchedLawEntries.length
+                        : 0,
+                    );
+                  } else if (e.key === 'Enter') {
+                    if (matchedLawEntries.length > 0) {
+                      e.preventDefault();
+                      const chosen = matchedLawEntries[lawHighlightIdx] || matchedLawEntries[0];
+                      if (chosen) handleSelectLawFolder(chosen.name);
+                    }
+                  } else if (e.key === 'Escape') {
+                    setLawSearchOpen(false);
+                  }
+                }}
+                placeholder="Buscar lei (ex: 8112, CF, Penal)..."
+                className="ce-input pl-8 pr-8 w-full"
+              />
+              {lawQuery && (
+                <button
+                  type="button"
+                  aria-label="Limpar busca de lei"
+                  onClick={() => {
+                    setLawQuery('');
+                    setLawSearchOpen(true);
+                  }}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+
+              {lawSearchOpen && (
+                <div
+                  id="direct-law-search-listbox"
+                  role="listbox"
+                  aria-label="Resultados da busca de leis"
+                  className="absolute left-0 right-0 top-[calc(100%+4px)] z-40 max-h-[280px] overflow-y-auto rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] shadow-lg py-1"
+                >
+                  {matchedLawEntries.length > 0 ? (
+                    matchedLawEntries.map((entry, idx) => {
+                      const isSelected = entry.name === activeFolder;
+                      const isHighlighted = idx === lawHighlightIdx;
+                      return (
+                        <button
+                          key={entry.name}
+                          type="button"
+                          role="option"
+                          aria-selected={isSelected}
+                          onMouseEnter={() => setLawHighlightIdx(idx)}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            handleSelectLawFolder(entry.name);
+                          }}
+                          className={`w-full text-left px-3 py-2 flex items-center justify-between gap-2 text-[12px] transition-colors cursor-pointer ${
+                            isHighlighted
+                              ? 'bg-[var(--accent-soft)] text-[var(--text)]'
+                              : 'text-[var(--text)] hover:bg-[var(--panel-soft)]'
+                          }`}
+                        >
+                          <div className="min-w-0 flex-1">
+                            <div className={`truncate ${isSelected ? 'font-bold text-[var(--accent)]' : 'font-semibold'}`}>
+                              {entry.display}
+                            </div>
+                            <div className="text-[11px] text-[var(--muted)] font-mono-num truncate">
+                              {entry.count} dispositivo(s)
+                              {entry.freshTag}
+                            </div>
+                          </div>
+                          {isSelected && (
+                            <Check className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                          )}
+                        </button>
+                      );
+                    })
+                  ) : (
+                    <div className="px-3 py-2.5 text-[12px] text-[var(--muted)]">
+                      Nenhuma lei encontrada para &ldquo;{lawQuery}&rdquo;.
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             {!hideSearch && (
               <div className="relative flex-1 min-w-[220px]">

@@ -32,6 +32,13 @@ import {
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ScheduleTopic, StudyTimeAllocation } from '../types/study';
 import { ReceiptText } from 'lucide-react';
+import {
+  AnalyticalSubjectsD3Table,
+  ConsistencyCalendarHeatmap,
+  PerformanceEvolutionD3Chart,
+  PriorityQuadrantD3Chart,
+  SubjectAnalyticsDatum,
+} from '../components/charts/PerformanceD3Panels';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
@@ -251,6 +258,90 @@ export const PerformancePage: React.FC = () => {
     fixedSubjects,
     resolveFixedSubjectForAllocation,
   ]);
+
+  const subjectAnalyticsRows = useMemo<SubjectAnalyticsDatum[]>(() => {
+    const map = new Map<
+      string,
+      {
+        subject: string;
+        answered: number;
+        correct: number;
+        studySeconds: number;
+        byDate: Map<string, { answered: number; correct: number }>;
+      }
+    >();
+
+    const ensure = (key: string) => {
+      const existing = map.get(key);
+      if (existing) return existing;
+      const created = {
+        subject: key,
+        answered: 0,
+        correct: 0,
+        studySeconds: 0,
+        byDate: new Map<string, { answered: number; correct: number }>(),
+      };
+      map.set(key, created);
+      return created;
+    };
+
+    db.history.forEach((h) => {
+      const rawKey = h.subject || 'Geral';
+      const key = inferFixedSubjectFromTopic({ materia: rawKey }, fixedSubjects) || rawKey;
+      const cur = ensure(key);
+      cur.answered += 1;
+      if (h.correct) cur.correct += 1;
+      if (h.date) {
+        const day = cur.byDate.get(h.date) || { answered: 0, correct: 0 };
+        day.answered += 1;
+        if (h.correct) day.correct += 1;
+        cur.byDate.set(h.date, day);
+      }
+    });
+
+    db.studyTimeRecords.forEach((rec) => {
+      rec.allocations.forEach((a) => {
+        const key = resolveFixedSubjectForAllocation(a);
+        const cur = ensure(key);
+        cur.studySeconds += a.seconds;
+      });
+    });
+
+    return [...map.values()].map((item) => {
+      const orderedDays = [...item.byDate.entries()]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .slice(-12)
+        .map(([iso, vals]) => ({
+          iso,
+          answered: vals.answered,
+          accuracyPct: Math.round((vals.correct / Math.max(1, vals.answered)) * 100),
+        }));
+
+      let trendDelta: number | null = null;
+      if (orderedDays.length >= 2) {
+        const split = Math.max(1, Math.floor(orderedDays.length / 2));
+        const firstHalf = orderedDays.slice(0, split);
+        const secondHalf = orderedDays.slice(split);
+        const firstAvg =
+          firstHalf.reduce((s, d) => s + d.accuracyPct, 0) / firstHalf.length;
+        const secondAvg =
+          secondHalf.reduce((s, d) => s + d.accuracyPct, 0) / secondHalf.length;
+        trendDelta = Math.round(secondAvg - firstAvg);
+      }
+
+      return {
+        subject: item.subject,
+        answered: item.answered,
+        correct: item.correct,
+        wrong: item.answered - item.correct,
+        accuracyPct:
+          item.answered > 0 ? Math.round((item.correct / item.answered) * 100) : null,
+        studySeconds: item.studySeconds,
+        sparkline: orderedDays,
+        trendDelta,
+      };
+    });
+  }, [db.history, db.studyTimeRecords, fixedSubjects, resolveFixedSubjectForAllocation]);
 
   // Compute effective date bounds for Study Time filter
   const { rangeStartIso, rangeEndIso } = useMemo(() => {
@@ -723,6 +814,28 @@ export const PerformancePage: React.FC = () => {
           </div>
         </article>
       </div>
+
+      {/* Painel Analítico Interativo com D3.js */}
+      <PerformanceEvolutionD3Chart
+        db={db}
+        subjectFilter={subjectFilter}
+        fixedSubjects={fixedSubjects}
+      />
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+        <ConsistencyCalendarHeatmap db={db} />
+        <PriorityQuadrantD3Chart
+          rows={subjectAnalyticsRows}
+          selectedSubject={subjectFilter}
+          onSelectSubject={setSubjectFilter}
+        />
+      </div>
+
+      <AnalyticalSubjectsD3Table
+        rows={subjectAnalyticsRows}
+        selectedSubject={subjectFilter}
+        onSelectSubject={setSubjectFilter}
+      />
 
       {/* Extrato Anual IRPF do Concurseiro */}
       <Panel
