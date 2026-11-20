@@ -20,6 +20,7 @@ html[data-theme="gov-padrao"] {
   --warning: #b45309;
   --bad: #c92a2a;
   --gov-navy: #071d41;
+  --gov-icon: #071d41;
   --gov-yellow: #ffcd07;
   --gov-green: #168821;
   --shadow: 0 10px 24px -6px rgba(7, 29, 65, 0.12);
@@ -46,6 +47,7 @@ html[data-theme="gov-escuro"] {
   --warning: #fbbf24;
   --bad: #f87171;
   --gov-navy: #040914;
+  --gov-icon: #93c5fd;
   --gov-yellow: #ffcd07;
   --gov-green: #168821;
   --shadow: 0 16px 36px -8px rgba(0, 0, 0, 0.45);
@@ -69,6 +71,7 @@ html[data-theme="black-red"] {
   --good: #10b981;
   --warning: #f59e0b;
   --bad: #ef4444;
+  --gov-icon: #cbd5e1;
   --shadow: 0 16px 36px -8px rgba(0, 0, 0, 0.35);
 }
 
@@ -90,6 +93,7 @@ html[data-theme="black-blue"] {
   --good: #10b981;
   --warning: #f59e0b;
   --bad: #ef4444;
+  --gov-icon: #93c5fd;
   --shadow: 0 16px 36px -8px rgba(3, 7, 18, 0.45);
 }
 
@@ -111,6 +115,7 @@ html[data-theme="black-pink"] {
   --good: #10b981;
   --warning: #f59e0b;
   --bad: #fb7185;
+  --gov-icon: #cbd5e1;
   --shadow: 0 16px 36px -8px rgba(10, 4, 12, 0.5);
 }
 
@@ -132,6 +137,7 @@ html[data-theme="baby-pink"] {
   --good: #059669;
   --warning: #d97706;
   --bad: #e11d48;
+  --gov-icon: #071d41;
   --shadow: 0 12px 32px rgba(146, 85, 117, 0.08);
 }
 
@@ -153,6 +159,7 @@ html[data-theme="reading-comfort"] {
   --good: #1f7a53;
   --warning: #9a5b13;
   --bad: #b53d3d;
+  --gov-icon: #071d41;
   --shadow: 0 10px 26px rgba(68, 54, 34, 0.08);
 }
 
@@ -655,6 +662,63 @@ html[data-theme="reading-comfort"] .brand-mark {
 details summary::-webkit-details-marker {
   display: none;
 }
+
+/* Official Gov.br A4 Print Stylesheet */
+@page {
+  size: A4 portrait;
+  margin: 11mm 13mm;
+}
+
+@media print {
+  html,
+  body {
+    background: #ffffff !important;
+    color: #071d41 !important;
+    font-size: 11pt !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .app-shell {
+    display: block !important;
+    min-height: auto !important;
+    max-width: none !important;
+    overflow: visible !important;
+  }
+
+  .sidebar,
+  .top-module-shell,
+  .app-shell > main > header,
+  .app-shell > main > footer,
+  [data-print-hide="true"] {
+    display: none !important;
+  }
+
+  .main-shell {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    min-height: auto !important;
+    margin-left: 0 !important;
+  }
+
+  #page-content {
+    display: block !important;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .gov-print-sheet {
+    display: block !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+}
+
 
 /* Performance: Skip off-screen layout/paint for long virtualizable card lists */
 .ce-cv-card {

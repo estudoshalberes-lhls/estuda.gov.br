@@ -11,6 +11,7 @@ import {
   FileSpreadsheet,
   FileText,
   Filter,
+  Loader2,
   Search,
   Timer,
   Trash2,
@@ -24,6 +25,7 @@ import {
   localDateIso,
   visibleName,
 } from '../lib/parsers';
+import { captureD3ChartsFromContainer } from '../lib/d3SvgCapture';
 import { exportPerformanceReportPdf } from '../lib/pdfExport';
 import {
   CsvDelimiter,
@@ -233,7 +235,7 @@ const SubjectPerformanceListRow = React.memo(
 ) as (props: RowComponentProps<SubjectPerformanceListRowProps>) => React.ReactElement | null;
 
 export const PerformancePage: React.FC = () => {
-  const { db, fixedSubjects, setActivePage, deleteStudyTimeRecord, requestConfirm, toast } =
+  const { db, fixedSubjects, setActivePage, deleteStudyTimeRecord, requestConfirm, googleUser, toast } =
     useStudy();
 
   const [subjectFilter, setSubjectFilter] = useState('Todas');
@@ -292,10 +294,12 @@ export const PerformancePage: React.FC = () => {
     };
   }, [scheduleTopicById]);
 
-  // Export CSV popover state
+  // Export CSV & Official D3 PDF state
   const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [csvDelimiter, setCsvDelimiter] = useState<CsvDelimiter>(';');
   const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const d3ChartsContainerRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     if (!exportMenuOpen) return;
@@ -763,7 +767,9 @@ export const PerformancePage: React.FC = () => {
     return `${formatIsoToBr(customStartDate)} a ${formatIsoToBr(customEndDate)}`;
   }, [timePreset, customStartDate, customEndDate]);
 
-  const handleExportPdf = () => {
+  const handleExportPdf = async () => {
+    if (isExportingPdf) return;
+    setIsExportingPdf(true);
     try {
       const filterDescParts = [
         `Período tempo: ${periodLabel}`,
@@ -780,6 +786,8 @@ export const PerformancePage: React.FC = () => {
         filterDescParts.push(`Busca: "${historySearch.trim()}"`);
       }
 
+      const capturedCharts = await captureD3ChartsFromContainer(d3ChartsContainerRef.current);
+
       exportPerformanceReportPdf({
         totalAnswered,
         totalCorrect,
@@ -792,6 +800,8 @@ export const PerformancePage: React.FC = () => {
         recentSimulations: db.completedSimulations,
         formatDuration: formatClock,
         filterDescription: filterDescParts.join(' · '),
+        holderName: googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
+        charts: capturedCharts,
         filteredStudySummary: {
           totalFormatted: formatClock(filteredStudyStats.totalSec),
           avgFormatted: formatClock(filteredStudyStats.avgSec),
@@ -801,9 +811,15 @@ export const PerformancePage: React.FC = () => {
         filteredStudyByDate: filteredStudyStats.byDate,
         dailySeries,
       });
-      toast('Relatório de desempenho em PDF gerado.');
+      toast(
+        capturedCharts.length > 0
+          ? `Relatório oficial Gov.br em PDF gerado com ${capturedCharts.length} gráfico(s) D3!`
+          : 'Relatório oficial de desempenho em PDF gerado.',
+      );
     } catch (err) {
-      toast((err as Error).message, true);
+      toast((err as Error).message || 'Falha ao gerar o relatório oficial em PDF.', true);
+    } finally {
+      setIsExportingPdf(false);
     }
   };
 
@@ -1009,11 +1025,17 @@ export const PerformancePage: React.FC = () => {
 
             <button
               type="button"
-              onClick={handleExportPdf}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shadow-xs transition-colors"
+              onClick={() => void handleExportPdf()}
+              disabled={isExportingPdf}
+              title="Gerar relatório governamental oficial em PDF incluindo os gráficos D3 atuais"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#071D41] bg-[#071D41] text-white text-[12px] font-bold hover:bg-[#0c2d64] disabled:opacity-60 whitespace-nowrap shadow-xs transition-colors cursor-pointer"
             >
-              <FileText className="w-3.5 h-3.5" />
-              Exportar PDF
+              {isExportingPdf ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[#FFCD07]" />
+              ) : (
+                <FileText className="w-3.5 h-3.5 text-[#FFCD07]" />
+              )}
+              {isExportingPdf ? 'Gerando Relatório…' : 'Exportar PDF Oficial'}
             </button>
           </div>
         }
@@ -1069,33 +1091,65 @@ export const PerformancePage: React.FC = () => {
       </div>
 
       {/* Painel Analítico Interativo com D3.js */}
-      <PerformanceEvolutionD3Chart
-        db={db}
-        subjectFilter={subjectFilter}
-        fixedSubjects={fixedSubjects}
-      />
+      <div ref={d3ChartsContainerRef}>
+        <div
+          data-d3-chart-card=""
+          data-d3-chart-title="Evolução Temporal & Tendência de Acerto"
+          data-d3-chart-subtitle="Volume diário de questões, taxa de acerto e média móvel de 7 dias frente à meta de 80%."
+        >
+          <PerformanceEvolutionD3Chart
+            db={db}
+            subjectFilter={subjectFilter}
+            fixedSubjects={fixedSubjects}
+          />
+        </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
-        <SubjectAccuracyEvolutionD3Chart
-          db={db}
-          fixedSubjects={fixedSubjects}
-          selectedSubject={subjectFilter}
-          onSelectSubject={setSubjectFilter}
-        />
-        <WeeklyStudyHoursD3Chart
-          db={db}
-          fixedSubjects={fixedSubjects}
-          subjectFilter={subjectFilter}
-        />
-      </div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+          <div
+            data-d3-chart-card=""
+            data-d3-chart-title="Evolução da Taxa de Acertos por Matéria (Semanal)"
+            data-d3-chart-subtitle="Comparativo semanal de aproveitamento percentual nas principais disciplinas ativas."
+          >
+            <SubjectAccuracyEvolutionD3Chart
+              db={db}
+              fixedSubjects={fixedSubjects}
+              selectedSubject={subjectFilter}
+              onSelectSubject={setSubjectFilter}
+            />
+          </div>
+          <div
+            data-d3-chart-card=""
+            data-d3-chart-title="Tempo de Estudo Semanal (Horas Líquidas)"
+            data-d3-chart-subtitle="Distribuição semanal de horas líquidas registradas no Ponto Eletrônico."
+          >
+            <WeeklyStudyHoursD3Chart
+              db={db}
+              fixedSubjects={fixedSubjects}
+              subjectFilter={subjectFilter}
+            />
+          </div>
+        </div>
 
-      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
-        <ConsistencyCalendarHeatmap db={db} />
-        <PriorityQuadrantD3Chart
-          rows={subjectAnalyticsRows}
-          selectedSubject={subjectFilter}
-          onSelectSubject={setSubjectFilter}
-        />
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+          <div
+            data-d3-chart-card=""
+            data-d3-chart-title="Mapa de Consistência Anual"
+            data-d3-chart-subtitle="Frequência diária e regularidade de estudos ao longo das últimas 52 semanas."
+          >
+            <ConsistencyCalendarHeatmap db={db} />
+          </div>
+          <div
+            data-d3-chart-card=""
+            data-d3-chart-title="Matriz de Esforço × Desempenho por Disciplina"
+            data-d3-chart-subtitle="Posicionamento estratégico entre volume resolvido e taxa de acerto por matéria."
+          >
+            <PriorityQuadrantD3Chart
+              rows={subjectAnalyticsRows}
+              selectedSubject={subjectFilter}
+              onSelectSubject={setSubjectFilter}
+            />
+          </div>
+        </div>
       </div>
 
       <AnalyticalSubjectsD3Table

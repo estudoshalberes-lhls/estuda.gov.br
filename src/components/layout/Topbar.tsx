@@ -242,10 +242,12 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
           <Menu className="w-4 h-4" />
         </button>
         <div className="min-w-0 hidden sm:flex items-center gap-2.5">
-          <ModuleIcon
-            name={MODULES.find((m) => m.name === activePage)?.icon || 'home'}
-            className="w-8 h-8 rounded-lg shadow-xs shrink-0"
-          />
+          <span className="grid place-items-center w-8 h-8 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] shrink-0">
+            <ModuleIcon
+              name={MODULES.find((m) => m.name === activePage)?.icon || 'home'}
+              className="w-[18px] h-[18px] shrink-0"
+            />
+          </span>
           <div className="min-w-0 flex flex-col justify-center">
             <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-[0.06em] uppercase text-[var(--accent)] leading-none mb-1">
               <span>estuda.gov.br</span>
@@ -311,13 +313,13 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
                 onClick={() => setActivePage(modName)}
                 title={`Abrir ${displayLabel}`}
                 aria-label={`Abrir ${displayLabel}`}
-                className={`grid place-items-center w-9 h-full text-[12px] font-bold transition-colors ${
+                className={`grid place-items-center w-9 h-full text-[12px] font-bold transition-colors cursor-pointer ${
                   isCurrent
-                    ? 'bg-[#071D41] ring-2 ring-inset ring-[#FFCD07]'
-                    : 'bg-transparent text-[var(--text)] hover:bg-[var(--accent-soft)]'
+                    ? 'bg-[var(--accent-soft)] ring-1 ring-inset ring-[var(--accent)]'
+                    : 'bg-transparent hover:bg-[var(--panel-soft)]'
                 }`}
               >
-                <ModuleIcon name={iconName} className="w-6 h-6 rounded-[6px] shrink-0" />
+                <ModuleIcon name={iconName} className="w-[17px] h-[17px] shrink-0" />
               </button>
             );
           })}
@@ -363,7 +365,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
                   >
                     <div className="flex items-center justify-between gap-2 text-[10.5px] font-bold text-[var(--muted)]">
                       <span className="inline-flex items-center gap-1.5">
-                        <ModuleIcon name={slotModule ? slotModule.icon : 'home'} className="w-5 h-5 rounded-[5px] shrink-0" />
+                        <ModuleIcon name={slotModule ? slotModule.icon : 'home'} className="w-4 h-4 shrink-0" />
                         <span>Atalho #{slotIdx + 1}</span>
                       </span>
                       <button

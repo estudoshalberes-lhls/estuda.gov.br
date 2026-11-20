@@ -14,6 +14,7 @@ import {
   FolderOpen,
   Play,
   Plus,
+  Printer,
   Save,
   Timer,
   Trash2,
@@ -38,6 +39,7 @@ import {
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ScheduleMap, ScheduleTopic, WeekdayName, WeeklyScheduleFileRecord } from '../types/study';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
+import { ScheduleOfficialPrintSheet } from '../components/schedule/ScheduleOfficialPrintSheet';
 import { useStudyTimer } from '../lib/timerTickStore';
 
 const ScheduleBannerTimerActions: React.FC<{
@@ -123,6 +125,7 @@ export const SchedulePage: React.FC = () => {
     linkTimerToScheduleTopic,
     commitTimerToSchedule,
     clearTimerLink,
+    googleUser,
     toast,
   } = useStudy();
 
@@ -406,8 +409,24 @@ export const SchedulePage: React.FC = () => {
     }
   };
 
+  const resolvedPrintDayDates = useMemo(() => {
+    const out: Partial<Record<WeekdayName, string>> = {};
+    WEEKDAYS.forEach((day) => {
+      out[day] = db.scheduleDayDates?.[day] || activeWeekDates[day] || todayBr;
+    });
+    return out;
+  }, [db.scheduleDayDates, activeWeekDates, todayBr]);
+
+  const handlePrintOfficialSchedule = () => {
+    flushAllDirtyDays();
+    window.requestAnimationFrame(() => {
+      window.print();
+    });
+  };
+
   return (
     <div>
+      <div className="print:hidden">
       <datalist id="schedule-contests-datalist">
         {contestSuggestions.map((c) => (
           <option key={c} value={c} />
@@ -504,6 +523,15 @@ export const SchedulePage: React.FC = () => {
             >
               <FileUp className="w-3.5 h-3.5 text-[var(--accent)]" />
               Importar .txt
+            </button>
+            <button
+              type="button"
+              onClick={handlePrintOfficialSchedule}
+              title="Imprimir folha oficial Gov.br do cronograma semanal otimizada para papel A4"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[#071D41] bg-[#071D41] text-white text-[12px] font-bold hover:bg-[#0c2d64] whitespace-nowrap cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5 text-[#FFCD07]" />
+              Imprimir Folha A4
             </button>
             <button
               type="button"
@@ -1287,6 +1315,17 @@ export const SchedulePage: React.FC = () => {
           );
         })}
       </div>
+      </div>
+
+      <ScheduleOfficialPrintSheet
+        weekLabel={activeWeekMeta.label}
+        weekFileName={activeWeekMeta.fileName}
+        defaultContest={defaultContestInput}
+        schedule={draft}
+        dayDates={resolvedPrintDayDates}
+        fixedSubjects={fixedSubjects}
+        holderName={googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal'}
+      />
     </div>
   );
 };

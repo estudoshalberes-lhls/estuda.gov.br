@@ -6,6 +6,7 @@ import {
   LawItem,
 } from '../types/study';
 import { cleanSafeName, formatSequentialDeviceLabel, localDateIso, visibleName } from './parsers';
+import type { CapturedD3Chart } from './d3SvgCapture';
 
 export const HIGHLIGHT_COLOR_RGB: Record<
   HighlightColorKey,
@@ -604,6 +605,8 @@ export function exportPerformanceReportPdf(params: {
   recentSimulations: PerformancePdfSimulationRow[];
   formatDuration: (seconds: number) => string;
   filterDescription?: string;
+  holderName?: string;
+  charts?: CapturedD3Chart[];
   filteredStudySummary?: {
     totalFormatted: string;
     avgFormatted: string;
@@ -615,87 +618,295 @@ export function exportPerformanceReportPdf(params: {
 }): void {
   const ctx = createDoc();
   const { doc, margin, maxWidth, pageWidth } = ctx;
+  const protocolNumber = `TRANSP-${String(
+    params.totalAnswered * 17 + params.completedSimulationsCount * 29 + 2026,
+  ).padStart(6, '0')}`;
+  const issuedAt = new Date().toLocaleString('pt-BR');
+
+  // Helper: Draw Gov.br Official Section Heading
+  const drawSectionHeading = (num: number, heading: string) => {
+    ctx.ensureSpace(16);
+    doc.setFillColor(237, 242, 248);
+    doc.setDrawColor(182, 198, 220);
+    doc.rect(margin, ctx.y - 4.5, maxWidth, 7.2, 'FD');
+    doc.setFillColor(19, 81, 180);
+    doc.rect(margin, ctx.y - 4.5, 2.2, 7.2, 'F');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(7, 29, 65);
+    doc.text(safePdfText(`${num}. ${heading.toUpperCase()}`), margin + 4.8, ctx.y + 0.3);
+    ctx.y += 7;
+  };
+
+  // --- Official Federal Header Banner ---
+  doc.setFillColor(7, 29, 65);
+  doc.rect(0, 0, pageWidth, 33, 'F');
+
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, 33, third, 2, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(third, 33, third, 2, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, 33, pageWidth - third * 2, 2, 'F');
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.setTextColor(20, 20, 20);
-  doc.text('Relatorio de Desempenho - Central de Estudos', margin, ctx.y);
-  ctx.y += 6.5;
+  doc.setFontSize(9);
+  doc.setTextColor(255, 205, 7);
+  doc.text('PORTAL DA TRANSPARENCIA ESTUDANTIL · ESTUDA.GOV.BR', margin, 11);
+
+  doc.setFontSize(14.5);
+  doc.setTextColor(255, 255, 255);
+  doc.text('RELATORIO OFICIAL DE DESEMPENHO E EVOLUCAO ANALITICA', margin, 19.5);
 
   doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  doc.setTextColor(95, 95, 95);
+  doc.setFontSize(8.2);
+  doc.setTextColor(215, 225, 240);
   doc.text(
-    safePdfText(`Gerado em ${new Date().toLocaleString('pt-BR')} · Consolidado de questoes, horas e simulados`),
+    safePdfText(
+      `Titular: ${params.holderName || 'Cidadao-Estudante Federal'} · Protocolo ${protocolNumber} · Emitido em ${issuedAt}`,
+    ),
     margin,
-    ctx.y,
+    27,
   );
-  ctx.y += 4.8;
 
+  ctx.y = 43;
+
+  // --- Active Filters Notice ---
   if (params.filterDescription) {
-    doc.setFontSize(8.5);
-    doc.setTextColor(115, 115, 125);
-    ctx.writeWrapped(`Filtros aplicados: ${params.filterDescription}`, 4.4);
+    const filterLines = doc.splitTextToSize(
+      safePdfText(`Parametros e filtros vigentes: ${params.filterDescription}`),
+      maxWidth - 6,
+    ) as string[];
+    const filterBoxH = filterLines.length * 4.4 + 4;
+    ctx.ensureSpace(filterBoxH + 4);
+    doc.setFillColor(247, 249, 252);
+    doc.setDrawColor(195, 208, 228);
+    doc.rect(margin, ctx.y - 3, maxWidth, filterBoxH, 'FD');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.3);
+    doc.setTextColor(61, 79, 107);
+    filterLines.forEach((line, idx) => {
+      doc.text(line, margin + 3, ctx.y + 1 + idx * 4.4);
+    });
+    ctx.y += filterBoxH + 3;
   }
-  ctx.y += 3;
 
-  // Summary Box
-  doc.setFillColor(242, 244, 248);
-  doc.setDrawColor(210, 215, 224);
-  doc.rect(margin, ctx.y - 3, maxWidth, 20, 'FD');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
-  doc.setTextColor(25, 25, 25);
-  doc.text(
-    safePdfText(
-      `Questoes: ${params.totalAnswered} (${params.totalCorrect} acertos / ${params.totalWrong} erros)   ·   Aproveitamento: ${params.accuracy}%`,
-    ),
-    margin + 3,
-    ctx.y + 3,
-  );
-  doc.text(
-    safePdfText(
-      `Simulados concluidos: ${params.completedSimulationsCount}   ·   Tempo total cronometrado: ${params.totalStudyFormatted}`,
-    ),
-    margin + 3,
-    ctx.y + 11,
-  );
-  ctx.y += 23;
+  // --- Section 1: Executive KPIs ---
+  let sectionIdx = 1;
+  drawSectionHeading(sectionIdx++, 'Indicadores Consolidados de Rendimento');
 
-  // Filtered Study Time Section
-  if (params.filteredStudySummary) {
-    ctx.ensureSpace(22);
+  ctx.ensureSpace(22);
+  const kpiGap = 3;
+  const kpiW = (maxWidth - kpiGap * 3) / 4;
+  const kpis: Array<{ label: string; value: string; note: string; accent: [number, number, number] }> = [
+    {
+      label: 'QUESTOES RESPONDIDAS',
+      value: params.totalAnswered.toLocaleString('pt-BR'),
+      note: `${params.totalCorrect} acertos / ${params.totalWrong} erros`,
+      accent: [7, 29, 65],
+    },
+    {
+      label: 'APROVEITAMENTO GERAL',
+      value: `${params.accuracy}%`,
+      note: params.accuracy >= 80 ? 'Acima da meta (80%)' : 'Meta institucional: 80%',
+      accent: params.accuracy >= 80 ? [22, 136, 33] : [19, 81, 180],
+    },
+    {
+      label: 'SIMULADOS CONCLUIDOS',
+      value: String(params.completedSimulationsCount),
+      note: 'Boletim de Ocorrencias',
+      accent: [19, 81, 180],
+    },
+    {
+      label: 'TEMPO CRONOMETRADO',
+      value: params.totalStudyFormatted,
+      note: 'Ponto Eletronico liquido',
+      accent: [7, 29, 65],
+    },
+  ];
+
+  kpis.forEach((kpi, idx) => {
+    const x = margin + idx * (kpiW + kpiGap);
+    doc.setFillColor(255, 255, 255);
+    doc.setDrawColor(182, 198, 220);
+    doc.rect(x, ctx.y - 2, kpiW, 18, 'FD');
+    doc.setFillColor(...kpi.accent);
+    doc.rect(x, ctx.y - 2, kpiW, 1.4, 'F');
+
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(20, 20, 20);
-    doc.text('Tempo Estudado no Filtro Selecionado', margin, ctx.y);
-    ctx.y += 5.5;
+    doc.setFontSize(6.8);
+    doc.setTextColor(92, 110, 138);
+    doc.text(kpi.label, x + 2.5, ctx.y + 3);
+
+    doc.setFontSize(12.5);
+    doc.setTextColor(...kpi.accent);
+    doc.text(safePdfText(kpi.value), x + 2.5, ctx.y + 10);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(40, 40, 40);
+    doc.setFontSize(7);
+    doc.setTextColor(61, 79, 107);
+    doc.text(safePdfText(doc.splitTextToSize(kpi.note, kpiW - 5)[0]), x + 2.5, ctx.y + 14.2);
+  });
+  ctx.y += 22;
+
+  // --- Section 2: Captured D3 Charts ---
+  if (params.charts && params.charts.length > 0) {
+    drawSectionHeading(sectionIdx++, 'Paineis Graficos Analiticos (D3.js)');
+
+    params.charts.forEach((chart, idx) => {
+      const boxPadX = 3;
+      const headerH = chart.subtitle ? 11.5 : 7.5;
+      const availW = maxWidth - boxPadX * 2;
+      const aspect = chart.widthPx > 0 ? chart.heightPx / chart.widthPx : 0.45;
+      let renderW = availW;
+      let renderH = renderW * aspect;
+      const maxChartH = 82;
+      if (renderH > maxChartH) {
+        renderH = maxChartH;
+        renderW = renderH / aspect;
+      }
+
+      const cardH = headerH + renderH + 5;
+      ctx.ensureSpace(cardH + 4);
+
+      const cardTop = ctx.y - 2;
+      doc.setFillColor(255, 255, 255);
+      doc.setDrawColor(182, 198, 220);
+      doc.rect(margin, cardTop, maxWidth, cardH, 'FD');
+
+      doc.setFillColor(247, 249, 252);
+      doc.setDrawColor(214, 224, 236);
+      doc.rect(margin, cardTop, maxWidth, headerH, 'FD');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.8);
+      doc.setTextColor(7, 29, 65);
+      doc.text(
+        safePdfText(`Grafico ${idx + 1} · ${chart.title}`),
+        margin + 3,
+        cardTop + 4.8,
+      );
+
+      if (chart.subtitle) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.4);
+        doc.setTextColor(61, 79, 107);
+        const subLine = doc.splitTextToSize(safePdfText(chart.subtitle), maxWidth - 6)[0];
+        doc.text(subLine, margin + 3, cardTop + 9.4);
+      }
+
+      const imgX = margin + (maxWidth - renderW) / 2;
+      const imgY = cardTop + headerH + 2.2;
+      doc.addImage(chart.dataUrl, 'PNG', imgX, imgY, renderW, renderH, undefined, 'FAST');
+
+      ctx.y = cardTop + cardH + 4.5;
+    });
+  }
+
+  // --- Section 3: Subject Breakdown Table ---
+  if (params.subjectRows.length > 0) {
+    drawSectionHeading(sectionIdx++, 'Desempenho Detalhado por Disciplina');
+
+    const drawSubjectTableHeader = () => {
+      ctx.ensureSpace(12);
+      doc.setFillColor(7, 29, 65);
+      doc.rect(margin, ctx.y - 4.2, maxWidth, 6.8, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.8);
+      doc.setTextColor(255, 255, 255);
+      doc.text('DISCIPLINA / MATERIA', margin + 2.5, ctx.y + 0.4);
+      doc.text('QUESTOES', margin + maxWidth * 0.54, ctx.y + 0.4, { align: 'right' });
+      doc.text('ACERTOS', margin + maxWidth * 0.66, ctx.y + 0.4, { align: 'right' });
+      doc.text('ERROS', margin + maxWidth * 0.76, ctx.y + 0.4, { align: 'right' });
+      doc.text('TAXA', margin + maxWidth * 0.87, ctx.y + 0.4, { align: 'right' });
+      doc.text('TEMPO', margin + maxWidth - 2.5, ctx.y + 0.4, { align: 'right' });
+      ctx.y += 5.5;
+    };
+
+    drawSubjectTableHeader();
+
+    params.subjectRows.forEach((row, idx) => {
+      if (ctx.y + 7 > ctx.pageHeight - 16) {
+        ctx.doc.addPage();
+        ctx.y = 18;
+        drawSubjectTableHeader();
+      }
+      const pct = row.answered ? Math.round((row.correct / row.answered) * 100) : 0;
+      const wrong = Math.max(0, row.answered - row.correct);
+
+      if (idx % 2 === 1) {
+        doc.setFillColor(247, 249, 252);
+        doc.rect(margin, ctx.y - 3.8, maxWidth, 6, 'F');
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, ctx.y + 2.2, margin + maxWidth, ctx.y + 2.2);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.3);
+      doc.setTextColor(7, 29, 65);
+      const subjLabel = doc.splitTextToSize(safePdfText(visibleName(row.subject)), maxWidth * 0.44)[0];
+      doc.text(subjLabel, margin + 2.5, ctx.y);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(61, 79, 107);
+      doc.text(String(row.answered), margin + maxWidth * 0.54, ctx.y, { align: 'right' });
+      doc.text(String(row.correct), margin + maxWidth * 0.66, ctx.y, { align: 'right' });
+      doc.text(String(wrong), margin + maxWidth * 0.76, ctx.y, { align: 'right' });
+
+      doc.setFont('helvetica', 'bold');
+      if (pct >= 80) doc.setTextColor(22, 136, 33);
+      else if (pct >= 60) doc.setTextColor(19, 81, 180);
+      else doc.setTextColor(201, 42, 42);
+      doc.text(`${pct}%`, margin + maxWidth * 0.87, ctx.y, { align: 'right' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(7, 29, 65);
+      doc.text(safePdfText(params.formatDuration(row.studySeconds)), margin + maxWidth - 2.5, ctx.y, {
+        align: 'right',
+      });
+      ctx.y += 6;
+    });
+    ctx.y += 4;
+  }
+
+  // --- Section 4: Filtered Study Time Breakdown ---
+  if (params.filteredStudySummary) {
+    drawSectionHeading(sectionIdx++, 'Apuracao de Carga Horaria no Periodo Filtrado');
+
+    ctx.ensureSpace(14);
+    doc.setFillColor(247, 249, 252);
+    doc.setDrawColor(182, 198, 220);
+    doc.rect(margin, ctx.y - 3, maxWidth, 9.5, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.8);
+    doc.setTextColor(7, 29, 65);
     doc.text(
       safePdfText(
-        `Total no filtro: ${params.filteredStudySummary.totalFormatted} · Media/dia ativo: ${params.filteredStudySummary.avgFormatted} · ${params.filteredStudySummary.activeDays} dia(s) · ${params.filteredStudySummary.sessionsCount} sessao(oes)`,
+        `Total acumulado: ${params.filteredStudySummary.totalFormatted}   ·   Media/dia ativo: ${params.filteredStudySummary.avgFormatted}   ·   ${params.filteredStudySummary.activeDays} dia(s) ativo(s)   ·   ${params.filteredStudySummary.sessionsCount} sessao(oes)`,
       ),
-      margin,
-      ctx.y,
+      margin + 3,
+      ctx.y + 2.5,
     );
-    ctx.y += 6;
+    ctx.y += 11;
 
     if (params.filteredStudyByDate && params.filteredStudyByDate.length > 0) {
-      params.filteredStudyByDate.slice(0, 20).forEach((dRow) => {
+      params.filteredStudyByDate.slice(0, 20).forEach((dRow, idx) => {
         const [yy, mm, dd] = /^\d{4}-\d{2}-\d{2}$/.test(dRow.date) ? dRow.date.split('-') : ['', '', ''];
         const brDate = yy ? `${dd}/${mm}/${yy}` : dRow.date;
         const subjectsText = Object.entries(dRow.subjects)
           .map(([subj, sec]) => `${visibleName(subj)} (${params.formatDuration(sec)})`)
           .join(', ');
-        ctx.ensureSpace(8);
+        ctx.ensureSpace(7);
+        if (idx % 2 === 1) {
+          doc.setFillColor(247, 249, 252);
+          doc.rect(margin, ctx.y - 3.6, maxWidth, 5.4, 'F');
+        }
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(9);
-        doc.setTextColor(35, 35, 35);
+        doc.setFontSize(8.2);
+        doc.setTextColor(7, 29, 65);
         ctx.writeWrapped(
-          `${brDate} (${dRow.day}) — ${params.formatDuration(dRow.seconds)}${subjectsText ? ` · ${subjectsText}` : ''}`,
+          `${brDate} (${dRow.day}) - ${params.formatDuration(dRow.seconds)}${subjectsText ? ` · ${subjectsText}` : ''}`,
           4.6,
         );
       });
@@ -703,108 +914,76 @@ export function exportPerformanceReportPdf(params: {
     }
   }
 
-  // Subject Breakdown
-  if (params.subjectRows.length > 0) {
-    ctx.ensureSpace(16);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(20, 20, 20);
-    doc.text('Desempenho por Disciplina', margin, ctx.y);
-    ctx.y += 6;
-
-    params.subjectRows.forEach((row) => {
-      const pct = row.answered ? Math.round((row.correct / row.answered) * 100) : 0;
-      const wrong = Math.max(0, row.answered - row.correct);
-      ctx.ensureSpace(10);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9.5);
-      doc.setTextColor(30, 30, 30);
-      doc.text(
-        safePdfText(
-          `${visibleName(row.subject)} — ${pct}% (${row.correct} acertos / ${wrong} erros / ${row.answered} total) · Tempo: ${params.formatDuration(row.studySeconds)}`,
-        ),
-        margin,
-        ctx.y,
-      );
-      ctx.y += 5;
-    });
-    ctx.y += 4;
-  }
-
-  // 14-day Evolution
+  // --- Section 5: 14-day Evolution ---
   if (params.dailySeries && params.dailySeries.length > 0) {
     const activeDays = params.dailySeries.filter((d) => d.answered > 0 || d.simulations > 0 || d.studySeconds > 0);
     if (activeDays.length > 0) {
-      ctx.ensureSpace(16);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(12);
-      doc.setTextColor(20, 20, 20);
-      doc.text('Evolucao dos Ultimos 14 Dias', margin, ctx.y);
-      ctx.y += 6;
+      drawSectionHeading(sectionIdx++, 'Registro Diario dos Ultimos 14 Dias');
 
-      activeDays.forEach((day) => {
+      activeDays.forEach((day, idx) => {
         const pct = day.answered ? Math.round((day.correct / day.answered) * 100) : 0;
         const simLabel = day.simulations > 0 ? ` · ${day.simulations} simulado(s)` : '';
-        ctx.ensureSpace(8);
+        ctx.ensureSpace(7);
+        if (idx % 2 === 1) {
+          doc.setFillColor(247, 249, 252);
+          doc.rect(margin, ctx.y - 3.6, maxWidth, 5, 'F');
+        }
         doc.setFont('helvetica', 'normal');
-        doc.setFontSize(9.2);
-        doc.setTextColor(35, 35, 35);
+        doc.setFontSize(8.5);
+        doc.setTextColor(35, 45, 65);
         doc.text(
           safePdfText(
             `${day.label}: ${day.answered} questoes (${day.correct} acertos / ${day.wrong} erros · ${pct}%)${simLabel} · Tempo: ${params.formatDuration(day.studySeconds)}`,
           ),
-          margin,
+          margin + 2,
           ctx.y,
         );
-        ctx.y += 4.8;
+        ctx.y += 5;
       });
-      ctx.y += 4;
+      ctx.y += 3;
     }
   }
 
-  // Bank Breakdown
+  // --- Section 6: Bank Breakdown & Recent Simulations ---
   if (params.bankRows.length > 0) {
-    ctx.ensureSpace(16);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(20, 20, 20);
-    doc.text('Aproveitamento por Banca', margin, ctx.y);
-    ctx.y += 6;
+    drawSectionHeading(sectionIdx++, 'Aproveitamento Consolidado por Banca');
 
-    params.bankRows.forEach((b) => {
-      ctx.ensureSpace(9);
+    params.bankRows.forEach((b, idx) => {
+      ctx.ensureSpace(7);
+      if (idx % 2 === 1) {
+        doc.setFillColor(247, 249, 252);
+        doc.rect(margin, ctx.y - 3.6, maxWidth, 5.4, 'F');
+      }
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.5);
+      doc.setTextColor(7, 29, 65);
+      doc.text(safePdfText(b.bank), margin + 2, ctx.y);
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.5);
-      doc.setTextColor(35, 35, 35);
+      doc.setTextColor(61, 79, 107);
       doc.text(
-        safePdfText(`${b.bank}: ${b.accuracy}% (${b.correct}/${b.totalQuestions} questoes em ${b.simulations} simulado(s))`),
-        margin,
+        safePdfText(`${b.accuracy}% (${b.correct}/${b.totalQuestions} questoes em ${b.simulations} simulado(s))`),
+        margin + maxWidth - 2,
         ctx.y,
+        { align: 'right' },
       );
-      ctx.y += 5.2;
+      ctx.y += 5.4;
     });
-    ctx.y += 4;
+    ctx.y += 3;
   }
 
-  // Recent Simulations
   if (params.recentSimulations.length > 0) {
-    ctx.ensureSpace(18);
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(12);
-    doc.setTextColor(20, 20, 20);
-    doc.text('Historico Recente de Simulados', margin, ctx.y);
-    ctx.y += 6;
+    drawSectionHeading(sectionIdx++, 'Boletim de Ocorrencias (Simulados Recentes)');
 
     params.recentSimulations.slice(0, 15).forEach((sim, idx) => {
-      ctx.ensureSpace(12);
+      ctx.ensureSpace(10);
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(9.5);
-      doc.setTextColor(30, 30, 30);
+      doc.setFontSize(8.6);
+      doc.setTextColor(7, 29, 65);
       const bankTag = sim.banca ? ` [${sim.banca}]` : '';
       const ptsTag = typeof sim.pontos_liquidos === 'number' ? ` · Liquidos: ${sim.pontos_liquidos}` : '';
       ctx.writeWrapped(
-        `${idx + 1}. ${sim.titulo}${bankTag} (${sim.data}) — ${sim.acertos}/${sim.total} (${sim.aproveitamento}%)${ptsTag}`,
-        5,
+        `${idx + 1}. ${sim.titulo}${bankTag} (${sim.data}) - ${sim.acertos}/${sim.total} (${sim.aproveitamento}%)${ptsTag}`,
+        4.8,
       );
     });
   }
@@ -812,18 +991,26 @@ export function exportPerformanceReportPdf(params: {
   const totalPages = doc.getNumberOfPages();
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
+    doc.setDrawColor(214, 224, 236);
+    doc.setLineWidth(0.3);
+    doc.line(margin, 285, margin + maxWidth, 285);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8);
-    doc.setTextColor(140, 140, 140);
+    doc.setFontSize(7.8);
+    doc.setTextColor(92, 110, 138);
     doc.text(
-      safePdfText(`Central de Estudos · Relatorio de Desempenho · Pagina ${p} de ${totalPages}`),
-      pageWidth / 2,
-      290,
-      { align: 'center' },
+      safePdfText(`estuda.gov.br · Portal da Transparencia Estudantil · Protocolo ${protocolNumber}`),
+      margin,
+      289.5,
+    );
+    doc.text(
+      safePdfText(`Pagina ${p} de ${totalPages}`),
+      margin + maxWidth,
+      289.5,
+      { align: 'right' },
     );
   }
 
-  doc.save(`relatorio_desempenho_${localDateIso()}.pdf`);
+  doc.save(`relatorio_oficial_desempenho_${localDateIso()}.pdf`);
 }
 
 export interface StudentCertificateParams {

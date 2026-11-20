@@ -66,7 +66,7 @@ export const GovFederalBar: React.FC<GovFederalBarProps> = ({ insideApp = false 
   };
 
   return (
-    <div className="w-full bg-[#071D41] text-white shrink-0">
+    <div data-print-hide="true" className="w-full bg-[#071D41] text-white shrink-0 print:hidden">
       <div className="max-w-[1440px] mx-auto px-3 sm:px-7 min-h-[34px] py-1.5 flex flex-wrap items-center justify-between gap-x-3 gap-y-1.5 text-[11px]">
         <div className="flex items-center gap-2 sm:gap-2.5 shrink-0">
           <span className="inline-flex items-center gap-1.5 font-display font-extrabold tracking-[0.06em] uppercase whitespace-nowrap shrink-0">

@@ -30,12 +30,8 @@ export const TopModuleNav: React.FC = () => {
                   : 'border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] font-medium hover:border-[var(--line-strong)] hover:text-[var(--text)]'
               }`}
             >
-              <span
-                className={`grid place-items-center w-6 h-6 shrink-0 rounded-[6px] ${
-                  isActive ? 'ring-1 ring-[#D4AF37]' : ''
-                }`}
-              >
-                <ModuleIcon name={mod.icon} className="w-6 h-6 rounded-[6px]" />
+              <span className="grid place-items-center w-5 h-5 shrink-0">
+                <ModuleIcon name={mod.icon} className="w-[18px] h-[18px] shrink-0" />
               </span>
               <span className="truncate">{getGovModuleLabel(mod.name)}</span>
             </button>

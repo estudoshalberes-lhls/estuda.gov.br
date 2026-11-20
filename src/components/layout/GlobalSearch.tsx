@@ -128,7 +128,7 @@ export const GlobalSearch: React.FC = () => {
         subtitle: info.desc,
         meta: displayLabel !== mod.name ? mod.name : 'Módulo',
         keywords: `${displayLabel} ${mod.name} ${info.desc} ${info.keywords}`,
-        icon: <ModuleIcon name={mod.icon} className="w-6 h-6 rounded-[6px]" />,
+        icon: <ModuleIcon name={mod.icon} className="w-[18px] h-[18px] shrink-0" />,
         onSelect: () => {
           setActivePage(mod.name);
           closeSearch();

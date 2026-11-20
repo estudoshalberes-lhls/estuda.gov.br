@@ -32,8 +32,9 @@ export const MobileTimerFloat: React.FC = React.memo(() => {
 
   return (
     <aside
+      data-print-hide="true"
       aria-label="Controle flutuante do Ponto Eletrônico"
-      className="fixed bottom-3 left-3 right-[76px] z-35 min-[721px]:hidden rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] px-3 py-2 shadow-lg flex items-center justify-between gap-2"
+      className="fixed bottom-3 left-3 right-[76px] z-35 min-[721px]:hidden rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] px-3 py-2 shadow-lg flex items-center justify-between gap-2 print:hidden"
     >
       <div className="min-w-0 flex items-center gap-2">
         <span

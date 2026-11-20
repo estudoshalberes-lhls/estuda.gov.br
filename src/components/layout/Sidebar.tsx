@@ -170,7 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                       : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
                   }`}
                 >
-                  <ModuleIcon name={mod.icon} className="w-7 h-7 rounded-[7px]" />
+                  <ModuleIcon name={mod.icon} className="w-5 h-5 shrink-0" />
                   <span className="text-[10.5px] leading-tight font-bold line-clamp-1 w-full">
                     {getGovModuleLabel(mod.name)}
                   </span>
@@ -207,11 +207,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                     }`}
                   >
                     <span
-                      className={`nav-icon grid place-items-center w-6 h-6 shrink-0 rounded-[6px] transition-all ${
-                        isActive ? 'ring-1 ring-[#D4AF37]' : 'group-hover:scale-[1.04]'
+                      className={`nav-icon grid place-items-center w-5 h-5 shrink-0 transition-transform ${
+                        isActive ? 'opacity-100' : 'opacity-85 group-hover:opacity-100'
                       }`}
                     >
-                      <ModuleIcon name={mod.icon} className="w-6 h-6 rounded-[6px]" />
+                      <ModuleIcon name={mod.icon} className="w-[18px] h-[18px] shrink-0" />
                     </span>
                     <span className="nav-label truncate">{displayLabel}</span>
                   </button>
@@ -237,11 +237,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
           }`}
         >
           <span
-            className={`nav-icon grid place-items-center w-6 h-6 shrink-0 rounded-[6px] ${
-              activePage === 'Configurações' ? 'ring-1 ring-[#D4AF37]' : ''
+            className={`nav-icon grid place-items-center w-5 h-5 shrink-0 ${
+              activePage === 'Configurações' ? 'opacity-100' : 'opacity-85'
             }`}
           >
-            <ModuleIcon name="settings" className="w-6 h-6 rounded-[6px]" />
+            <ModuleIcon name="settings" className="w-[18px] h-[18px] shrink-0" />
           </span>
           <span className="nav-label truncate">{getGovModuleLabel('Configurações')}</span>
         </button>
