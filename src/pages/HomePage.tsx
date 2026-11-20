@@ -1172,9 +1172,7 @@ export const HomePage: React.FC = () => {
               onClick={() => setActivePage(item.page)}
               className="group flex items-center gap-3.5 p-4 rounded-xl border border-[var(--line)] bg-[var(--panel)] text-left hover:border-[var(--accent)] transition-colors cursor-pointer"
             >
-              <span className="grid place-items-center w-10 h-10 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--accent)] shrink-0">
-                <ModuleIcon name={item.icon} />
-              </span>
+              <ModuleIcon name={item.icon} className="w-11 h-11 rounded-[10px] shrink-0" />
               <span className="min-w-0 flex-1">
                 <strong className="block text-[13.5px] font-bold text-[var(--text)] group-hover:text-[var(--accent)] transition-colors truncate">
                   {getGovModuleLabel(item.page)}

@@ -139,7 +139,11 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         {!examFocusMode && <TopModuleNav />}
 
         <section
-          className="flex-1 w-full max-w-[1440px] mx-auto px-4 sm:px-7 py-5 sm:py-6"
+          className={`flex-1 w-full mx-auto ${
+            examFocusMode
+              ? 'max-w-[1600px] px-3 sm:px-6 py-3 sm:py-4'
+              : 'max-w-[1440px] px-4 sm:px-7 py-5 sm:py-6'
+          }`}
           id="page-content"
         >
           <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>

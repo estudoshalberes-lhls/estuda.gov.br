@@ -107,7 +107,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
             estuda.gov.br
           </strong>
           <small className="block text-[10px] font-semibold text-[var(--muted)] mt-0.5 truncate">
-            Programa do Estudante
+            Portal Único do Estudante
           </small>
         </span>
       </button>
@@ -170,9 +170,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                       : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
                   }`}
                 >
-                  <span className="text-[var(--accent)]">
-                    <ModuleIcon name={mod.icon} />
-                  </span>
+                  <ModuleIcon name={mod.icon} className="w-7 h-7 rounded-[7px]" />
                   <span className="text-[10.5px] leading-tight font-bold line-clamp-1 w-full">
                     {getGovModuleLabel(mod.name)}
                   </span>
@@ -209,11 +207,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                     }`}
                   >
                     <span
-                      className={`nav-icon grid place-items-center w-5 h-5 shrink-0 transition-colors ${
-                        isActive ? 'text-[var(--accent)]' : 'text-[var(--subtle)] group-hover:text-[var(--text)]'
+                      className={`nav-icon grid place-items-center w-6 h-6 shrink-0 rounded-[6px] transition-all ${
+                        isActive ? 'ring-1 ring-[#D4AF37]' : 'group-hover:scale-[1.04]'
                       }`}
                     >
-                      <ModuleIcon name={mod.icon} />
+                      <ModuleIcon name={mod.icon} className="w-6 h-6 rounded-[6px]" />
                     </span>
                     <span className="nav-label truncate">{displayLabel}</span>
                   </button>
@@ -239,11 +237,11 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
           }`}
         >
           <span
-            className={`nav-icon grid place-items-center w-5 h-5 shrink-0 ${
-              activePage === 'Configurações' ? 'text-[var(--accent)]' : 'text-[var(--muted)]'
+            className={`nav-icon grid place-items-center w-6 h-6 shrink-0 rounded-[6px] ${
+              activePage === 'Configurações' ? 'ring-1 ring-[#D4AF37]' : ''
             }`}
           >
-            <ModuleIcon name="settings" />
+            <ModuleIcon name="settings" className="w-6 h-6 rounded-[6px]" />
           </span>
           <span className="nav-label truncate">{getGovModuleLabel('Configurações')}</span>
         </button>

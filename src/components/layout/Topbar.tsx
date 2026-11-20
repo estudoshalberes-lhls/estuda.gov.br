@@ -241,15 +241,21 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
         >
           <Menu className="w-4 h-4" />
         </button>
-        <div className="min-w-0 hidden sm:flex flex-col justify-center">
-          <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-[0.06em] uppercase text-[var(--accent)] leading-none mb-1">
-            <span>estuda.gov.br</span>
-            <span className="text-[var(--subtle)]">/</span>
-            <span className="text-[var(--muted)] font-semibold">Painel</span>
+        <div className="min-w-0 hidden sm:flex items-center gap-2.5">
+          <ModuleIcon
+            name={MODULES.find((m) => m.name === activePage)?.icon || 'home'}
+            className="w-8 h-8 rounded-lg shadow-xs shrink-0"
+          />
+          <div className="min-w-0 flex flex-col justify-center">
+            <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-[0.06em] uppercase text-[var(--accent)] leading-none mb-1">
+              <span>estuda.gov.br</span>
+              <span className="text-[var(--subtle)]">/</span>
+              <span className="text-[var(--muted)] font-semibold">Portal Único</span>
+            </div>
+            <h1 className="m-0 font-display text-[15px] font-extrabold tracking-[-0.02em] leading-none text-[var(--text)] truncate max-w-[205px]">
+              {getGovModuleLabel(activePage)}
+            </h1>
           </div>
-          <h1 className="m-0 font-display text-[15px] font-extrabold tracking-[-0.02em] leading-none text-[var(--text)] truncate max-w-[205px]">
-            {getGovModuleLabel(activePage)}
-          </h1>
         </div>
       </div>
 
@@ -307,11 +313,11 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
                 aria-label={`Abrir ${displayLabel}`}
                 className={`grid place-items-center w-9 h-full text-[12px] font-bold transition-colors ${
                   isCurrent
-                    ? 'bg-[var(--accent)] text-white'
-                    : 'bg-transparent text-[var(--text)] hover:bg-[var(--accent-soft)] hover:text-[var(--accent)]'
+                    ? 'bg-[#071D41] ring-2 ring-inset ring-[#FFCD07]'
+                    : 'bg-transparent text-[var(--text)] hover:bg-[var(--accent-soft)]'
                 }`}
               >
-                <ModuleIcon name={iconName} className="w-4 h-4 shrink-0" />
+                <ModuleIcon name={iconName} className="w-6 h-6 rounded-[6px] shrink-0" />
               </button>
             );
           })}
@@ -357,7 +363,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
                   >
                     <div className="flex items-center justify-between gap-2 text-[10.5px] font-bold text-[var(--muted)]">
                       <span className="inline-flex items-center gap-1.5">
-                        <ModuleIcon name={slotModule ? slotModule.icon : 'home'} className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                        <ModuleIcon name={slotModule ? slotModule.icon : 'home'} className="w-5 h-5 rounded-[5px] shrink-0" />
                         <span>Atalho #{slotIdx + 1}</span>
                       </span>
                       <button

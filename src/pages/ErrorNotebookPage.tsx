@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import {
   AlertTriangle,
   ArrowLeft,
@@ -29,7 +30,7 @@ import {
 } from '../lib/parsers';
 import { exportErrorNotebookPdf } from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
-import { ErrorNotebookEntry } from '../types/study';
+import { ErrorNotebookEntry, ModuleName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 
@@ -41,6 +42,459 @@ const NOTE_TYPES = [
   'Ponto Importante',
   'Nota Complementar',
 ];
+
+interface EditingErrorEntryState {
+  id: string;
+  materia: string;
+  tipo: string;
+  texto: string;
+  hasQuestion?: boolean;
+  enunciado?: string;
+  gabarito?: string;
+  resposta?: string;
+  comentario?: string;
+}
+
+interface SubjectStatItem {
+  subject: string;
+  wrongQuestions: number;
+  answeredQuestions: number;
+  errorRatePct: number | null;
+  notebookTotal: number;
+  pendingCount: number;
+  notebookSharePct: number;
+}
+
+interface SubjectStatListRowProps {
+  rows: SubjectStatItem[];
+  filterSubject: string;
+  onToggleSubject: (subject: string) => void;
+}
+
+const SubjectStatListRow = React.memo(
+  ({ index, style, ariaAttributes, rows, filterSubject, onToggleSubject }: RowComponentProps<SubjectStatListRowProps>) => {
+    const row = rows[index];
+    if (!row) return null;
+    const isSelected = normalizeSearch(filterSubject) === normalizeSearch(row.subject);
+    const barPercent = row.errorRatePct !== null ? row.errorRatePct : row.notebookSharePct;
+    const barColor =
+      barPercent >= 50
+        ? 'var(--bad)'
+        : barPercent >= 25
+          ? 'var(--warning)'
+          : 'var(--accent)';
+    return (
+      <div style={style} {...ariaAttributes} className="pb-1.5 pr-1">
+        <button
+          type="button"
+          onClick={() => onToggleSubject(row.subject)}
+          className={`w-full text-left rounded-lg border px-3 py-2 transition-colors cursor-pointer ${
+            isSelected
+              ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+              : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
+          }`}
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-mono-num text-[11.5px] font-extrabold text-[var(--muted)] w-6 shrink-0">
+                {index + 1}º
+              </span>
+              <strong className="text-[13px] font-bold text-[var(--text)] truncate">
+                {visibleName(row.subject)}
+              </strong>
+            </div>
+            <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono-num shrink-0">
+              {row.errorRatePct !== null && (
+                <span
+                  className="font-extrabold"
+                  style={{ color: barColor }}
+                  title="Percentual de erros sobre questões respondidas"
+                >
+                  {row.errorRatePct}% de erro ({row.wrongQuestions}/{row.answeredQuestions})
+                </span>
+              )}
+              <span className="text-[var(--muted)]">
+                <strong className="text-[var(--text)]">{row.notebookTotal}</strong>{' '}
+                no caderno ({row.notebookSharePct}%)
+                {row.pendingCount > 0 ? ` · ${row.pendingCount} pend.` : ''}
+              </span>
+            </div>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-[var(--panel-raised)] overflow-hidden">
+            <div
+              className="h-full rounded-full transition-all"
+              style={{
+                width: `${Math.max(4, Math.min(100, barPercent))}%`,
+                backgroundColor: barColor,
+              }}
+            />
+          </div>
+        </button>
+      </div>
+    );
+  },
+) as (props: RowComponentProps<SubjectStatListRowProps>) => React.ReactElement | null;
+
+function formatBrDateStr(iso?: string): string {
+  if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso || '';
+  const [y, m, d] = iso.split('-');
+  return `${d}/${m}/${y}`;
+}
+
+interface ErrorNotebookRowProps {
+  entries: ErrorNotebookEntry[];
+  registeredSubjects: string[];
+  todayIso: string;
+  editingEntry: EditingErrorEntryState | null;
+  setEditingEntry: React.Dispatch<React.SetStateAction<EditingErrorEntryState | null>>;
+  flushEditingDraft: (silent?: boolean) => void;
+  handleSaveEdit: (entry: ErrorNotebookEntry) => void;
+  updateErrorEntrySubject: (id: string, subject: string) => void;
+  markAnnotationCorrected: (id: string) => void;
+  advanceErrorReview: (id: string) => void;
+  reopenAnnotation: (id: string) => void;
+  deleteAnnotation: (id: string) => void;
+  setActivePage: (page: ModuleName) => void;
+}
+
+const ErrorNotebookEntryRow = React.memo(
+  ({
+    index,
+    style,
+    ariaAttributes,
+    entries,
+    registeredSubjects,
+    todayIso,
+    editingEntry,
+    setEditingEntry,
+    flushEditingDraft,
+    handleSaveEdit,
+    updateErrorEntrySubject,
+    markAnnotationCorrected,
+    advanceErrorReview,
+    reopenAnnotation,
+    deleteAnnotation,
+    setActivePage,
+  }: RowComponentProps<ErrorNotebookRowProps>) => {
+    const entry = entries[index];
+    if (!entry) return null;
+    const isEditing = editingEntry?.id === entry.id;
+    const isCorrected = Boolean(entry.corrigido);
+    const selectedSubjectVal =
+      registeredSubjects.find((s) => normalizeSearch(s) === normalizeSearch(entry.materia)) ||
+      entry.materia;
+    const editingSubjectVal = editingEntry
+      ? registeredSubjects.find(
+          (s) => normalizeSearch(s) === normalizeSearch(editingEntry.materia),
+        ) || editingEntry.materia
+      : '';
+
+    return (
+      <div style={style} {...ariaAttributes} className="pb-3">
+        <Panel>
+          <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
+            <div className="flex flex-wrap items-center gap-2">
+              {isCorrected ? (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--good)] bg-[var(--good)]/15 text-[11px] font-bold text-[var(--good)]">
+                  <CheckCircle2 className="w-3 h-3" />
+                  Já Corrigido {entry.corrigido_em ? `(${entry.corrigido_em})` : ''}
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--warning)] bg-[var(--warning)]/15 text-[11px] font-bold text-[var(--warning)]">
+                  <Clock className="w-3 h-3" />
+                  Pendente de Correção
+                </span>
+              )}
+
+              <span className="px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--accent)]">
+                {visibleName(entry.tipo)}
+              </span>
+              <div className="inline-flex items-center gap-1.5">
+                <span className="text-[11px] font-bold text-[var(--muted)]">Matéria:</span>
+                <select
+                  aria-label={`Atribuir matéria fixada à questão ${entry.id}`}
+                  value={selectedSubjectVal}
+                  onChange={(e) => updateErrorEntrySubject(entry.id, e.target.value)}
+                  className="ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[12px] font-bold"
+                  title="Alterar matéria da questão usando as mesmas matérias fixadas no cronômetro"
+                >
+                  {!registeredSubjects.some(
+                    (s) => normalizeSearch(s) === normalizeSearch(selectedSubjectVal),
+                  ) &&
+                    selectedSubjectVal && (
+                      <option value={selectedSubjectVal}>{visibleName(selectedSubjectVal)}</option>
+                    )}
+                  {registeredSubjects.map((subj) => (
+                    <option key={subj} value={subj}>
+                      {subj}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              {entry.origem && (
+                <span className="px-2 py-0.5 rounded-md border border-[var(--line)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)]">
+                  Origem: {entry.origem}
+                </span>
+              )}
+              <span className="text-[11.5px] text-[var(--muted)] font-mono-num">
+                · {entry.data}
+              </span>
+              {entry.proxima_revisao && (
+                <span
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-bold ${
+                    entry.proxima_revisao <= todayIso
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)]'
+                  }`}
+                >
+                  <CalendarClock className="w-3 h-3" />
+                  {entry.proxima_revisao <= todayIso
+                    ? `Revisar hoje (Nível ${entry.nivel_revisao ?? 1})`
+                    : `Próx. revisão: ${formatBrDateStr(entry.proxima_revisao)} (Nível ${entry.nivel_revisao ?? 1})`}
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+              {!isCorrected ? (
+                <button
+                  type="button"
+                  onClick={() => markAnnotationCorrected(entry.id)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 transition-opacity shadow-xs"
+                  title="Marcar como revisado e agendar revisão espaçada (+1 dia)"
+                >
+                  <Check className="w-3.5 h-3.5" />
+                  Marcar como Corrigido
+                </button>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => advanceErrorReview(entry.id)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11.5px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors"
+                    title="Registrar revisão concluída e avançar intervalo (1d → 7d → 15d → 30d)"
+                  >
+                    <CalendarClock className="w-3.5 h-3.5" />
+                    Concluir revisão
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => reopenAnnotation(entry.id)}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors"
+                    title="Reabrir questão para Pendentes de Correção"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Reabrir
+                  </button>
+                </>
+              )}
+
+              {entry.correcao_prova && (
+                <button
+                  type="button"
+                  onClick={() => setActivePage('Provas')}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                >
+                  <ExternalLink className="w-3 h-3" />
+                  Ver em Provas
+                </button>
+              )}
+
+              <button
+                type="button"
+                onClick={() => {
+                  if (isEditing) {
+                    flushEditingDraft(true);
+                    setEditingEntry(null);
+                    return;
+                  }
+                  const savedDraft = readFieldDraft<EditingErrorEntryState>(
+                    `error_notebook_edit_${entry.id}`,
+                  );
+                  setEditingEntry(
+                    savedDraft || {
+                      id: entry.id,
+                      materia: selectedSubjectVal,
+                      tipo: entry.tipo,
+                      texto: entry.texto,
+                      hasQuestion: Boolean(entry.questao),
+                      enunciado: entry.questao?.enunciado ?? '',
+                      gabarito: entry.questao?.gabarito ?? '',
+                      resposta: entry.questao?.resposta ?? '',
+                      comentario: entry.questao?.comentario ?? '',
+                    },
+                  );
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+              >
+                <Pencil className="w-3 h-3" />
+                {isEditing ? 'Fechar' : 'Editar'}
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteAnnotation(entry.id)}
+                aria-label="Excluir anotação"
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap"
+              >
+                <Trash2 className="w-3 h-3" />
+                Excluir
+              </button>
+            </div>
+          </div>
+
+          {isEditing && editingEntry ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2 pt-2 border-t border-[var(--line)]">
+              <select
+                aria-label="Matéria da anotação"
+                value={editingSubjectVal}
+                onChange={(e) => setEditingEntry({ ...editingEntry, materia: e.target.value })}
+                className="ce-select"
+              >
+                {!registeredSubjects.some(
+                  (s) => normalizeSearch(s) === normalizeSearch(editingSubjectVal),
+                ) &&
+                  editingSubjectVal && (
+                    <option value={editingSubjectVal}>{visibleName(editingSubjectVal)}</option>
+                  )}
+                {registeredSubjects.map((subj) => (
+                  <option key={subj} value={subj}>
+                    {subj}
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                value={editingEntry.tipo}
+                onChange={(e) => setEditingEntry({ ...editingEntry, tipo: e.target.value })}
+                placeholder="Tipo de apontamento"
+                className="ce-input"
+              />
+              <div className="sm:col-span-2">
+                <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                  Anotação / Correção
+                </label>
+                <textarea
+                  value={editingEntry.texto}
+                  onChange={(e) => setEditingEntry({ ...editingEntry, texto: e.target.value })}
+                  onBlur={() => flushEditingDraft(true)}
+                  rows={3}
+                  className="ce-textarea"
+                />
+              </div>
+              {entry.questao && (
+                <>
+                  <div className="sm:col-span-2">
+                    <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                      Enunciado / Questão vinculada
+                    </label>
+                    <textarea
+                      value={editingEntry.enunciado ?? ''}
+                      onChange={(e) =>
+                        setEditingEntry({ ...editingEntry, enunciado: e.target.value })
+                      }
+                      onBlur={() => flushEditingDraft(true)}
+                      rows={2}
+                      className="ce-textarea"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                      Alternativa marcada
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEntry.resposta ?? ''}
+                      onChange={(e) =>
+                        setEditingEntry({ ...editingEntry, resposta: e.target.value })
+                      }
+                      onBlur={() => flushEditingDraft(true)}
+                      placeholder="Ex.: C, E, A..."
+                      className="ce-input"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                      Gabarito oficial
+                    </label>
+                    <input
+                      type="text"
+                      value={editingEntry.gabarito ?? ''}
+                      onChange={(e) =>
+                        setEditingEntry({ ...editingEntry, gabarito: e.target.value })
+                      }
+                      onBlur={() => flushEditingDraft(true)}
+                      placeholder="Ex.: C, E, A..."
+                      className="ce-input"
+                    />
+                  </div>
+                </>
+              )}
+              <div className="sm:col-span-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    clearFieldDraft(`error_notebook_edit_${entry.id}`);
+                    setEditingEntry(null);
+                  }}
+                  className="px-3.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-bold hover:text-[var(--text)] whitespace-nowrap"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSaveEdit(entry)}
+                  className="px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
+                >
+                  Salvar alterações
+                </button>
+              </div>
+            </div>
+          ) : (
+            <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
+              {entry.texto}
+            </p>
+          )}
+
+          {entry.questao && (
+            <details className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-3">
+              <summary className="text-[12px] font-bold text-[var(--muted)] cursor-pointer select-none">
+                Ver questão vinculada
+                {entry.arquivo_prova ? ` (${visibleName(entry.arquivo_prova)})` : ''}
+              </summary>
+              <div className="mt-2 pt-2 border-t border-[var(--line)] text-[12.5px] leading-relaxed text-[var(--text)]">
+                <p className="m-0 whitespace-pre-wrap">{entry.questao.enunciado}</p>
+                {entry.questao.alternativas?.length > 0 && (
+                  <div className="mt-2 flex flex-col gap-1 text-[var(--muted)]">
+                    {entry.questao.alternativas.map((alt) => (
+                      <span key={alt.letra}>
+                        <strong className="text-[var(--text)]">[{alt.letra}]</strong> {alt.texto}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {(entry.questao.resposta || entry.questao.gabarito) && (
+                  <div className="mt-2 text-[12px] text-[var(--muted)]">
+                    {entry.questao.resposta && (
+                      <>
+                        Marcada: <strong className="text-[var(--bad)]">{entry.questao.resposta}</strong>
+                        {' · '}
+                      </>
+                    )}
+                    {entry.questao.gabarito && (
+                      <>
+                        Gabarito: <strong className="text-[var(--good)]">{entry.questao.gabarito}</strong>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            </details>
+          )}
+        </Panel>
+      </div>
+    );
+  },
+) as (props: RowComponentProps<ErrorNotebookRowProps>) => React.ReactElement | null;
 
 export const ErrorNotebookPage: React.FC = () => {
   const {
@@ -87,7 +541,6 @@ export const ErrorNotebookPage: React.FC = () => {
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
   const [filterStatus, setFilterStatus] = useState<'pending' | 'corrected' | 'all'>('pending');
   const [search, setSearch] = useState('');
-  const [visibleEntryLimit, setVisibleEntryLimit] = useState<number>(35);
   const [flashcardMode, setFlashcardMode] = useState(false);
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardRevealed, setFlashcardRevealed] = useState(false);
@@ -100,17 +553,7 @@ export const ErrorNotebookPage: React.FC = () => {
   const [statsSortBy, setStatsSortBy] = useState<'rate' | 'count'>('rate');
   const [paretoMode, setParetoMode] = useState<'notebook' | 'wrong_questions' | 'by_type'>('notebook');
 
-  const [editingEntry, setEditingEntry] = useState<{
-    id: string;
-    materia: string;
-    tipo: string;
-    texto: string;
-    hasQuestion?: boolean;
-    enunciado?: string;
-    gabarito?: string;
-    resposta?: string;
-    comentario?: string;
-  } | null>(null);
+  const [editingEntry, setEditingEntry] = useState<EditingErrorEntryState | null>(null);
   const editingEntryRef = useRef(editingEntry);
   editingEntryRef.current = editingEntry;
   const allErrorEntriesRef = useRef(allErrorEntries);
@@ -125,10 +568,6 @@ export const ErrorNotebookPage: React.FC = () => {
   const correctedCount = useMemo(() => {
     return allErrorEntries.filter((e) => Boolean(e.corrigido)).length;
   }, [allErrorEntries]);
-
-  useEffect(() => {
-    setVisibleEntryLimit(35);
-  }, [filterSubject, filterMode, filterStatus, search]);
 
   // Same registered subjects used in Cronômetro / Cronograma / Utilidades
   const registeredSubjects = useMemo(() => {
@@ -438,25 +877,29 @@ export const ErrorNotebookPage: React.FC = () => {
     };
   }, [flushEditingDraft]);
 
-  const handleSaveEdit = (entry: ErrorNotebookEntry) => {
-    if (!editingEntry || editingEntry.id !== entry.id) return;
-    updateAnnotation(
-      entry.id,
-      editingEntry.materia,
-      editingEntry.tipo,
-      editingEntry.texto,
-      entry.questao
-        ? {
-            enunciado: editingEntry.enunciado,
-            gabarito: editingEntry.gabarito,
-            resposta: editingEntry.resposta,
-            comentario: editingEntry.comentario,
-          }
-        : undefined,
-    );
-    clearFieldDraft(`error_notebook_edit_${entry.id}`);
-    setEditingEntry(null);
-  };
+  const handleSaveEdit = useCallback(
+    (entry: ErrorNotebookEntry) => {
+      const current = editingEntryRef.current;
+      if (!current || current.id !== entry.id) return;
+      updateAnnotation(
+        entry.id,
+        current.materia,
+        current.tipo,
+        current.texto,
+        entry.questao
+          ? {
+              enunciado: current.enunciado,
+              gabarito: current.gabarito,
+              resposta: current.resposta,
+              comentario: current.comentario,
+            }
+          : undefined,
+      );
+      clearFieldDraft(`error_notebook_edit_${entry.id}`);
+      setEditingEntry(null);
+    },
+    [updateAnnotation],
+  );
 
   const linkedQuestionsCount = useMemo(
     () => filteredEntries.filter((e) => Boolean(e.questao?.enunciado)).length,
@@ -476,11 +919,77 @@ export const ErrorNotebookPage: React.FC = () => {
     : 0;
   const activeFlashcard = filteredEntries[safeFlashcardIdx];
 
-  const formatBrDate = (iso?: string) => {
-    if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso || '';
-    const [y, m, d] = iso.split('-');
-    return `${d}/${m}/${y}`;
-  };
+  const handleToggleStatsSubject = useCallback((subject: string) => {
+    setFilterSubject((prev) =>
+      normalizeSearch(prev) === normalizeSearch(subject) ? 'Todas as Matérias' : subject,
+    );
+  }, []);
+
+  const displayedStatsRows = useMemo(
+    () => (statsShowAll ? subjectErrorStats.rows : subjectErrorStats.rows.slice(0, 5)),
+    [statsShowAll, subjectErrorStats.rows],
+  );
+
+  const statsRowProps = useMemo<SubjectStatListRowProps>(
+    () => ({
+      rows: displayedStatsRows,
+      filterSubject,
+      onToggleSubject: handleToggleStatsSubject,
+    }),
+    [displayedStatsRows, filterSubject, handleToggleStatsSubject],
+  );
+
+  const statsDynamicHeight = useDynamicRowHeight({
+    defaultRowHeight: 62,
+    key: `err-stats-${displayedStatsRows.length}-${statsSortBy}`,
+  });
+
+  const statsRowKey = useCallback(
+    (index: number, data: SubjectStatListRowProps) => data.rows[index]?.subject ?? index,
+    [],
+  );
+
+  const entriesDynamicHeight = useDynamicRowHeight({
+    defaultRowHeight: 220,
+    key: `err-entries-${filterSubject}-${filterMode}-${filterStatus}-${search}`,
+  });
+
+  const entryRowProps = useMemo<ErrorNotebookRowProps>(
+    () => ({
+      entries: filteredEntries,
+      registeredSubjects,
+      todayIso,
+      editingEntry,
+      setEditingEntry,
+      flushEditingDraft,
+      handleSaveEdit,
+      updateErrorEntrySubject,
+      markAnnotationCorrected,
+      advanceErrorReview,
+      reopenAnnotation,
+      deleteAnnotation,
+      setActivePage,
+    }),
+    [
+      filteredEntries,
+      registeredSubjects,
+      todayIso,
+      editingEntry,
+      flushEditingDraft,
+      handleSaveEdit,
+      updateErrorEntrySubject,
+      markAnnotationCorrected,
+      advanceErrorReview,
+      reopenAnnotation,
+      deleteAnnotation,
+      setActivePage,
+    ],
+  );
+
+  const entryRowKey = useCallback(
+    (index: number, data: ErrorNotebookRowProps) => data.entries[index]?.id ?? index,
+    [],
+  );
 
   return (
     <div>
@@ -776,78 +1285,18 @@ export const ErrorNotebookPage: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="flex flex-col gap-1.5">
-                  {(statsShowAll
-                    ? subjectErrorStats.rows
-                    : subjectErrorStats.rows.slice(0, 5)
-                  ).map((row, idx) => {
-                    const isSelected =
-                      normalizeSearch(filterSubject) === normalizeSearch(row.subject);
-                    const barPercent =
-                      row.errorRatePct !== null ? row.errorRatePct : row.notebookSharePct;
-                    const barColor =
-                      barPercent >= 50
-                        ? 'var(--bad)'
-                        : barPercent >= 25
-                          ? 'var(--warning)'
-                          : 'var(--accent)';
-                    return (
-                      <button
-                        key={row.subject}
-                        type="button"
-                        onClick={() =>
-                          setFilterSubject((prev) =>
-                            normalizeSearch(prev) === normalizeSearch(row.subject)
-                              ? 'Todas as Matérias'
-                              : row.subject,
-                          )
-                        }
-                        className={`w-full text-left rounded-lg border px-3 py-2 transition-colors cursor-pointer ${
-                          isSelected
-                            ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
-                            : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
-                        }`}
-                      >
-                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-                          <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-mono-num text-[11.5px] font-extrabold text-[var(--muted)] w-6 shrink-0">
-                              {idx + 1}º
-                            </span>
-                            <strong className="text-[13px] font-bold text-[var(--text)] truncate">
-                              {visibleName(row.subject)}
-                            </strong>
-                          </div>
-                          <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono-num shrink-0">
-                            {row.errorRatePct !== null && (
-                              <span
-                                className="font-extrabold"
-                                style={{ color: barColor }}
-                                title="Percentual de erros sobre questões respondidas"
-                              >
-                                {row.errorRatePct}% de erro ({row.wrongQuestions}/
-                                {row.answeredQuestions})
-                              </span>
-                            )}
-                            <span className="text-[var(--muted)]">
-                              <strong className="text-[var(--text)]">{row.notebookTotal}</strong>{' '}
-                              no caderno ({row.notebookSharePct}%)
-                              {row.pendingCount > 0 ? ` · ${row.pendingCount} pend.` : ''}
-                            </span>
-                          </div>
-                        </div>
-                        <div className="h-1.5 w-full rounded-full bg-[var(--panel-raised)] overflow-hidden">
-                          <div
-                            className="h-full rounded-full transition-all"
-                            style={{
-                              width: `${Math.max(4, Math.min(100, barPercent))}%`,
-                              backgroundColor: barColor,
-                            }}
-                          />
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                <List
+                  rowComponent={SubjectStatListRow}
+                  rowCount={displayedStatsRows.length}
+                  rowHeight={statsDynamicHeight}
+                  rowKey={statsRowKey}
+                  rowProps={statsRowProps}
+                  overscanCount={3}
+                  style={{
+                    height: Math.min(360, Math.max(64, displayedStatsRows.length * 64)),
+                    width: '100%',
+                  }}
+                />
 
                 {subjectErrorStats.rows.length > 5 && (
                   <div className="flex justify-end">
@@ -1136,362 +1585,20 @@ export const ErrorNotebookPage: React.FC = () => {
         </Panel>
       )}
 
-      <div className="flex flex-col gap-3">
+      <div>
         {filteredEntries.length ? (
-          filteredEntries.slice(0, visibleEntryLimit).map((entry) => {
-            const isEditing = editingEntry?.id === entry.id;
-            const isCorrected = Boolean(entry.corrigido);
-            const selectedSubjectVal =
-              registeredSubjects.find(
-                (s) => normalizeSearch(s) === normalizeSearch(entry.materia),
-              ) || entry.materia;
-            const editingSubjectVal = editingEntry
-              ? registeredSubjects.find(
-                  (s) => normalizeSearch(s) === normalizeSearch(editingEntry.materia),
-                ) || editingEntry.materia
-              : '';
-            return (
-              <Panel key={entry.id} className="ce-cv-card">
-                <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    {/* Status badge: Pendente de Correção vs Já Corrigido */}
-                    {isCorrected ? (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--good)] bg-[var(--good)]/15 text-[11px] font-bold text-[var(--good)]">
-                        <CheckCircle2 className="w-3 h-3" />
-                        Já Corrigido {entry.corrigido_em ? `(${entry.corrigido_em})` : ''}
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--warning)] bg-[var(--warning)]/15 text-[11px] font-bold text-[var(--warning)]">
-                        <Clock className="w-3 h-3" />
-                        Pendente de Correção
-                      </span>
-                    )}
-
-                    <span className="px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--accent)]">
-                      {visibleName(entry.tipo)}
-                    </span>
-                    <div className="inline-flex items-center gap-1.5">
-                      <span className="text-[11px] font-bold text-[var(--muted)]">Matéria:</span>
-                      <select
-                        aria-label={`Atribuir matéria fixada à questão ${entry.id}`}
-                        value={selectedSubjectVal}
-                        onChange={(e) => updateErrorEntrySubject(entry.id, e.target.value)}
-                        className="ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[12px] font-bold"
-                        title="Alterar matéria da questão usando as mesmas matérias fixadas no cronômetro"
-                      >
-                        {!registeredSubjects.some(
-                          (s) => normalizeSearch(s) === normalizeSearch(selectedSubjectVal),
-                        ) &&
-                          selectedSubjectVal && (
-                            <option value={selectedSubjectVal}>{visibleName(selectedSubjectVal)}</option>
-                          )}
-                        {registeredSubjects.map((subj) => (
-                          <option key={subj} value={subj}>
-                            {subj}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    {entry.origem && (
-                      <span className="px-2 py-0.5 rounded-md border border-[var(--line)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)]">
-                        Origem: {entry.origem}
-                      </span>
-                    )}
-                    <span className="text-[11.5px] text-[var(--muted)] font-mono-num">
-                      · {entry.data}
-                    </span>
-                    {entry.proxima_revisao && (
-                      <span
-                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-bold ${
-                          entry.proxima_revisao <= todayIso
-                            ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                            : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)]'
-                        }`}
-                      >
-                        <CalendarClock className="w-3 h-3" />
-                        {entry.proxima_revisao <= todayIso
-                          ? `Revisar hoje (Nível ${entry.nivel_revisao ?? 1})`
-                          : `Próx. revisão: ${formatBrDate(entry.proxima_revisao)} (Nível ${entry.nivel_revisao ?? 1})`}
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
-                    {/* Mark / Reopen / Spaced repetition button */}
-                    {!isCorrected ? (
-                      <button
-                        type="button"
-                        onClick={() => markAnnotationCorrected(entry.id)}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 transition-opacity shadow-xs"
-                        title="Marcar como revisado e agendar revisão espaçada (+1 dia)"
-                      >
-                        <Check className="w-3.5 h-3.5" />
-                        Marcar como Corrigido
-                      </button>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => advanceErrorReview(entry.id)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11.5px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors"
-                          title="Registrar revisão concluída e avançar intervalo (1d → 7d → 15d → 30d)"
-                        >
-                          <CalendarClock className="w-3.5 h-3.5" />
-                          Concluir revisão
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => reopenAnnotation(entry.id)}
-                          className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors"
-                          title="Reabrir questão para Pendentes de Correção"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          Reabrir
-                        </button>
-                      </>
-                    )}
-
-                    {entry.correcao_prova && (
-                      <button
-                        type="button"
-                        onClick={() => setActivePage('Provas')}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
-                      >
-                        <ExternalLink className="w-3 h-3" />
-                        Ver em Provas
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isEditing) {
-                          flushEditingDraft(true);
-                          setEditingEntry(null);
-                          return;
-                        }
-                        const savedDraft = readFieldDraft<{
-                          id: string;
-                          materia: string;
-                          tipo: string;
-                          texto: string;
-                          hasQuestion?: boolean;
-                          enunciado?: string;
-                          gabarito?: string;
-                          resposta?: string;
-                          comentario?: string;
-                        }>(`error_notebook_edit_${entry.id}`);
-                        setEditingEntry(
-                          savedDraft || {
-                            id: entry.id,
-                            materia: selectedSubjectVal,
-                            tipo: entry.tipo,
-                            texto: entry.texto,
-                            hasQuestion: Boolean(entry.questao),
-                            enunciado: entry.questao?.enunciado ?? '',
-                            gabarito: entry.questao?.gabarito ?? '',
-                            resposta: entry.questao?.resposta ?? '',
-                            comentario: entry.questao?.comentario ?? '',
-                          },
-                        );
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
-                    >
-                      <Pencil className="w-3 h-3" />
-                      {isEditing ? 'Fechar' : 'Editar'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteAnnotation(entry.id)}
-                      aria-label="Excluir anotação"
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      Excluir
-                    </button>
-                  </div>
-                </div>
-
-                {isEditing && editingEntry ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-2 pt-2 border-t border-[var(--line)]">
-                    <select
-                      aria-label="Matéria da anotação"
-                      value={editingSubjectVal}
-                      onChange={(e) =>
-                        setEditingEntry({ ...editingEntry, materia: e.target.value })
-                      }
-                      className="ce-select"
-                    >
-                      {!registeredSubjects.some(
-                        (s) => normalizeSearch(s) === normalizeSearch(editingSubjectVal),
-                      ) &&
-                        editingSubjectVal && (
-                          <option value={editingSubjectVal}>{visibleName(editingSubjectVal)}</option>
-                        )}
-                      {registeredSubjects.map((subj) => (
-                        <option key={subj} value={subj}>
-                          {subj}
-                        </option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      value={editingEntry.tipo}
-                      onChange={(e) => setEditingEntry({ ...editingEntry, tipo: e.target.value })}
-                      placeholder="Tipo de apontamento"
-                      className="ce-input"
-                    />
-                    <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                        Anotação / Correção
-                      </label>
-                      <textarea
-                        value={editingEntry.texto}
-                        onChange={(e) => setEditingEntry({ ...editingEntry, texto: e.target.value })}
-                        onBlur={() => flushEditingDraft(true)}
-                        rows={3}
-                        className="ce-textarea"
-                      />
-                    </div>
-                    {entry.questao && (
-                      <>
-                        <div className="sm:col-span-2">
-                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                            Enunciado / Questão vinculada
-                          </label>
-                          <textarea
-                            value={editingEntry.enunciado ?? ''}
-                            onChange={(e) =>
-                              setEditingEntry({ ...editingEntry, enunciado: e.target.value })
-                            }
-                            onBlur={() => flushEditingDraft(true)}
-                            rows={2}
-                            className="ce-textarea"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                            Alternativa marcada
-                          </label>
-                          <input
-                            type="text"
-                            value={editingEntry.resposta ?? ''}
-                            onChange={(e) =>
-                              setEditingEntry({ ...editingEntry, resposta: e.target.value })
-                            }
-                            onBlur={() => flushEditingDraft(true)}
-                            placeholder="Ex.: C, E, A..."
-                            className="ce-input"
-                          />
-                        </div>
-                        <div>
-                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                            Gabarito oficial
-                          </label>
-                          <input
-                            type="text"
-                            value={editingEntry.gabarito ?? ''}
-                            onChange={(e) =>
-                              setEditingEntry({ ...editingEntry, gabarito: e.target.value })
-                            }
-                            onBlur={() => flushEditingDraft(true)}
-                            placeholder="Ex.: C, E, A..."
-                            className="ce-input"
-                          />
-                        </div>
-                      </>
-                    )}
-                    <div className="sm:col-span-2 flex justify-end gap-2">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          clearFieldDraft(`error_notebook_edit_${entry.id}`);
-                          setEditingEntry(null);
-                        }}
-                        className="px-3.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] text-[12px] font-bold hover:text-[var(--text)] whitespace-nowrap"
-                      >
-                        Cancelar
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => handleSaveEdit(entry)}
-                        className="px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
-                      >
-                        Salvar alterações
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                    {entry.texto}
-                  </p>
-                )}
-
-                {entry.questao && (
-                  <details className="mt-3 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-3">
-                    <summary className="text-[12px] font-bold text-[var(--muted)] cursor-pointer select-none">
-                      Ver questão vinculada
-                      {entry.arquivo_prova ? ` (${visibleName(entry.arquivo_prova)})` : ''}
-                    </summary>
-                    <div className="mt-2 pt-2 border-t border-[var(--line)] text-[12.5px] leading-relaxed text-[var(--text)]">
-                      <p className="m-0 whitespace-pre-wrap">{entry.questao.enunciado}</p>
-                      {entry.questao.alternativas?.length > 0 && (
-                        <div className="mt-2 flex flex-col gap-1 text-[var(--muted)]">
-                          {entry.questao.alternativas.map((alt) => (
-                            <span key={alt.letra}>
-                              <strong className="text-[var(--text)]">[{alt.letra}]</strong> {alt.texto}
-                            </span>
-                          ))}
-                        </div>
-                      )}
-                      {(entry.questao.resposta || entry.questao.gabarito) && (
-                        <div className="mt-2 text-[12px] text-[var(--muted)]">
-                          {entry.questao.resposta && (
-                            <>
-                              Marcada: <strong className="text-[var(--bad)]">{entry.questao.resposta}</strong>
-                              {' · '}
-                            </>
-                          )}
-                          {entry.questao.gabarito && (
-                            <>
-                              Gabarito: <strong className="text-[var(--good)]">{entry.questao.gabarito}</strong>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </details>
-                )}
-              </Panel>
-            );
-          })
+          <List
+            scrollElement="window"
+            rowComponent={ErrorNotebookEntryRow}
+            rowCount={filteredEntries.length}
+            rowHeight={entriesDynamicHeight}
+            rowKey={entryRowKey}
+            rowProps={entryRowProps}
+            overscanCount={4}
+            defaultHeight={680}
+          />
         ) : (
           <EmptyState message="Nenhum registro encontrado para os filtros aplicados." />
-        )}
-
-        {filteredEntries.length > visibleEntryLimit && (
-          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--panel)] px-4 py-3 text-[12px]">
-            <span className="text-[var(--muted)]">
-              Exibindo <strong className="text-[var(--text)]">{Math.min(visibleEntryLimit, filteredEntries.length)}</strong> de{' '}
-              <strong className="text-[var(--text)]">{filteredEntries.length}</strong> registros para manter a navegação fluida.
-            </span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => setVisibleEntryLimit((prev) => prev + 40)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)]"
-              >
-                Carregar +40 registros
-              </button>
-              <button
-                type="button"
-                onClick={() => setVisibleEntryLimit(filteredEntries.length)}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)]"
-              >
-                Mostrar todos ({filteredEntries.length})
-              </button>
-            </div>
-          </div>
         )}
       </div>
     </div>

@@ -14,6 +14,8 @@ import {
   Link2,
   ListChecks,
   ListOrdered,
+  Maximize2,
+  Minimize2,
   Newspaper,
   Play,
   RefreshCw,
@@ -83,6 +85,8 @@ export const LawsPage: React.FC = () => {
     deleteLawPdf,
     requestConfirm,
     toast,
+    examFocusMode,
+    setExamFocusMode,
   } = useStudy();
   const [reprocessingLaw, setReprocessingLaw] = useState(false);
   const [eraserModeActive, setEraserModeActive] = useState(false);
@@ -96,6 +100,17 @@ export const LawsPage: React.FC = () => {
     toggleComfortableWidth,
     toggleHighlightExamWords,
   } = useLawReadingPrefs();
+
+  useEffect(() => {
+    if (!examFocusMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExamFocusMode(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [examFocusMode, setExamFocusMode]);
+
+  useEffect(() => () => setExamFocusMode(false), [setExamFocusMode]);
 
   const hideSearch = moduleVisibility('Lei Seca').hide_search;
   const folderNames = useMemo(
@@ -931,41 +946,99 @@ export const LawsPage: React.FC = () => {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="DIÁRIO OFICIAL · LEI SECA"
-        title="Leitura direcionada com marca-texto e progresso"
-        description="Acompanhe seu percentual lido no Vade Mecum Federal, localize artigos no contexto completo da lei, aplique grifos persistentes e exporte PDF."
-        actions={
-          folderNames.length > 0 ? (
-            <div className="flex items-center gap-1.5">
+      {examFocusMode ? (
+        <div className="mb-3 pb-2.5 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-2 text-[12px]">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="inline-flex items-center gap-1.5 font-extrabold uppercase tracking-[0.05em] text-[var(--accent)]">
+              <Maximize2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              Modo Leitura · {activeFolder ? visibleName(activeFolder) : 'Lei Seca'}
+            </span>
+            {folderNames.length > 0 && (
+              <div className="inline-flex items-center gap-1 ml-1">
+                <button
+                  type="button"
+                  onClick={() => setReaderTab('continuous')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors ${
+                    readerTab === 'continuous'
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                  }`}
+                >
+                  <Highlighter className="w-3 h-3" />
+                  Leitor Contínuo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReaderTab('devices')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors ${
+                    readerTab === 'devices'
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                  }`}
+                >
+                  <ListChecks className="w-3 h-3" />
+                  Checklist ({readingStats.read}/{readingStats.total})
+                </button>
+              </div>
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => setExamFocusMode(false)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+          >
+            <Minimize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+            Sair do Modo Leitura (Esc)
+          </button>
+        </div>
+      ) : (
+        <PageHeader
+          eyebrow="DIÁRIO OFICIAL · LEI SECA"
+          title="Leitura direcionada com marca-texto e progresso"
+          description="Acompanhe seu percentual lido no Vade Mecum Federal, localize artigos no contexto completo da lei, aplique grifos persistentes e exporte PDF."
+          actions={
+            <div className="flex flex-wrap items-center gap-1.5">
+              {folderNames.length > 0 && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setReaderTab('continuous')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
+                      readerTab === 'continuous'
+                        ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                    }`}
+                  >
+                    <Highlighter className="w-3.5 h-3.5" />
+                    Leitor Contínuo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReaderTab('devices')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
+                      readerTab === 'devices'
+                        ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                    }`}
+                  >
+                    <ListChecks className="w-3.5 h-3.5" />
+                    Checklist de Leitura ({readingStats.read}/{readingStats.total})
+                  </button>
+                </>
+              )}
               <button
                 type="button"
-                onClick={() => setReaderTab('continuous')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
-                  readerTab === 'continuous'
-                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
-                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
-                }`}
+                onClick={() => setExamFocusMode(true)}
+                title="Ativar Modo Leitura (oculta barras laterais e cabeçalho para maximizar a leitura)"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors cursor-pointer"
               >
-                <Highlighter className="w-3.5 h-3.5" />
-                Leitor Contínuo
-              </button>
-              <button
-                type="button"
-                onClick={() => setReaderTab('devices')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
-                  readerTab === 'devices'
-                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
-                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
-                }`}
-              >
-                <ListChecks className="w-3.5 h-3.5" />
-                Checklist de Leitura ({readingStats.read}/{readingStats.total})
+                <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Modo Leitura
               </button>
             </div>
-          ) : undefined
-        }
-      />
+          }
+        />
+      )}
 
       {folderNames.length ? (
         <>

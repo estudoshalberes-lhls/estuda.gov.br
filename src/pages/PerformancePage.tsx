@@ -1,4 +1,5 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import {
   Award,
   Bookmark,
@@ -39,6 +40,10 @@ import {
   PriorityQuadrantD3Chart,
   SubjectAnalyticsDatum,
 } from '../components/charts/PerformanceD3Panels';
+import {
+  SubjectAccuracyEvolutionD3Chart,
+  WeeklyStudyHoursD3Chart,
+} from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
 import { CareerAchievementsBanner } from '../components/performance/CareerAchievementsBanner';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
@@ -48,6 +53,184 @@ function formatIsoToBr(iso: string): string {
   const [y, m, d] = iso.split('-');
   return `${d}/${m}/${y}`;
 }
+
+interface StudyDateRowItem {
+  date: string;
+  day: string;
+  seconds: number;
+  subjects: Record<string, number>;
+}
+
+interface StudyDateListRowProps {
+  rows: StudyDateRowItem[];
+  maxDaySec: number;
+}
+
+const StudyDateListRow = React.memo(
+  ({ index, style, ariaAttributes, rows, maxDaySec }: RowComponentProps<StudyDateListRowProps>) => {
+    const dayRow = rows[index];
+    if (!dayRow) return null;
+    const widthPct = Math.max(6, Math.round((dayRow.seconds / maxDaySec) * 100));
+    return (
+      <div style={style} {...ariaAttributes} className="pb-2 pr-1">
+        <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5">
+          <div className="flex items-center justify-between text-[12px] mb-1">
+            <strong className="text-[var(--text)] font-mono-num">
+              {formatIsoToBr(dayRow.date)} ·{' '}
+              <span className="font-sans font-semibold text-[var(--muted)]">{dayRow.day}</span>
+            </strong>
+            <span className="font-mono-num font-extrabold text-[var(--accent)]">
+              {formatClock(dayRow.seconds)}
+            </span>
+          </div>
+          <div className="h-2 rounded-full border border-[var(--line)] bg-[var(--panel)] overflow-hidden mb-1.5">
+            <div className="h-full bg-[var(--accent)] transition-all" style={{ width: `${widthPct}%` }} />
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(dayRow.subjects).map(([subj, sec]) => (
+              <span
+                key={subj}
+                className="px-2 py-0.5 rounded border border-[var(--line)] bg-[var(--panel)] text-[10.5px] font-semibold text-[var(--text)]"
+              >
+                MATÉRIA: {visibleName(subj).toUpperCase()}.{' '}
+                <span className="font-mono-num text-[var(--accent)] font-bold">{formatClock(sec)}</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  },
+) as (props: RowComponentProps<StudyDateListRowProps>) => React.ReactElement | null;
+
+interface StudySessionRecordItem {
+  quizId: string;
+  date: string;
+  day: string;
+  source?: string;
+  seconds: number;
+  allocations: StudyTimeAllocation[];
+}
+
+interface StudySessionListRowProps {
+  records: StudySessionRecordItem[];
+  onDelete: (quizId: string) => void;
+}
+
+const StudySessionListRow = React.memo(
+  ({ index, style, ariaAttributes, records, onDelete }: RowComponentProps<StudySessionListRowProps>) => {
+    const rec = records[index];
+    if (!rec) return null;
+    return (
+      <div style={style} {...ariaAttributes} className="pb-2 pr-1">
+        <div className="flex items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5 text-[12px]">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5 mb-1">
+              <span className="font-mono-num font-bold text-[var(--text)]">
+                {formatIsoToBr(rec.date)}
+              </span>
+              <span className="text-[11px] text-[var(--muted)]">({rec.day})</span>
+              <span
+                className={`px-1.5 py-0.2 rounded border text-[10px] font-bold ${
+                  rec.source === 'schedule'
+                    ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]'
+                }`}
+              >
+                {rec.source === 'schedule' ? 'Cronograma' : 'Treino / Simulado'}
+              </span>
+            </div>
+
+            <div className="flex flex-col gap-1">
+              {rec.allocations.map((a, i) => (
+                <div key={`${rec.quizId}-${i}`} className="flex flex-wrap items-center gap-1.5">
+                  <span className="px-2 py-0.5 rounded border border-[var(--accent)]/45 bg-[var(--accent-soft)] text-[10px] font-extrabold text-[var(--accent)]">
+                    MATÉRIA: {visibleName(a.subject).toUpperCase().replace(/\.+$/, '')}.
+                  </span>
+                  {a.concursoAlvo && (
+                    <span className="px-2 py-0.5 rounded border border-[var(--good)]/45 bg-[var(--good)]/12 text-[10px] font-extrabold text-[var(--good)]">
+                      {a.concursoAlvo.toUpperCase()}
+                    </span>
+                  )}
+                  {a.topicLabel && (
+                    <span className="text-[11.5px] font-semibold text-[var(--text)] truncate">
+                      Assunto: {visibleName(a.topicLabel)}
+                    </span>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <strong className="font-mono-num text-[13px] font-extrabold text-[var(--good)]">
+              {formatClock(rec.seconds)}
+            </strong>
+            <button
+              type="button"
+              onClick={() => onDelete(rec.quizId)}
+              title="Remover registro de tempo"
+              aria-label="Remover registro de tempo"
+              className="grid place-items-center w-7 h-7 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)] transition-colors"
+            >
+              <Trash2 className="w-3 h-3" />
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  },
+) as (props: RowComponentProps<StudySessionListRowProps>) => React.ReactElement | null;
+
+interface SubjectRowItem {
+  subject: string;
+  answered: number;
+  correct: number;
+  studySeconds: number;
+}
+
+interface SubjectPerformanceListRowProps {
+  rows: SubjectRowItem[];
+  totalStudySeconds: number;
+}
+
+const SubjectPerformanceListRow = React.memo(
+  ({ index, style, ariaAttributes, rows, totalStudySeconds }: RowComponentProps<SubjectPerformanceListRowProps>) => {
+    const row = rows[index];
+    if (!row) return null;
+    const pct = row.answered ? Math.round((row.correct / row.answered) * 100) : 0;
+    return (
+      <div style={style} {...ariaAttributes} className="pb-2.5 pr-1">
+        <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
+          <div className="flex items-center justify-between gap-2 text-[12.5px] mb-1.5">
+            <strong className="text-[var(--text)] truncate">
+              MATÉRIA: {visibleName(row.subject).toUpperCase().replace(/\.+$/, '')}.
+            </strong>
+            <span className="font-mono-num text-[var(--text)] font-bold shrink-0">
+              {row.answered ? `${pct}%` : formatClock(row.studySeconds)}
+            </span>
+          </div>
+          <div className="h-2 rounded-full border border-[var(--line)] bg-[var(--panel)] overflow-hidden mb-1.5">
+            <div
+              className="h-full bg-[var(--good)]"
+              style={{
+                width: `${row.answered ? pct : Math.min(100, Math.round((row.studySeconds / Math.max(1, totalStudySeconds)) * 100))}%`,
+              }}
+            />
+          </div>
+          <div className="flex items-center justify-between text-[11px] text-[var(--muted)] tabular-nums">
+            <span>
+              {row.correct} acertos / {row.answered - row.correct} erros ({row.answered} total)
+            </span>
+            <span className="font-mono-num font-bold text-[var(--accent)]">
+              Tempo na matéria: {formatClock(row.studySeconds)}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  },
+) as (props: RowComponentProps<SubjectPerformanceListRowProps>) => React.ReactElement | null;
 
 export const PerformancePage: React.FC = () => {
   const { db, fixedSubjects, setActivePage, deleteStudyTimeRecord, requestConfirm, toast } =
@@ -661,16 +844,61 @@ export const PerformancePage: React.FC = () => {
     }
   };
 
-  const handleDeleteRecord = async (quizId: string) => {
-    const ok = await requestConfirm({
-      title: 'Excluir registro de tempo?',
-      description: 'Este bloco de tempo estudado será removido das estatísticas e do tópico vinculado no cronograma.',
-      confirmLabel: 'Remover registro',
-      danger: true,
-    });
-    if (!ok) return;
-    deleteStudyTimeRecord(quizId);
-  };
+  const handleDeleteRecord = useCallback(
+    async (quizId: string) => {
+      const ok = await requestConfirm({
+        title: 'Excluir registro de tempo?',
+        description: 'Este bloco de tempo estudado será removido das estatísticas e do tópico vinculado no cronograma.',
+        confirmLabel: 'Remover registro',
+        danger: true,
+      });
+      if (!ok) return;
+      deleteStudyTimeRecord(quizId);
+    },
+    [deleteStudyTimeRecord, requestConfirm],
+  );
+
+  const studyDateDynamicHeight = useDynamicRowHeight({
+    defaultRowHeight: 96,
+    key: `perf-dates-${filteredStudyStats.byDate.length}-${timePreset}-${weekdayFilter}-${timeSubjectFilter}-${timeContestFilter}`,
+  });
+  const studySessionDynamicHeight = useDynamicRowHeight({
+    defaultRowHeight: 82,
+    key: `perf-sessions-${filteredStudyRecords.length}-${timePreset}-${weekdayFilter}-${timeSubjectFilter}-${timeContestFilter}`,
+  });
+  const subjectDynamicHeight = useDynamicRowHeight({
+    defaultRowHeight: 98,
+    key: `perf-subj-${subjectRows.length}-${subjectFilter}-${historySearch}`,
+  });
+
+  const studyDateRowProps = useMemo<StudyDateListRowProps>(
+    () => ({ rows: filteredStudyStats.byDate, maxDaySec: filteredStudyStats.maxDaySec }),
+    [filteredStudyStats.byDate, filteredStudyStats.maxDaySec],
+  );
+  const studySessionRowProps = useMemo<StudySessionListRowProps>(
+    () => ({
+      records: filteredStudyRecords,
+      onDelete: (quizId: string) => void handleDeleteRecord(quizId),
+    }),
+    [filteredStudyRecords, handleDeleteRecord],
+  );
+  const subjectPerformanceRowProps = useMemo<SubjectPerformanceListRowProps>(
+    () => ({ rows: subjectRows, totalStudySeconds }),
+    [subjectRows, totalStudySeconds],
+  );
+
+  const studyDateRowKey = useCallback(
+    (index: number, data: StudyDateListRowProps) => data.rows[index]?.date ?? index,
+    [],
+  );
+  const studySessionRowKey = useCallback(
+    (index: number, data: StudySessionListRowProps) => data.records[index]?.quizId ?? index,
+    [],
+  );
+  const subjectRowKey = useCallback(
+    (index: number, data: SubjectPerformanceListRowProps) => data.rows[index]?.subject ?? index,
+    [],
+  );
 
   return (
     <div>
@@ -846,6 +1074,20 @@ export const PerformancePage: React.FC = () => {
         subjectFilter={subjectFilter}
         fixedSubjects={fixedSubjects}
       />
+
+      <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+        <SubjectAccuracyEvolutionD3Chart
+          db={db}
+          fixedSubjects={fixedSubjects}
+          selectedSubject={subjectFilter}
+          onSelectSubject={setSubjectFilter}
+        />
+        <WeeklyStudyHoursD3Chart
+          db={db}
+          fixedSubjects={fixedSubjects}
+          subjectFilter={subjectFilter}
+        />
+      </div>
 
       <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
         <ConsistencyCalendarHeatmap db={db} />
@@ -1191,124 +1433,44 @@ export const PerformancePage: React.FC = () => {
 
         {filteredStudyStats.byDate.length ? (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {/* Agrupamento por Dia/Data */}
+            {/* Agrupamento por Dia/Data (virtualizado via react-window) */}
             <div>
               <h4 className="m-0 mb-2.5 text-[12px] font-extrabold uppercase tracking-wider text-[var(--muted)] flex items-center gap-1.5">
                 <CalendarDays className="w-3.5 h-3.5 text-[var(--accent)]" />
                 Total estudado por data
               </h4>
-              <div className="flex flex-col gap-2 max-h-[320px] overflow-y-auto pr-1">
-                {filteredStudyStats.byDate.map((dayRow) => {
-                  const widthPct = Math.max(
-                    6,
-                    Math.round((dayRow.seconds / filteredStudyStats.maxDaySec) * 100),
-                  );
-                  return (
-                    <div
-                      key={dayRow.date}
-                      className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5"
-                    >
-                      <div className="flex items-center justify-between text-[12px] mb-1">
-                        <strong className="text-[var(--text)] font-mono-num">
-                          {formatIsoToBr(dayRow.date)} ·{' '}
-                          <span className="font-sans font-semibold text-[var(--muted)]">
-                            {dayRow.day}
-                          </span>
-                        </strong>
-                        <span className="font-mono-num font-extrabold text-[var(--accent)]">
-                          {formatClock(dayRow.seconds)}
-                        </span>
-                      </div>
-                      <div className="h-2 rounded-full border border-[var(--line)] bg-[var(--panel)] overflow-hidden mb-1.5">
-                        <div
-                          className="h-full bg-[var(--accent)] transition-all"
-                          style={{ width: `${widthPct}%` }}
-                        />
-                      </div>
-                      <div className="flex flex-wrap gap-1.5">
-                        {Object.entries(dayRow.subjects).map(([subj, sec]) => (
-                          <span
-                            key={subj}
-                            className="px-2 py-0.5 rounded border border-[var(--line)] bg-[var(--panel)] text-[10.5px] font-semibold text-[var(--text)]"
-                          >
-                            MATÉRIA: {visibleName(subj).toUpperCase()}.{' '}
-                            <span className="font-mono-num text-[var(--accent)] font-bold">{formatClock(sec)}</span>
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+              <List
+                rowComponent={StudyDateListRow}
+                rowCount={filteredStudyStats.byDate.length}
+                rowHeight={studyDateDynamicHeight}
+                rowKey={studyDateRowKey}
+                rowProps={studyDateRowProps}
+                overscanCount={4}
+                style={{
+                  height: Math.min(320, Math.max(96, filteredStudyStats.byDate.length * 100)),
+                  width: '100%',
+                }}
+              />
             </div>
 
-            {/* Sessões detalhadas */}
+            {/* Sessões detalhadas (virtualizado via react-window) */}
             <div>
               <h4 className="m-0 mb-2.5 text-[12px] font-extrabold uppercase tracking-wider text-[var(--muted)] flex items-center gap-1.5">
                 <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
                 Sessões detalhadas ({filteredStudyRecords.length})
               </h4>
-              <div className="flex flex-col gap-2 max-h-[320px] overflow-y-auto pr-1">
-                {filteredStudyRecords.map((rec) => (
-                  <div
-                    key={rec.quizId}
-                    className="flex items-center justify-between gap-2 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5 text-[12px]"
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-1.5 mb-1">
-                        <span className="font-mono-num font-bold text-[var(--text)]">
-                          {formatIsoToBr(rec.date)}
-                        </span>
-                        <span className="text-[11px] text-[var(--muted)]">({rec.day})</span>
-                        <span
-                          className={`px-1.5 py-0.2 rounded border text-[10px] font-bold ${
-                            rec.source === 'schedule'
-                              ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
-                              : 'border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]'
-                          }`}
-                        >
-                          {rec.source === 'schedule' ? 'Cronograma' : 'Treino / Simulado'}
-                        </span>
-                      </div>
-
-                      <div className="flex flex-col gap-1">
-                        {rec.allocations.map((a, i) => (
-                          <div key={`${rec.quizId}-${i}`} className="flex flex-wrap items-center gap-1.5">
-                            <span className="px-2 py-0.5 rounded border border-[var(--accent)]/45 bg-[var(--accent-soft)] text-[10px] font-extrabold text-[var(--accent)]">
-                              MATÉRIA: {visibleName(a.subject).toUpperCase().replace(/\.+$/, '')}.
-                            </span>
-                            {a.concursoAlvo && (
-                              <span className="px-2 py-0.5 rounded border border-[var(--good)]/45 bg-[var(--good)]/12 text-[10px] font-extrabold text-[var(--good)]">
-                                {a.concursoAlvo.toUpperCase()}
-                              </span>
-                            )}
-                            {a.topicLabel && (
-                              <span className="text-[11.5px] font-semibold text-[var(--text)] truncate">
-                                Assunto: {visibleName(a.topicLabel)}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <strong className="font-mono-num text-[13px] font-extrabold text-[var(--good)]">
-                        {formatClock(rec.seconds)}
-                      </strong>
-                      <button
-                        type="button"
-                        onClick={() => void handleDeleteRecord(rec.quizId)}
-                        title="Remover registro de tempo"
-                        aria-label="Remover registro de tempo"
-                        className="grid place-items-center w-7 h-7 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)] transition-colors"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
+              <List
+                rowComponent={StudySessionListRow}
+                rowCount={filteredStudyRecords.length}
+                rowHeight={studySessionDynamicHeight}
+                rowKey={studySessionRowKey}
+                rowProps={studySessionRowProps}
+                overscanCount={5}
+                style={{
+                  height: Math.min(320, Math.max(84, filteredStudyRecords.length * 88)),
+                  width: '100%',
+                }}
+              />
             </div>
           </div>
         ) : (
@@ -1428,37 +1590,18 @@ export const PerformancePage: React.FC = () => {
           </div>
 
           {subjectRows.length ? (
-            <div className="flex flex-col gap-2.5 max-h-[520px] overflow-y-auto pr-1">
-              {subjectRows.map((row) => {
-                const pct = row.answered ? Math.round((row.correct / row.answered) * 100) : 0;
-                return (
-                  <div key={row.subject} className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
-                    <div className="flex items-center justify-between gap-2 text-[12.5px] mb-1.5">
-                      <strong className="text-[var(--text)] truncate">
-                        MATÉRIA: {visibleName(row.subject).toUpperCase().replace(/\.+$/, '')}.
-                      </strong>
-                      <span className="font-mono-num text-[var(--text)] font-bold shrink-0">
-                        {row.answered ? `${pct}%` : formatClock(row.studySeconds)}
-                      </span>
-                    </div>
-                    <div className="h-2 rounded-full border border-[var(--line)] bg-[var(--panel)] overflow-hidden mb-1.5">
-                      <div
-                        className="h-full bg-[var(--good)]"
-                        style={{ width: `${row.answered ? pct : Math.min(100, Math.round((row.studySeconds / Math.max(1, totalStudySeconds)) * 100))}%` }}
-                      />
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] text-[var(--muted)] tabular-nums">
-                      <span>
-                        {row.correct} acertos / {row.answered - row.correct} erros ({row.answered} total)
-                      </span>
-                      <span className="font-mono-num font-bold text-[var(--accent)]">
-                        Tempo na matéria: {formatClock(row.studySeconds)}
-                      </span>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
+            <List
+              rowComponent={SubjectPerformanceListRow}
+              rowCount={subjectRows.length}
+              rowHeight={subjectDynamicHeight}
+              rowKey={subjectRowKey}
+              rowProps={subjectPerformanceRowProps}
+              overscanCount={4}
+              style={{
+                height: Math.min(520, Math.max(100, subjectRows.length * 100)),
+                width: '100%',
+              }}
+            />
           ) : (
             <EmptyState message="Nenhuma disciplina encontrada para os filtros aplicados." />
           )}

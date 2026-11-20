@@ -1,5 +1,5 @@
-import React, { useMemo, useRef, useState } from 'react';
-import { Check, Download, Eye, FileUp, Folder, FolderPlus, Highlighter, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Check, Download, Eye, FileUp, Folder, FolderPlus, Highlighter, Maximize2, Minimize2, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import { getKnownStudyDriveFolderNames, getPreferredStudyFolder } from '../lib/googleDrive';
@@ -26,7 +26,20 @@ export const PersonalPdfsPage: React.FC = () => {
     connectGoogleDrive,
     syncAllLocalFilesToDrive,
     isSyncingDrive,
+    examFocusMode,
+    setExamFocusMode,
   } = useStudy();
+
+  useEffect(() => {
+    if (!examFocusMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExamFocusMode(false);
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [examFocusMode, setExamFocusMode]);
+
+  useEffect(() => () => setExamFocusMode(false), [setExamFocusMode]);
 
   const hideUpload = moduleVisibility('PDFs Pessoais').hide_upload;
   const folderNames = useMemo(() => {
@@ -124,44 +137,79 @@ export const PersonalPdfsPage: React.FC = () => {
 
   return (
     <div>
-      <PageHeader
-        eyebrow="ACERVO PRIVADO · PDFS PESSOAIS"
-        title="Biblioteca pessoal de apostilas e materiais"
-        description="Organize apostilas em pastas temáticas, arraste arquivos diretamente para qualquer setor, visualize inline e atualize versões."
-        actions={
-          driveConnected ? (
-            <div className="flex items-center gap-2">
-              {driveFolderUrl && (
-                <a
-                  href={driveFolderUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors shadow-xs"
-                >
-                  Pasta no Drive ↗
-                </a>
-              )}
+      {examFocusMode ? (
+        <div className="mb-3 pb-2.5 border-b border-[var(--line)] flex flex-wrap items-center justify-between gap-2 text-[12px]">
+          <div className="flex items-center gap-2 font-extrabold uppercase tracking-[0.05em] text-[var(--accent)]">
+            <Maximize2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+            <span>
+              Modo Leitura ·{' '}
+              {activePreviewFile
+                ? visibleName(activePreviewFile.name)
+                : activeFolder
+                  ? visibleName(activeFolder)
+                  : 'PDFs Pessoais'}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setExamFocusMode(false)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+          >
+            <Minimize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+            Sair do Modo Leitura (Esc)
+          </button>
+        </div>
+      ) : (
+        <PageHeader
+          eyebrow="ACERVO PRIVADO · PDFS PESSOAIS"
+          title="Biblioteca pessoal de apostilas e materiais"
+          description="Organize apostilas em pastas temáticas, arraste arquivos diretamente para qualquer setor, visualize inline e atualize versões."
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
-                onClick={() => void syncAllLocalFilesToDrive()}
-                disabled={isSyncingDrive}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 disabled:opacity-60 transition-all shadow-xs"
+                onClick={() => setExamFocusMode(true)}
+                title="Ativar Modo Leitura (oculta barras laterais e cabeçalho para maximizar a leitura)"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors shadow-xs cursor-pointer"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-                {isSyncingDrive ? 'Sincronizando...' : 'Sincronizar com Drive'}
+                <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Modo Leitura
               </button>
+              {driveConnected ? (
+                <>
+                  {driveFolderUrl && (
+                    <a
+                      href={driveFolderUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors shadow-xs"
+                    >
+                      Pasta no Drive ↗
+                    </a>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => void syncAllLocalFilesToDrive()}
+                    disabled={isSyncingDrive}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 disabled:opacity-60 transition-all shadow-xs"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
+                    {isSyncingDrive ? 'Sincronizando...' : 'Sincronizar com Drive'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => connectGoogleDrive()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors shadow-xs"
+                >
+                  Vincular ao Google Drive
+                </button>
+              )}
             </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => connectGoogleDrive()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors shadow-xs"
-            >
-              Vincular ao Google Drive
-            </button>
-          )
-        }
-      />
+          }
+        />
+      )}
 
       <input
         ref={replaceInputRef}
@@ -171,7 +219,7 @@ export const PersonalPdfsPage: React.FC = () => {
         className="hidden"
       />
 
-      {!hideUpload && (
+      {!hideUpload && !examFocusMode && (
         <Panel title="Pastas" className="mb-4">
           <form onSubmit={handleCreateFolder} className="flex flex-wrap gap-2 mb-3.5">
             <input
@@ -318,7 +366,7 @@ export const PersonalPdfsPage: React.FC = () => {
           title={`Pasta selecionada: ${visibleName(activeFolder)}`}
           subtitle={`${activeFiles.length} documento(s)`}
         >
-          {!hideUpload && (
+          {!hideUpload && !examFocusMode && (
             <div
               onDragOver={(e) => {
                 e.preventDefault();
