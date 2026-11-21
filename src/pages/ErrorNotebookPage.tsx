@@ -1704,6 +1704,31 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   };
 
+  const handleExportAllPendingPdf = () => {
+    if (pendingCount === 0) {
+      toast('Não há pendências de correção para exportar em PDF.', true);
+      return;
+    }
+    try {
+      exportErrorNotebookPdf(
+        allErrorEntries,
+        'Todas as Matérias',
+        includeQuestion,
+        {
+          statusFilter: 'pending',
+          pageBreakBySubject,
+          scopeLabel: 'Todas as Pendências (Todas as Matérias)',
+          holderName:
+            googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
+          fileNameOverride: `caderno_erros_todas_pendencias_${localDateIso()}.pdf`,
+        },
+      );
+      toast(`PDF com todas as ${pendingCount} pendência(s) gerado com sucesso.`);
+    } catch (err) {
+      toast((err as Error).message, true);
+    }
+  };
+
   const flushEditingDraft = useCallback(
     (silent = true) => {
       const current = editingEntryRef.current;
@@ -1899,14 +1924,26 @@ export const ErrorNotebookPage: React.FC = () => {
         title="Revisão direcionada de erros e anotações"
         description="Cadastre suas matérias, associe questões pendentes de correção, filtre por disciplina e imprima o caderno de erros em conjunto ou separadamente."
         actions={
-          <button
-            type="button"
-            onClick={() => setSrsFlashcardsOpen(true)}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
-          >
-            <Layers className="w-3.5 h-3.5" />
-            Estudar em Flashcards (SRS)
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={handleExportAllPendingPdf}
+              disabled={pendingCount === 0}
+              title="Baixar em PDF todas as questões e anotações pendentes de correção (todas as matérias)"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-45 transition-colors whitespace-nowrap cursor-pointer tabular-nums"
+            >
+              <Download className="w-3.5 h-3.5" />
+              Baixar PDF de Pendências ({pendingCount})
+            </button>
+            <button
+              type="button"
+              onClick={() => setSrsFlashcardsOpen(true)}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Estudar em Flashcards (SRS)
+            </button>
+          </div>
         }
       />
 
@@ -2439,6 +2476,16 @@ export const ErrorNotebookPage: React.FC = () => {
                 >
                   <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
                   Baixar PDF
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportAllPendingPdf}
+                  disabled={pendingCount === 0}
+                  title="Baixar PDF completo reunindo todas as pendências de todas as matérias"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--warning)]/60 bg-[var(--warning)]/12 text-[12px] font-bold text-[var(--text)] hover:border-[var(--warning)] hover:bg-[var(--warning)]/20 disabled:opacity-45 whitespace-nowrap cursor-pointer tabular-nums"
+                >
+                  <Download className="w-3.5 h-3.5 text-[var(--warning)]" />
+                  PDF Todas as Pendências ({pendingCount})
                 </button>
               </div>
             </div>

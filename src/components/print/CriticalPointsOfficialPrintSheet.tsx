@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { CriticalPoint } from '../../types/study';
 import { visibleName } from '../../lib/parsers';
+import { StructuredLegalText } from '../ui/StructuredLegalText';
 
 interface CriticalPointsOfficialPrintSheetProps {
   items: CriticalPoint[];
@@ -36,7 +37,7 @@ export const CriticalPointsOfficialPrintSheet: React.FC<CriticalPointsOfficialPr
 
   return (
     <section
-      className="gov-print-sheet hidden print:block bg-white text-[#071D41]"
+      className="gov-print-sheet gov-official-doc-print hidden print:block bg-white text-[#071D41]"
       aria-label="Boletim Oficial de Pontos Críticos para Impressão A4"
     >
       <header className="border border-[#071D41] mb-3">
@@ -141,9 +142,11 @@ export const CriticalPointsOfficialPrintSheet: React.FC<CriticalPointsOfficialPr
                         </span>
                       </div>
 
-                      <p className="m-0 text-[8.8pt] leading-[1.45] text-[#071D41] whitespace-pre-wrap">
-                        {item.texto}
-                      </p>
+                      <StructuredLegalText
+                        text={item.texto}
+                        variant="print"
+                        className="text-[8.8pt]"
+                      />
 
                       <div className="mt-2 pt-1 border-t border-[#E6ECF4] flex items-center justify-between text-[7.4pt] text-[#4B5E7A]">
                         <span>Controle de revisão no papel:</span>

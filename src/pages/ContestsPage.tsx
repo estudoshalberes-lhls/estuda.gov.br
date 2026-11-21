@@ -634,9 +634,9 @@ export const ContestsPage: React.FC = () => {
             return (
               <Panel key={c.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0 flex-1">
+                  <div className="min-w-[min(100%,280px)] flex-1 text-left">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="m-0 font-display text-[15px] font-bold text-[var(--text)]">
+                      <h3 className="m-0 font-display text-[15px] font-bold leading-snug text-[var(--text)] text-left">
                         {c.concurso}
                       </h3>
                       <span
@@ -700,7 +700,7 @@ export const ContestsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
                     <button
                       type="button"
                       onClick={() => openContestEdital(c.id)}

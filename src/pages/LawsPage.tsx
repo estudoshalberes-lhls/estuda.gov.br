@@ -2068,7 +2068,7 @@ export const LawsPage: React.FC = () => {
                                         Lendo em voz alta
                                       </div>
                                     )}
-                                    <div>
+                                    <div className="text-justify break-words">
                                       {lineSegments.map((seg, sIdx) =>
                                         seg.color ? (
                                           <mark
@@ -2173,7 +2173,7 @@ export const LawsPage: React.FC = () => {
                       )}
                     </div>
                   ) : (
-                    <div className="whitespace-pre-wrap">
+                    <div className="whitespace-pre-wrap text-justify break-words">
                       {highlightedSegments.map((seg, i) =>
                         seg.color ? (
                           <mark
@@ -2449,7 +2449,7 @@ export const LawsPage: React.FC = () => {
                                 fontSize: FONT_SIZE_PX[readingPrefs.fontSize],
                                 lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
                               }}
-                              className="m-0 text-[var(--text)] whitespace-pre-line"
+                              className="m-0 text-[var(--text)] whitespace-pre-line text-justify break-words"
                             >
                               {readingPrefs.clozeMode ? (
                                 <LawClozeText

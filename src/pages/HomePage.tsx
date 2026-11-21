@@ -340,7 +340,7 @@ export const HomePage: React.FC = () => {
               <FileCheck2 className="w-4 h-4 shrink-0" aria-hidden="true" />
               <span>Programa Bolsa-Questão &amp; Fomento à Aprovação · Exercício 2026</span>
             </div>
-            <h3 className="m-0 font-display text-[20px] sm:text-[23px] font-extrabold tracking-[-0.02em] text-[var(--text)] [text-wrap:balance]">
+            <h3 className="m-0 font-display text-[20px] sm:text-[23px] font-extrabold leading-snug tracking-[-0.02em] text-[var(--text)] text-left">
               {dueReviews.length > 0
                 ? `Atenção, cidadão-estudante: você tem ${dueReviews.length} revisão(ões) pendente(s) no protocolo de hoje.`
                 : 'Situação Cadastral Regular: todas as revisões programadas para hoje estão em dia.'}

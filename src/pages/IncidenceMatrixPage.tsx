@@ -1507,7 +1507,7 @@ export const IncidenceMatrixPage: React.FC = () => {
                                   fontSize: FONT_SIZE_PX[readingPrefs.fontSize],
                                   lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
                                 }}
-                                className="m-0 text-[var(--text)] whitespace-pre-line"
+                                className="m-0 text-[var(--text)] whitespace-pre-line text-justify break-words"
                               >
                                 {renderLawTextWithExamHighlights(
                                   item.texto,

@@ -4,6 +4,7 @@ import { useStudy } from '../context/StudyContext';
 import { normalizeSearch } from '../lib/parsers';
 import { CaseLawItem } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { CaseLawOfficialPrintSheet } from '../components/print/CaseLawOfficialPrintSheet';
 import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
 
@@ -270,7 +271,7 @@ export const CaseLawPage: React.FC = () => {
             return (
               <Panel key={item.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3 mb-2">
-                  <div className="min-w-0">
+                  <div className="min-w-[min(100%,240px)] flex-1 text-left">
                     <div className="flex flex-wrap items-center gap-2 mb-1">
                       <span className="px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[10.5px] font-bold text-[var(--accent)]">
                         {cat}
@@ -286,12 +287,12 @@ export const CaseLawPage: React.FC = () => {
                         </span>
                       )}
                     </div>
-                    <h3 className="m-0 font-display text-[15px] font-bold text-[var(--text)]">
+                    <h3 className="m-0 font-display text-[15px] font-bold leading-snug text-[var(--text)] text-left">
                       {item.titulo}
                     </h3>
                   </div>
 
-                  <div className="flex items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                     <button
                       type="button"
                       onClick={() => loadForEdit(item)}
@@ -311,9 +312,10 @@ export const CaseLawPage: React.FC = () => {
                   </div>
                 </div>
 
-                <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                  {item.texto}
-                </p>
+                <StructuredLegalText
+                  text={item.texto}
+                  className="text-[13.5px] text-[var(--text)]"
+                />
               </Panel>
             );
           })

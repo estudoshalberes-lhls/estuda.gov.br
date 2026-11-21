@@ -8,6 +8,7 @@ import { visibleName } from '../lib/parsers';
 import { EssayRecord } from '../types/study';
 import { FilePreview } from '../components/ui/FilePreview';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 
 interface PreviewTarget {
   blobKey: string;
@@ -192,9 +193,9 @@ export const DiscursivePage: React.FC = () => {
             return (
               <Panel key={essay.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="min-w-[min(100%,260px)] flex-1 text-left">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="m-0 font-display text-[15px] font-bold text-[var(--text)]">
+                      <h3 className="m-0 font-display text-[15px] font-bold leading-snug text-[var(--text)] text-left">
                         {visibleName(essay.titulo)}
                       </h3>
                       <span
@@ -213,7 +214,7 @@ export const DiscursivePage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
                     <button
                       type="button"
                       onClick={() =>
@@ -309,7 +310,10 @@ export const DiscursivePage: React.FC = () => {
                     <strong className="block text-[11.5px] uppercase tracking-wider text-[var(--muted)] mb-1">
                       Feedback da correção
                     </strong>
-                    <span className="whitespace-pre-wrap">{essay.feedback}</span>
+                    <StructuredLegalText
+                      text={essay.feedback}
+                      className="text-[12.5px] text-[var(--text)]"
+                    />
                   </div>
                 )}
 

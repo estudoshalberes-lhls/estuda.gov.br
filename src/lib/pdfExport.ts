@@ -287,6 +287,7 @@ export interface ErrorNotebookPdfOptions {
   pageBreakBySubject?: boolean;
   scopeLabel?: string;
   holderName?: string;
+  fileNameOverride?: string;
 }
 
 interface StyledWordToken {
@@ -1062,11 +1063,21 @@ export function exportErrorNotebookPdf(
     });
   }
 
-  const name = isAllSubjects
-    ? 'caderno_erros_geral_conjunto.pdf'
-    : selectedList.length === 1
-      ? `caderno_erros_${cleanSafeName(selectedList[0]).replace(/\s+/g, '_')}.pdf`
-      : `caderno_erros_conjunto_${selectedList.length}_materias.pdf`;
+  const statusSuffix =
+    statusFilter === 'pending'
+      ? '_pendencias'
+      : statusFilter === 'corrected'
+        ? '_corrigidos'
+        : '';
+  const name =
+    options?.fileNameOverride ||
+    (isAllSubjects
+      ? statusFilter === 'pending'
+        ? `caderno_erros_todas_pendencias_${localDateIso()}.pdf`
+        : `caderno_erros_geral_conjunto${statusSuffix}.pdf`
+      : selectedList.length === 1
+        ? `caderno_erros_${cleanSafeName(selectedList[0]).replace(/\s+/g, '_')}${statusSuffix}.pdf`
+        : `caderno_erros_conjunto_${selectedList.length}_materias${statusSuffix}.pdf`);
   doc.save(name);
 }
 

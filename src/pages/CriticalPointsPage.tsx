@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Plus, Printer, Sparkles, Trash2, X } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 import { CriticalPointsOfficialPrintSheet } from '../components/print/CriticalPointsOfficialPrintSheet';
 
@@ -214,7 +215,7 @@ export const CriticalPointsPage: React.FC = () => {
           filteredCriticalPoints.map((item) => (
             <Panel key={item.id}>
               <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
-                <div className="min-w-0">
+                <div className="min-w-[min(100%,240px)] flex-1 text-left">
                   <div className="flex flex-wrap items-center gap-2 mb-1">
                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[10.5px] font-bold font-mono-num text-[var(--accent)]">
                       <Sparkles className="w-3 h-3" />
@@ -224,7 +225,7 @@ export const CriticalPointsPage: React.FC = () => {
                       {item.materia}
                     </span>
                   </div>
-                  <h3 className="m-0 font-display text-[15px] font-bold text-[var(--text)]">
+                  <h3 className="m-0 font-display text-[15px] font-bold leading-snug text-[var(--text)] text-left">
                     {item.titulo}
                   </h3>
                 </div>
@@ -237,9 +238,10 @@ export const CriticalPointsPage: React.FC = () => {
                   Excluir
                 </button>
               </div>
-              <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                {item.texto}
-              </p>
+              <StructuredLegalText
+                text={item.texto}
+                className="text-[13.5px] text-[var(--text)]"
+              />
             </Panel>
           ))
         ) : (

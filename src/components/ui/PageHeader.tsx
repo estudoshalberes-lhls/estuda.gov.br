@@ -13,21 +13,27 @@ export const PageHeader: React.FC<PageHeaderProps> = ({
   eyebrow = 'SERVIÇO AO ESTUDANTE',
   actions,
 }) => (
-  <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-6 pb-4 border-b border-[var(--line)]">
-    <div className="min-w-0">
-      <div className="flex items-center gap-2 text-[11px] font-bold tracking-[0.05em] uppercase text-[var(--accent)] mb-1.5">
-        <span>estuda.gov.br</span>
+  <div className="flex flex-wrap items-start justify-between gap-x-6 gap-y-3.5 mb-6 pb-4 border-b border-[var(--line)]">
+    <div className="min-w-[min(100%,380px)] flex-1 text-left">
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] font-bold tracking-[0.05em] uppercase text-[var(--accent)] mb-1.5">
+        <span className="whitespace-nowrap">estuda.gov.br</span>
         <span aria-hidden="true" className="text-[var(--subtle)]">
           /
         </span>
         <span className="text-[var(--muted)]">{eyebrow}</span>
       </div>
-      <h2 className="m-0 font-display text-[23px] sm:text-[27px] font-bold tracking-[-0.02em] text-[var(--text)] [text-wrap:balance]">
+      <h2 className="m-0 font-display text-[23px] sm:text-[27px] font-bold leading-[1.2] tracking-[-0.02em] text-[var(--text)] text-left">
         {title}
       </h2>
-      <p className="mt-1.5 mb-0 text-[13.5px] leading-relaxed text-[var(--muted)] max-w-3xl">{description}</p>
+      <p className="mt-1.5 mb-0 text-[13.5px] leading-relaxed text-[var(--muted)] max-w-3xl text-left">
+        {description}
+      </p>
     </div>
-    {actions && <div className="flex flex-wrap items-center gap-2 shrink-0 sm:pt-1">{actions}</div>}
+    {actions && (
+      <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full sm:pt-0.5">
+        {actions}
+      </div>
+    )}
   </div>
 );
 
@@ -51,23 +57,31 @@ export const Panel: React.FC<PanelProps> = ({
   <section className={`ce-panel min-w-0 max-w-full p-4 sm:p-5 rounded-[10px] ${className}`}>
     {(title || action) && (
       <div
-        className={`flex flex-col ${
-          stackHeader ? '' : 'sm:flex-row sm:items-start sm:justify-between'
-        } gap-2.5 sm:gap-3 mb-4 pb-3 border-b border-[var(--line)]`}
+        className={`flex ${
+          stackHeader ? 'flex-col' : 'flex-wrap items-start justify-between'
+        } gap-x-4 gap-y-2.5 mb-4 pb-3 border-b border-[var(--line)]`}
       >
-        <div className="min-w-0 w-full">
+        <div className={stackHeader ? 'min-w-0 w-full text-left' : 'min-w-[min(100%,240px)] flex-1 text-left'}>
           {title && (
             <h3
-              className={`m-0 font-display text-[15.5px] font-bold tracking-[-0.015em] text-[var(--text)] ${
+              className={`m-0 font-display text-[15.5px] font-bold leading-snug tracking-[-0.015em] text-[var(--text)] text-left ${
                 stackHeader ? 'whitespace-nowrap overflow-x-auto' : ''
               }`}
             >
               {title}
             </h3>
           )}
-          {subtitle && <p className="mt-0.5 mb-0 text-[12.5px] text-[var(--muted)]">{subtitle}</p>}
+          {subtitle && (
+            <p className="mt-0.5 mb-0 text-[12.5px] leading-relaxed text-[var(--muted)] text-left">
+              {subtitle}
+            </p>
+          )}
         </div>
-        {action && <div className="flex flex-wrap items-center gap-2 shrink-0">{action}</div>}
+        {action && (
+          <div className="flex flex-wrap items-center gap-2 min-w-0 max-w-full">
+            {action}
+          </div>
+        )}
       </div>
     )}
     {children}

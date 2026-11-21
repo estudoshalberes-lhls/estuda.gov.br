@@ -396,9 +396,9 @@ export const ProofsPage: React.FC = () => {
             return (
               <Panel key={pf.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div className="min-w-0">
+                  <div className="min-w-[min(100%,260px)] flex-1 text-left">
                     <div className="flex flex-wrap items-center gap-2">
-                      <h3 className="m-0 font-display text-[15px] font-bold text-[var(--text)] truncate">
+                      <h3 className="m-0 font-display text-[15px] font-bold leading-snug text-[var(--text)] text-left break-words">
                         {visibleName(pf.name)}
                       </h3>
                       <span className="px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[10.5px] font-bold text-[var(--accent)]">
@@ -414,7 +414,7 @@ export const ProofsPage: React.FC = () => {
                     </div>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
                     <button
                       type="button"
                       onClick={() =>

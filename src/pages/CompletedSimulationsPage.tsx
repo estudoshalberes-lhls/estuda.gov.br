@@ -290,7 +290,7 @@ export const CompletedSimulationsPage: React.FC = () => {
                             <Stamp className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                             <span>Diário Oficial dos Estudos · Edital {editalNum}</span>
                           </div>
-                          <p className="m-0 mt-1 text-[12px] leading-relaxed text-[var(--text)]">
+                          <p className="m-0 mt-1 text-[12px] leading-relaxed text-[var(--text)] text-justify">
                             A Banca Examinadora ({sim.banca || 'Colegiado Interno'}) torna público o resultado preliminar de{' '}
                             <strong>{candidateName}</strong> na avaliação <strong>{sim.titulo}</strong>: pontuação de{' '}
                             <strong className="font-mono-num">{sim.aproveitamento}%</strong> ({sim.acertos} acertos em {sim.total} questões
@@ -304,7 +304,7 @@ export const CompletedSimulationsPage: React.FC = () => {
                             .
                           </p>
                         </div>
-                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
                           <button
                             type="button"
                             onClick={() => handlePrintOfficialSheet(sim.id)}

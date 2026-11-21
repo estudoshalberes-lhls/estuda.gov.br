@@ -266,7 +266,7 @@ export const FlashcardsReviewModal: React.FC<FlashcardsReviewModalProps> = ({
                 <div className="text-[10.5px] font-extrabold uppercase tracking-wider text-[var(--accent)] mb-1.5">
                   Frente (Estímulo / Recordação Ativa)
                 </div>
-                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 text-[13.5px] leading-relaxed text-[var(--text)]">
                   <StructuredLegalText text={activeCard.front} />
                 </div>
                 {activeCard.frontMeta && (
@@ -286,8 +286,8 @@ export const FlashcardsReviewModal: React.FC<FlashcardsReviewModalProps> = ({
                   <div className="rounded-xl border border-[var(--good)]/35 bg-[var(--good)]/5 p-4 text-[13.5px] leading-relaxed text-[var(--text)]">
                     <StructuredLegalText text={activeCard.back} />
                     {activeCard.backExtra && (
-                      <div className="mt-3 pt-2.5 border-t border-[var(--good)]/20 text-[12px] text-[var(--muted)] whitespace-pre-wrap">
-                        {activeCard.backExtra}
+                      <div className="mt-3 pt-2.5 border-t border-[var(--good)]/20 text-[12px] text-[var(--muted)]">
+                        <StructuredLegalText text={activeCard.backExtra} compact />
                       </div>
                     )}
                   </div>

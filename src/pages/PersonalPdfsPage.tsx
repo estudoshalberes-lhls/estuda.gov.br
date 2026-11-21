@@ -431,9 +431,9 @@ export const PersonalPdfsPage: React.FC = () => {
                   key={file.id}
                   className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3"
                 >
-                  <div className="min-w-0">
-                    <div className="flex items-center gap-2 min-w-0">
-                      <strong className="text-[13.5px] font-bold text-[var(--text)] truncate">
+                  <div className="min-w-[min(100%,240px)] flex-1 text-left">
+                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                      <strong className="text-[13.5px] font-bold leading-snug text-[var(--text)] break-words">
                         {visibleName(file.name)}
                       </strong>
                       {isAnnotated && (
@@ -452,7 +452,7 @@ export const PersonalPdfsPage: React.FC = () => {
                     </span>
                   </div>
 
-                  <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                  <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
                     <button
                       type="button"
                       onClick={() =>
