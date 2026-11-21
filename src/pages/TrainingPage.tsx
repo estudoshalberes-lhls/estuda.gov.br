@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlignLeft,
   Database,
@@ -52,6 +52,18 @@ export const TrainingPage: React.FC = () => {
   const [searchTerm, setSearchTerm] = useState<string>('');
   const [printIncludeAnswers, setPrintIncludeAnswers] = useState<boolean>(true);
   const [showPrintPreview, setShowPrintPreview] = useState<boolean>(false);
+  const [isPrintSheetMounted, setIsPrintSheetMounted] = useState<boolean>(false);
+
+  useEffect(() => {
+    const onBeforePrint = () => setIsPrintSheetMounted(true);
+    const onAfterPrint = () => setIsPrintSheetMounted(false);
+    window.addEventListener('beforeprint', onBeforePrint);
+    window.addEventListener('afterprint', onAfterPrint);
+    return () => {
+      window.removeEventListener('beforeprint', onBeforePrint);
+      window.removeEventListener('afterprint', onAfterPrint);
+    };
+  }, []);
 
   const [editingQuestion, setEditingQuestion] = useState<{
     id: string;
@@ -276,7 +288,8 @@ export const TrainingPage: React.FC = () => {
       toast('Não há questões disponíveis para imprimir com os filtros atuais.', true);
       return;
     }
-    window.setTimeout(() => window.print(), 60);
+    setIsPrintSheetMounted(true);
+    window.setTimeout(() => window.print(), 80);
   };
 
   return (
@@ -788,13 +801,15 @@ export const TrainingPage: React.FC = () => {
         </div>
       )}
 
-      <QuestionsOfficialPrintSheet
-        questions={printableQuestions}
-        scopeLabel={subject}
-        formatLabel={printFormatLabel}
-        holderName={holderName}
-        includeAnswersAndComments={printIncludeAnswers}
-      />
+      {(isPrintSheetMounted || showPrintPreview) && (
+        <QuestionsOfficialPrintSheet
+          questions={printableQuestions}
+          scopeLabel={subject}
+          formatLabel={printFormatLabel}
+          holderName={holderName}
+          includeAnswersAndComments={printIncludeAnswers}
+        />
+      )}
     </div>
   );
 };

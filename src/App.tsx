@@ -14,42 +14,172 @@ import { OfflineIndicator } from './components/ui/OfflineIndicator';
 import { CareerAchievementWatcher } from './components/performance/CareerAchievementWatcher';
 import { ModuleName } from './types/study';
 
-const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
-const TrainingPage = lazy(() => import('./pages/TrainingPage').then((m) => ({ default: m.TrainingPage })));
-const SimulationPage = lazy(() => import('./pages/SimulationPage').then((m) => ({ default: m.SimulationPage })));
-const CompletedSimulationsPage = lazy(() =>
+const CHUNK_RELOAD_GUARD_KEY = 'estuda_chunk_reload_once';
+
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+): React.LazyExoticComponent<T> {
+  return lazy(async () => {
+    try {
+      const mod = await factory();
+      if (typeof window !== 'undefined') {
+        try {
+          sessionStorage.removeItem(CHUNK_RELOAD_GUARD_KEY);
+        } catch {
+          // ignore storage errors
+        }
+      }
+      return mod;
+    } catch (firstErr) {
+      try {
+        await new Promise((r) => window.setTimeout(r, 250));
+        return await factory();
+      } catch (secondErr) {
+        if (typeof window !== 'undefined') {
+          let alreadyReloaded = false;
+          try {
+            alreadyReloaded = sessionStorage.getItem(CHUNK_RELOAD_GUARD_KEY) === '1';
+            if (!alreadyReloaded) {
+              sessionStorage.setItem(CHUNK_RELOAD_GUARD_KEY, '1');
+            }
+          } catch {
+            // ignore storage errors
+          }
+          if (!alreadyReloaded) {
+            window.location.reload();
+          }
+        }
+        throw secondErr || firstErr;
+      }
+    }
+  });
+}
+
+interface AppErrorBoundaryProps {
+  children: React.ReactNode;
+  scope?: 'root' | 'page';
+  resetKey?: string;
+  onResetToHome?: () => void;
+}
+
+interface AppErrorBoundaryState {
+  hasError: boolean;
+  errorMessage: string;
+}
+
+class AppErrorBoundary extends React.Component<AppErrorBoundaryProps, AppErrorBoundaryState> {
+  state: AppErrorBoundaryState = { hasError: false, errorMessage: '' };
+
+  static getDerivedStateFromError(error: unknown): AppErrorBoundaryState {
+    return {
+      hasError: true,
+      errorMessage: error instanceof Error ? error.message : String(error || 'Erro inesperado'),
+    };
+  }
+
+  componentDidUpdate(prevProps: AppErrorBoundaryProps) {
+    if (this.state.hasError && prevProps.resetKey !== this.props.resetKey) {
+      this.setState({ hasError: false, errorMessage: '' });
+    }
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error('[estuda.gov.br] Erro capturado pelo ErrorBoundary:', error);
+  }
+
+  render() {
+    if (!this.state.hasError) {
+      return this.props.children;
+    }
+
+    const isPageScope = this.props.scope === 'page';
+
+    return (
+      <div
+        className={
+          isPageScope
+            ? 'rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] p-6 my-4'
+            : 'min-h-screen flex items-center justify-center bg-[#f4f6f9] text-[#071d41] p-6'
+        }
+      >
+        <div className="max-w-lg w-full mx-auto rounded-xl border border-[#b6c6dc] bg-white p-6 shadow-sm">
+          <div className="text-[11px] font-extrabold uppercase tracking-[0.1em] text-[#1351b4]">
+            ESTUDA.GOV.BR · RECUPERAÇÃO AUTOMÁTICA
+          </div>
+          <h2 className="m-0 mt-1.5 text-[18px] font-extrabold text-[#071d41]">
+            {isPageScope ? 'Este módulo encontrou um erro ao renderizar' : 'Não foi possível carregar a página'}
+          </h2>
+          <p className="m-0 mt-2 text-[13px] text-[#3d4f6b] leading-relaxed">
+            Seus dados salvos localmente e na nuvem continuam intactos. Clique em recarregar para atualizar os módulos da aplicação.
+          </p>
+          {this.state.errorMessage && (
+            <div className="mt-3 rounded-lg border border-[#d6e0ec] bg-[#f7f9fc] px-3 py-2 font-mono text-[11.5px] text-[#5c6e8a] break-words">
+              {this.state.errorMessage}
+            </div>
+          )}
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => window.location.reload()}
+              className="px-4 py-2 rounded-lg bg-[#1351b4] text-white text-[12.5px] font-bold border-0 cursor-pointer hover:bg-[#0c326f]"
+            >
+              Recarregar página
+            </button>
+            {isPageScope && this.props.onResetToHome && (
+              <button
+                type="button"
+                onClick={() => {
+                  this.setState({ hasError: false, errorMessage: '' });
+                  this.props.onResetToHome?.();
+                }}
+                className="px-4 py-2 rounded-lg border border-[#b6c6dc] bg-[#f7f9fc] text-[#071d41] text-[12.5px] font-bold cursor-pointer hover:bg-[#edf2f8]"
+              >
+                Voltar ao Início
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+}
+
+const HomePage = lazyWithRetry(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
+const TrainingPage = lazyWithRetry(() => import('./pages/TrainingPage').then((m) => ({ default: m.TrainingPage })));
+const SimulationPage = lazyWithRetry(() => import('./pages/SimulationPage').then((m) => ({ default: m.SimulationPage })));
+const CompletedSimulationsPage = lazyWithRetry(() =>
   import('./pages/CompletedSimulationsPage').then((m) => ({ default: m.CompletedSimulationsPage })),
 );
-const PerformancePage = lazy(() => import('./pages/PerformancePage').then((m) => ({ default: m.PerformancePage })));
-const DiscursivePage = lazy(() => import('./pages/DiscursivePage').then((m) => ({ default: m.DiscursivePage })));
-const ProofsPage = lazy(() => import('./pages/ProofsPage').then((m) => ({ default: m.ProofsPage })));
-const ErrorNotebookPage = lazy(() =>
+const PerformancePage = lazyWithRetry(() => import('./pages/PerformancePage').then((m) => ({ default: m.PerformancePage })));
+const DiscursivePage = lazyWithRetry(() => import('./pages/DiscursivePage').then((m) => ({ default: m.DiscursivePage })));
+const ProofsPage = lazyWithRetry(() => import('./pages/ProofsPage').then((m) => ({ default: m.ProofsPage })));
+const ErrorNotebookPage = lazyWithRetry(() =>
   import('./pages/ErrorNotebookPage').then((m) => ({ default: m.ErrorNotebookPage })),
 );
-const CaseLawPage = lazy(() => import('./pages/CaseLawPage').then((m) => ({ default: m.CaseLawPage })));
-const ContestsPage = lazy(() => import('./pages/ContestsPage').then((m) => ({ default: m.ContestsPage })));
-const EditalPage = lazy(() => import('./pages/EditalPage').then((m) => ({ default: m.EditalPage })));
-const SchedulePage = lazy(() => import('./pages/SchedulePage').then((m) => ({ default: m.SchedulePage })));
-const CompletedGoalsPage = lazy(() =>
+const CaseLawPage = lazyWithRetry(() => import('./pages/CaseLawPage').then((m) => ({ default: m.CaseLawPage })));
+const ContestsPage = lazyWithRetry(() => import('./pages/ContestsPage').then((m) => ({ default: m.ContestsPage })));
+const EditalPage = lazyWithRetry(() => import('./pages/EditalPage').then((m) => ({ default: m.EditalPage })));
+const SchedulePage = lazyWithRetry(() => import('./pages/SchedulePage').then((m) => ({ default: m.SchedulePage })));
+const CompletedGoalsPage = lazyWithRetry(() =>
   import('./pages/CompletedGoalsPage').then((m) => ({ default: m.CompletedGoalsPage })),
 );
-const IncompleteGoalsPage = lazy(() =>
+const IncompleteGoalsPage = lazyWithRetry(() =>
   import('./pages/IncompleteGoalsPage').then((m) => ({ default: m.IncompleteGoalsPage })),
 );
-const LawsPage = lazy(() => import('./pages/LawsPage').then((m) => ({ default: m.LawsPage })));
-const IncidenceMatrixPage = lazy(() =>
+const LawsPage = lazyWithRetry(() => import('./pages/LawsPage').then((m) => ({ default: m.LawsPage })));
+const IncidenceMatrixPage = lazyWithRetry(() =>
   import('./pages/IncidenceMatrixPage').then((m) => ({ default: m.IncidenceMatrixPage })),
 );
-const PersonalPdfsPage = lazy(() =>
+const PersonalPdfsPage = lazyWithRetry(() =>
   import('./pages/PersonalPdfsPage').then((m) => ({ default: m.PersonalPdfsPage })),
 );
-const SummariesPage = lazy(() => import('./pages/SummariesPage').then((m) => ({ default: m.SummariesPage })));
-const CriticalPointsPage = lazy(() =>
+const SummariesPage = lazyWithRetry(() => import('./pages/SummariesPage').then((m) => ({ default: m.SummariesPage })));
+const CriticalPointsPage = lazyWithRetry(() =>
   import('./pages/CriticalPointsPage').then((m) => ({ default: m.CriticalPointsPage })),
 );
-const UtilitiesPage = lazy(() => import('./pages/UtilitiesPage').then((m) => ({ default: m.UtilitiesPage })));
-const BackupPage = lazy(() => import('./pages/BackupPage').then((m) => ({ default: m.BackupPage })));
-const SettingsPage = lazy(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const UtilitiesPage = lazyWithRetry(() => import('./pages/UtilitiesPage').then((m) => ({ default: m.UtilitiesPage })));
+const BackupPage = lazyWithRetry(() => import('./pages/BackupPage').then((m) => ({ default: m.BackupPage })));
+const SettingsPage = lazyWithRetry(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
 
 const PageLoadingFallback: React.FC = () => (
   <div className="flex items-center justify-center min-h-[280px] rounded-xl border border-[var(--line)] bg-[var(--panel)] px-6 py-12">
@@ -147,7 +277,13 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
           }`}
           id="page-content"
         >
-          <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
+          <AppErrorBoundary
+            scope="page"
+            resetKey={activePage}
+            onResetToHome={() => setActivePage('Início')}
+          >
+            <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
+          </AppErrorBoundary>
         </section>
 
         {!examFocusMode && (
@@ -243,9 +379,11 @@ const MainApp: React.FC = () => {
 
 export function App() {
   return (
-    <StudyProvider>
-      <MainApp />
-    </StudyProvider>
+    <AppErrorBoundary scope="root">
+      <StudyProvider>
+        <MainApp />
+      </StudyProvider>
+    </AppErrorBoundary>
   );
 }
 
