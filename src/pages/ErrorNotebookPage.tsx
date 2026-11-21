@@ -48,6 +48,7 @@ import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 import { ErrorNotebookOfficialPrintSheet } from '../components/errors/ErrorNotebookOfficialPrintSheet';
+import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
 
 const UNASSIGNED_SUBJECT_FILTER = '__UNASSIGNED__';
 const SIMULADOS_FILTER = '__SIMULADOS__';
@@ -855,6 +856,7 @@ export const ErrorNotebookPage: React.FC = () => {
   const [newTextRawBeforeFormat, setNewTextRawBeforeFormat] = useState<string | null>(null);
   const [newTextAutoFormatted, setNewTextAutoFormatted] = useState(false);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
+  const [srsFlashcardsOpen, setSrsFlashcardsOpen] = useState(false);
 
   const handlePasteNewText = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const pasted = e.clipboardData.getData('text/plain');
@@ -1896,6 +1898,16 @@ export const ErrorNotebookPage: React.FC = () => {
         eyebrow="OUVIDORIA ESTUDANTIL · CADERNO DE ERROS"
         title="Revisão direcionada de erros e anotações"
         description="Cadastre suas matérias, associe questões pendentes de correção, filtre por disciplina e imprima o caderno de erros em conjunto ou separadamente."
+        actions={
+          <button
+            type="button"
+            onClick={() => setSrsFlashcardsOpen(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
+          >
+            <Layers className="w-3.5 h-3.5" />
+            Estudar em Flashcards (SRS)
+          </button>
+        }
       />
 
       {/* Cadastro de Matérias & Filtro Rápido com Impressão Individual */}
@@ -3108,6 +3120,12 @@ export const ErrorNotebookPage: React.FC = () => {
           activePrintConfig.mode === 'single' ? false : pageBreakBySubject
         }
         holderName={googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal'}
+      />
+
+      <FlashcardsReviewModal
+        open={srsFlashcardsOpen}
+        onClose={() => setSrsFlashcardsOpen(false)}
+        initialSources={['errors']}
       />
     </div>
   );

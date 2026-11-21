@@ -1,10 +1,11 @@
 import React, { useMemo, useState } from 'react';
-import { Pencil, Plus, Printer, Search, Trash2 } from 'lucide-react';
+import { Layers, Pencil, Plus, Printer, Search, Trash2 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { normalizeSearch } from '../lib/parsers';
 import { CaseLawItem } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { CaseLawOfficialPrintSheet } from '../components/print/CaseLawOfficialPrintSheet';
+import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
 
 const CATEGORIES = ['Súmula', 'Jurisprudência'] as const;
 
@@ -26,6 +27,7 @@ export const CaseLawPage: React.FC = () => {
   const [filterCat, setFilterCat] = useState('Todas');
   const [filterCourt, setFilterCourt] = useState('Todos');
   const [search, setSearch] = useState('');
+  const [flashcardsOpen, setFlashcardsOpen] = useState(false);
 
   const resetForm = () => {
     setEditingId(undefined);
@@ -105,15 +107,26 @@ export const CaseLawPage: React.FC = () => {
           title="Súmulas, teses e jurisprudência"
           description="Catálogo consolidado de súmulas vinculantes, teses de repercussão e entendimentos relevantes dos tribunais superiores."
           actions={
-            <button
-              type="button"
-              disabled={filtered.length === 0}
-              onClick={() => window.print()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
-            >
-              <Printer className="w-3.5 h-3.5" />
-              Imprimir Folha Oficial (A4)
-            </button>
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={db.caseLaw.length === 0}
+                onClick={() => setFlashcardsOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-bold hover:bg-[var(--accent)] hover:text-white disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              >
+                <Layers className="w-3.5 h-3.5" />
+                Estudar em Flashcards (SRS)
+              </button>
+              <button
+                type="button"
+                disabled={filtered.length === 0}
+                onClick={() => window.print()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Imprimir Folha Oficial (A4)
+              </button>
+            </div>
           }
         />
 
@@ -314,6 +327,12 @@ export const CaseLawPage: React.FC = () => {
         items={filtered}
         filterSummary={filterSummary}
         holderName={holderName}
+      />
+
+      <FlashcardsReviewModal
+        open={flashcardsOpen}
+        onClose={() => setFlashcardsOpen(false)}
+        initialSources={['caselaw']}
       />
     </>
   );

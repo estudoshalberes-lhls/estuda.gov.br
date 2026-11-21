@@ -99,6 +99,7 @@ import {
   formatScheduleDuration,
   getCurrentWeekDates,
   getWeekDatesForIsoWeek,
+  goalDateIso,
   healAndNormalizeLawItems,
   inferFixedSubjectFromTopic,
   isContestOrEditalTxtDescriptor,
@@ -228,6 +229,7 @@ import {
   subscribeSyncActivityLogs,
 } from '../lib/syncActivityLog';
 import { publishTimerTickSnapshot } from '../lib/timerTickStore';
+import { computeNextSrsSchedule, FlashcardRating } from '../lib/studyTools';
 import {
   ActiveTimerLink,
   AppPreferences,
@@ -252,6 +254,7 @@ import {
   PersonalPdfFile,
   PomodoroMode,
   ProofFileRecord,
+  StudyCycleConfig,
   Question,
   QuestionAlternative,
   QuizAnswer,
@@ -745,6 +748,12 @@ interface StudyContextValue {
   }) => boolean;
   logQuickStudyMinutes: (day: WeekdayName, topic: ScheduleTopic, minutes: number) => boolean;
   deleteStudyTimeRecord: (quizId: string) => void;
+  updateStudyCycle: (updater: (prev: StudyCycleConfig) => StudyCycleConfig) => void;
+  completeStudyCycleBlock: (itemId: string, customMinutes?: number) => void;
+  rateFlashcardSrs: (
+    card: { id: string; errorEntryId?: string; srsLevel: number },
+    rating: FlashcardRating,
+  ) => void;
 
   // Derived data & Fixed Subjects
   disciplines: string[];
@@ -895,6 +904,7 @@ interface StudyContextValue {
     },
   ) => void;
   reopenCompletedGoal: (id: string) => void;
+  syncUncountedCompletedGoals: () => number;
   saveWeeklyGoalNote: (weekMondayIso: string, notes: string, silent?: boolean) => void;
   completeIncompleteGoal: (id: string) => void;
   deleteIncompleteGoal: (id: string) => void;
@@ -1971,6 +1981,13 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     contests: normalizedContests,
     lawReadDates: normalizedLawReadDates,
     annotations: loadedAnnotations,
+    ...(dataObj.studyCycle &&
+    typeof dataObj.studyCycle === 'object' &&
+    Array.isArray((dataObj.studyCycle as StudyCycleConfig).items)
+      ? { studyCycle: dataObj.studyCycle as StudyCycleConfig }
+      : seed.studyCycle
+      ? { studyCycle: seed.studyCycle }
+      : {}),
     preferences: {
       ...DEFAULT_PREFERENCES,
       ...(dataObj.preferences && typeof dataObj.preferences === 'object' ? dataObj.preferences : {}),
@@ -4595,9 +4612,25 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }, 4200);
   }, []);
 
+  const getPomodoroDurations = useCallback(
+    (mode: PomodoroMode, prefs?: AppPreferences): { focusSec: number; breakSec: number } => {
+      if (mode === '25-5') return { focusSec: 25 * 60, breakSec: 5 * 60 };
+      if (mode === '45-10') return { focusSec: 45 * 60, breakSec: 10 * 60 };
+      if (mode === '50-10') return { focusSec: 50 * 60, breakSec: 10 * 60 };
+      if (mode === 'custom') {
+        const focusMin = Math.max(5, Math.min(180, Number(prefs?.pomodoro_focus_minutes) || 40));
+        const breakMin = Math.max(1, Math.min(60, Number(prefs?.pomodoro_break_minutes) || 10));
+        return { focusSec: focusMin * 60, breakSec: breakMin * 60 };
+      }
+      return { focusSec: 0, breakSec: 0 };
+    },
+    [],
+  );
+
   const pomodoroModeRef = useRef<PomodoroMode>(pomodoroMode);
   const pomodoroPhaseRef = useRef<'focus' | 'break'>(pomodoroPhase);
   const pomodoroRemainingRef = useRef<number>(pomodoroRemainingSeconds);
+  const commitTimerToScheduleRef = useRef<() => boolean>(() => false);
   const lastWallSecRef = useRef<number>(Math.floor(Date.now() / 1000));
   const lastTimerSecRef = useRef<number>(computeCurrentTimerSeconds(timerState, Date.now()));
   pomodoroModeRef.current = pomodoroMode;
@@ -4649,23 +4682,36 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       if (pomodoroModeRef.current !== 'continuous' && t.startedAt > 0 && deltaSec > 0) {
         const mode = pomodoroModeRef.current;
-        const focusSec = mode === '25-5' ? 25 * 60 : 50 * 60;
-        const breakSec = mode === '25-5' ? 5 * 60 : 10 * 60;
+        const { focusSec, breakSec } = getPomodoroDurations(mode, dbRef.current.preferences);
         const prevRem = pomodoroRemainingRef.current;
         if (prevRem > deltaSec) {
           pomodoroRemainingRef.current = prevRem - deltaSec;
         } else {
           playPomodoroChime();
-          const nextPhase = pomodoroPhaseRef.current === 'focus' ? 'break' : 'focus';
+          const finishedFocus = pomodoroPhaseRef.current === 'focus';
+          const nextPhase = finishedFocus ? 'break' : 'focus';
           pomodoroPhaseRef.current = nextPhase;
           const nextRem = nextPhase === 'break' ? breakSec : focusSec;
           pomodoroRemainingRef.current = nextRem;
           setPomodoroPhase(nextPhase);
           setPomodoroRemainingSeconds(nextRem);
+          const shouldAutoCommit =
+            finishedFocus &&
+            dbRef.current.preferences?.pomodoro_auto_commit !== false &&
+            Boolean(activeTimerTopicRef.current);
           window.setTimeout(() => {
+            if (shouldAutoCommit) {
+              const committed = commitTimerToScheduleRef.current();
+              if (committed) {
+                toast(
+                  `Foco Pomodoro concluído e lançado automaticamente! Faça uma pausa de ${Math.round(breakSec / 60)} min.`,
+                );
+                return;
+              }
+            }
             toast(
               nextPhase === 'break'
-                ? `Ciclo Pomodoro concluído! Faça uma pausa de ${breakSec / 60} min.`
+                ? `Ciclo Pomodoro concluído! Faça uma pausa de ${Math.round(breakSec / 60)} min.`
                 : 'Pausa encerrada! Hora de voltar ao foco.',
             );
           }, 0);
@@ -10241,18 +10287,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       pomodoroPhaseRef.current = 'focus';
       setPomodoroModeState(mode);
       setPomodoroPhase('focus');
-      if (mode === '25-5') {
-        setPomodoroRemainingSeconds(25 * 60);
-        toast('Modo Pomodoro 25/5 ativado.');
-      } else if (mode === '50-10') {
-        setPomodoroRemainingSeconds(50 * 60);
-        toast('Modo Pomodoro 50/10 ativado.');
-      } else {
+      if (mode === 'continuous') {
         setPomodoroRemainingSeconds(0);
         toast('Cronômetro em modo contínuo.');
+        return;
       }
+      const { focusSec, breakSec } = getPomodoroDurations(mode, dbRef.current.preferences);
+      setPomodoroRemainingSeconds(focusSec);
+      const label =
+        mode === 'custom'
+          ? `${Math.round(focusSec / 60)}/${Math.round(breakSec / 60)} (Personalizado)`
+          : mode.replace('-', '/');
+      toast(`Modo Pomodoro ${label} ativado.`);
     },
-    [toast],
+    [getPomodoroDurations, toast],
   );
 
   const linkTimerToScheduleTopic = useCallback(
@@ -10412,6 +10460,98 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return true;
     },
     [activeTimerTopic, computeCurrentTimerSeconds, toast],
+  );
+
+  commitTimerToScheduleRef.current = () => commitTimerToSchedule();
+
+  const updateStudyCycle = useCallback(
+    (updater: (prev: StudyCycleConfig) => StudyCycleConfig) => {
+      setDb((prev) => {
+        const current: StudyCycleConfig = prev.studyCycle || {
+          activeIndex: 0,
+          completedCycles: 0,
+          items: [],
+        };
+        const next = updater(current);
+        return {
+          ...prev,
+          studyCycle: next,
+        };
+      });
+    },
+    [],
+  );
+
+  const completeStudyCycleBlock = useCallback(
+    (itemId: string, customMinutes?: number) => {
+      const todayIso = localDateIso();
+      const todayWeekday: WeekdayName = WEEKDAYS[(new Date().getDay() + 6) % 7];
+      let toastMessage = '';
+      setDb((prev) => {
+        const current: StudyCycleConfig = prev.studyCycle || {
+          activeIndex: 0,
+          completedCycles: 0,
+          items: [],
+        };
+        const idx = current.items.findIndex((it) => it.id === itemId);
+        if (idx === -1) return prev;
+        const target = current.items[idx];
+        const minutes = Math.max(5, Math.round(customMinutes ?? target.targetMinutes ?? 60));
+        const addedSeconds = minutes * 60;
+        const updatedItems = current.items.map((it) =>
+          it.id === itemId
+            ? {
+                ...it,
+                completedMinutes: (it.completedMinutes || 0) + minutes,
+                completions: (it.completions || 0) + 1,
+                lastStudiedAt: todayIso,
+              }
+            : it,
+        );
+        const totalItems = updatedItems.length;
+        const nextIdx = totalItems > 0 ? (idx + 1) % totalItems : 0;
+        const wrappedCycle = totalItems > 0 && idx + 1 >= totalItems;
+        const nextCompletedCycles = current.completedCycles + (wrappedCycle ? 1 : 0);
+        const nextItem = updatedItems[nextIdx];
+
+        const record: StudyTimeRecord = {
+          quizId: `cycle-${uid(10)}`,
+          day: todayWeekday,
+          date: todayIso,
+          source: 'schedule',
+          recordedAt: new Date().toISOString(),
+          allocations: [
+            {
+              subject: target.subject,
+              seconds: addedSeconds,
+              topicLabel: target.notes
+                ? `${target.subject} (Ciclo: ${target.notes})`
+                : `${target.subject} (Ciclo de Estudos)`,
+              ...(target.contest ? { concursoAlvo: target.contest } : {}),
+            },
+          ],
+        };
+
+        toastMessage = wrappedCycle
+          ? `+${formatScheduleDuration(addedSeconds)} em ${visibleName(target.subject)}! Ciclo #${nextCompletedCycles} completo — retornando para ${visibleName(nextItem?.subject || target.subject)}.`
+          : `+${formatScheduleDuration(addedSeconds)} em ${visibleName(target.subject)}! Próximo bloco do ciclo: ${visibleName(nextItem?.subject || target.subject)}.`;
+
+        return {
+          ...prev,
+          studyCycle: {
+            ...current,
+            activeIndex: nextIdx,
+            completedCycles: nextCompletedCycles,
+            items: updatedItems,
+          },
+          studyTimeRecords: [...prev.studyTimeRecords, record],
+        };
+      });
+      if (toastMessage) {
+        toast(toastMessage);
+      }
+    },
+    [toast],
   );
 
   const logQuickStudyMinutes = useCallback(
@@ -11852,6 +11992,85 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [toast],
   );
 
+  const rateFlashcardSrs = useCallback(
+    (
+      card: { id: string; errorEntryId?: string; srsLevel: number },
+      rating: FlashcardRating,
+    ) => {
+      const todayIso = localDateIso();
+      const todayBr = localDateBrazilian();
+      const { nextLevel, nextReviewIso, daysAdded } = computeNextSrsSchedule(
+        card.srsLevel || 0,
+        rating,
+        todayIso,
+      );
+
+      if (card.errorEntryId) {
+        const targetId = card.errorEntryId;
+        if (targetId.startsWith('correcao-prova:')) {
+          const now = new Date().toISOString().slice(0, 19);
+          setDb((prev) => ({
+            ...prev,
+            proofFiles: prev.proofFiles.map((pf) => ({
+              ...pf,
+              correcoes: pf.correcoes.map((corr) => {
+                const entryId = `correcao-prova:${pf.kind}:${pf.bank}:${pf.name}:${corr.id}`;
+                if (entryId !== targetId) return corr;
+                return {
+                  ...corr,
+                  corrigido: rating !== 'hard',
+                  corrigido_em: rating !== 'hard' ? corr.corrigido_em || todayBr : corr.corrigido_em,
+                  nivel_revisao: nextLevel,
+                  revisado_em: todayIso,
+                  proxima_revisao: nextReviewIso,
+                  atualizado_em: now,
+                };
+              }),
+            })),
+          }));
+        } else {
+          setDb((prev) => ({
+            ...prev,
+            annotations: prev.annotations.map((item) => {
+              if (item.id !== targetId) return item;
+              return {
+                ...item,
+                corrigido: rating !== 'hard',
+                corrigido_em: rating !== 'hard' ? item.corrigido_em || todayBr : item.corrigido_em,
+                nivel_revisao: nextLevel,
+                revisado_em: todayIso,
+                proxima_revisao: nextReviewIso,
+              };
+            }),
+          }));
+        }
+      } else {
+        setDb((prev) => {
+          const prevEntry = prev.preferences?.flashcard_srs?.[card.id];
+          return {
+            ...prev,
+            preferences: {
+              ...prev.preferences,
+              flashcard_srs: {
+                ...(prev.preferences?.flashcard_srs || {}),
+                [card.id]: {
+                  level: nextLevel,
+                  nextReviewIso,
+                  lastReviewedIso: todayIso,
+                  reviews: (prevEntry?.reviews || 0) + 1,
+                },
+              },
+            },
+          };
+        });
+      }
+
+      const ratingLabel = rating === 'hard' ? 'Difícil' : rating === 'medium' ? 'Médio' : 'Fácil';
+      toast(`Flashcard marcado como ${ratingLabel} · próxima revisão em ${daysAdded} dia(s).`);
+    },
+    [toast],
+  );
+
   const startErrorNotebookQuiz = useCallback(
     (subjectFilter = 'Todas as Matérias', onlyPending = true, simuladoKey?: string) => {
       const filterNorm = normalizeSearch(subjectFilter);
@@ -13089,35 +13308,126 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const completeScheduleTopic = useCallback(
     (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => {
       lastUrgentSaveMsRef.current = Date.now();
+      let creditedSeconds = 0;
+      let creditedSubject = '';
+      let completedTopicId = '';
+
       setDb((prev) => {
         const list = [...(currentDayTopics || prev.schedule[day] || [])];
         const [removed] = list.splice(index, 1);
         if (!removed) return prev;
+
+        completedTopicId = removed.id || '';
+        const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
+        const effectiveFixedSubject =
+          removed.disciplina_fixa?.trim() ||
+          inferFixedSubjectFromTopic(
+            { disciplina_fixa: removed.disciplina_fixa, materia: removed.materia },
+            fixedList,
+          ) ||
+          removed.materia?.trim() ||
+          'Estudo Geral';
+        const effectiveContest = removed.concurso_alvo?.trim() || undefined;
+
+        const goalDateBr =
+          removed.data ||
+          prev.scheduleDayDates?.[day] ||
+          getCurrentWeekDates()[day] ||
+          localDateBrazilian();
+        const goalDateIsoStr = goalDateIso(goalDateBr) || localDateIso();
+
+        const manualSeconds = scheduleDurationSeconds(removed.tempo || '');
+        const loggedFromRecords = removed.id
+          ? prev.studyTimeRecords.reduce(
+              (sum, rec) =>
+                sum +
+                rec.allocations
+                  .filter((a) => a.topicId === removed.id)
+                  .reduce((s, a) => s + (a.seconds || 0), 0),
+              0,
+            )
+          : 0;
+        const alreadyLoggedSeconds = Math.max(removed.estudado_segundos || 0, loggedFromRecords);
+        const secondsToAdd =
+          manualSeconds > alreadyLoggedSeconds ? manualSeconds - alreadyLoggedSeconds : 0;
+        const effectiveTotalSeconds = Math.max(manualSeconds, alreadyLoggedSeconds);
+
+        let nextStudyTimeRecords = prev.studyTimeRecords;
+        let createdRecordId: string | undefined;
+
+        if (secondsToAdd > 0) {
+          createdRecordId = `schedule-manual-${uid(12)}`;
+          const specificAssunto =
+            removed.materia?.trim() &&
+            normalizeSearch(removed.materia) !== normalizeSearch(effectiveFixedSubject)
+              ? removed.materia.trim()
+              : '';
+          const combinedLabel =
+            [specificAssunto, removed.observacoes?.trim()].filter(Boolean).join(' · ') || undefined;
+
+          const manualRecord: StudyTimeRecord = {
+            quizId: createdRecordId,
+            day,
+            date: goalDateIsoStr,
+            source: 'schedule',
+            recordedAt: new Date().toISOString(),
+            allocations: [
+              {
+                subject: effectiveFixedSubject,
+                seconds: secondsToAdd,
+                topicId: removed.id,
+                topicLabel: combinedLabel,
+                ...(effectiveContest ? { concursoAlvo: effectiveContest } : {}),
+              },
+            ],
+          };
+          nextStudyTimeRecords = [...prev.studyTimeRecords, manualRecord];
+          creditedSeconds = secondsToAdd;
+          creditedSubject = effectiveFixedSubject;
+        }
+
         const nextSchedule = { ...prev.schedule, [day]: list };
+        const formattedGoalTempo =
+          removed.tempo?.trim() ||
+          (effectiveTotalSeconds > 0 ? formatScheduleDuration(effectiveTotalSeconds) : '0min');
+
         const withCompleted: StudyDatabase = {
           ...prev,
+          studyTimeRecords: nextStudyTimeRecords,
           completedGoals: [
             {
               id: uid(10),
-              data:
-                removed.data ||
-                prev.scheduleDayDates?.[day] ||
-                getCurrentWeekDates()[day] ||
-                localDateBrazilian(),
+              data: goalDateBr,
               dia_semana: day,
-              materia: removed.materia || 'Tópico concluído',
-              tempo: removed.tempo || '0min',
+              materia: removed.materia || effectiveFixedSubject || 'Tópico concluído',
+              tempo: formattedGoalTempo,
               observacoes: removed.observacoes || '',
+              disciplina_fixa: effectiveFixedSubject,
+              ...(effectiveContest ? { concurso_alvo: effectiveContest } : {}),
+              ...(removed.id ? { topicId: removed.id } : {}),
+              ...(createdRecordId ? { studyRecordId: createdRecordId } : {}),
+              ...(effectiveTotalSeconds > 0 ? { estudado_segundos: effectiveTotalSeconds } : {}),
             },
             ...prev.completedGoals,
           ],
         };
         return buildUpdatedWeeklyScheduleState(withCompleted, nextSchedule, prev.scheduleDayDates);
       });
+
+      if (completedTopicId && activeTimerTopic?.topicId === completedTopicId) {
+        setActiveTimerTopic(null);
+      }
+
       scheduleAutoScheduleTxtSync();
-      toast('Meta concluída e arquivada.');
+      if (creditedSeconds > 0 && creditedSubject) {
+        toast(
+          `Meta concluída! +${formatScheduleDuration(creditedSeconds)} contabilizados em ${visibleName(creditedSubject)} no Portal da Transparência.`,
+        );
+      } else {
+        toast('Meta concluída e arquivada.');
+      }
     },
-    [scheduleAutoScheduleTxtSync, toast],
+    [activeTimerTopic, scheduleAutoScheduleTxtSync, toast],
   );
 
   const archiveTopicAsIncomplete = useCallback(
@@ -13147,6 +13457,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               tempo: topic.tempo,
               observacoes: topic.observacoes,
               arquivado_em: archivedAt,
+              ...(topic.disciplina_fixa ? { disciplina_fixa: topic.disciplina_fixa } : {}),
+              ...(topic.concurso_alvo ? { concurso_alvo: topic.concurso_alvo } : {}),
+              ...(topic.id ? { topicId: topic.id } : {}),
+              ...(topic.estudado_segundos ? { estudado_segundos: topic.estudado_segundos } : {}),
             },
             ...prev.incompleteGoals,
           ],
@@ -13286,10 +13600,20 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const deleteCompletedGoal = useCallback(
     (id: string) => {
-      setDb((prev) => ({
-        ...prev,
-        completedGoals: prev.completedGoals.filter((g) => g.id !== id),
-      }));
+      setDb((prev) => {
+        const target = prev.completedGoals.find((g) => g.id === id);
+        const removeRecordId =
+          target?.studyRecordId && target.studyRecordId.startsWith('schedule-manual-')
+            ? target.studyRecordId
+            : null;
+        return {
+          ...prev,
+          completedGoals: prev.completedGoals.filter((g) => g.id !== id),
+          studyTimeRecords: removeRecordId
+            ? prev.studyTimeRecords.filter((r) => r.quizId !== removeRecordId)
+            : prev.studyTimeRecords,
+        };
+      });
       toast('Meta excluída.');
     },
     [toast],
@@ -13306,24 +13630,126 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         observacoes?: string;
       },
     ) => {
-      setDb((prev) => ({
-        ...prev,
-        completedGoals: prev.completedGoals.map((g) => {
+      setDb((prev) => {
+        const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
+        let nextStudyRecords = prev.studyTimeRecords;
+
+        const nextGoals = prev.completedGoals.map((g) => {
           if (g.id !== id) return g;
           const nextMateria =
             patch.materia !== undefined ? patch.materia.trim() || g.materia : g.materia;
+          const nextData = patch.data !== undefined ? patch.data.trim() || g.data : g.data;
+          const nextDiaSemana =
+            patch.dia_semana !== undefined ? patch.dia_semana.trim() : g.dia_semana;
+          const nextTempo = patch.tempo !== undefined ? patch.tempo.trim() : g.tempo;
+          const nextObservacoes =
+            patch.observacoes !== undefined ? patch.observacoes.trim() : g.observacoes;
+
+          const parsedSeconds = scheduleDurationSeconds(nextTempo);
+          const resolvedWeekday = (WEEKDAYS.includes(nextDiaSemana as WeekdayName)
+            ? nextDiaSemana
+            : WEEKDAYS[(new Date().getDay() + 6) % 7]) as WeekdayName;
+          const resolvedDateIso = goalDateIso(nextData) || localDateIso();
+          const resolvedSubject =
+            g.disciplina_fixa?.trim() ||
+            inferFixedSubjectFromTopic(
+              { disciplina_fixa: g.disciplina_fixa, materia: nextMateria },
+              fixedList,
+            ) ||
+            nextMateria ||
+            'Estudo Geral';
+
+          let nextStudyRecordId = g.studyRecordId;
+
+          if (g.studyRecordId && g.studyRecordId.startsWith('schedule-manual-')) {
+            if (parsedSeconds > 0) {
+              nextStudyRecords = nextStudyRecords.map((rec) => {
+                if (rec.quizId !== g.studyRecordId) return rec;
+                const prevAlloc = rec.allocations[0];
+                return {
+                  ...rec,
+                  day: resolvedWeekday,
+                  date: resolvedDateIso,
+                  allocations: [
+                    {
+                      ...(prevAlloc || {}),
+                      subject: resolvedSubject,
+                      seconds: parsedSeconds,
+                      topicId: g.topicId || prevAlloc?.topicId,
+                      topicLabel:
+                        [
+                          normalizeSearch(nextMateria) !== normalizeSearch(resolvedSubject)
+                            ? nextMateria
+                            : '',
+                          nextObservacoes,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || undefined,
+                      ...(g.concurso_alvo ? { concursoAlvo: g.concurso_alvo } : {}),
+                    },
+                  ],
+                };
+              });
+            } else {
+              nextStudyRecords = nextStudyRecords.filter((rec) => rec.quizId !== g.studyRecordId);
+              nextStudyRecordId = undefined;
+            }
+          } else if (parsedSeconds > 0 && patch.tempo !== undefined && patch.tempo.trim() !== g.tempo.trim()) {
+            const existingByTopic = g.topicId
+              ? nextStudyRecords.some((rec) => rec.allocations.some((a) => a.topicId === g.topicId))
+              : false;
+            if (!existingByTopic) {
+              const newId = `schedule-manual-${uid(12)}`;
+              nextStudyRecordId = newId;
+              nextStudyRecords = [
+                ...nextStudyRecords,
+                {
+                  quizId: newId,
+                  day: resolvedWeekday,
+                  date: resolvedDateIso,
+                  source: 'schedule',
+                  recordedAt: new Date().toISOString(),
+                  allocations: [
+                    {
+                      subject: resolvedSubject,
+                      seconds: parsedSeconds,
+                      ...(g.topicId ? { topicId: g.topicId } : {}),
+                      topicLabel:
+                        [
+                          normalizeSearch(nextMateria) !== normalizeSearch(resolvedSubject)
+                            ? nextMateria
+                            : '',
+                          nextObservacoes,
+                        ]
+                          .filter(Boolean)
+                          .join(' · ') || undefined,
+                      ...(g.concurso_alvo ? { concursoAlvo: g.concurso_alvo } : {}),
+                    },
+                  ],
+                },
+              ];
+            }
+          }
+
           return {
             ...g,
-            data: patch.data !== undefined ? patch.data.trim() || g.data : g.data,
-            dia_semana:
-              patch.dia_semana !== undefined ? patch.dia_semana.trim() : g.dia_semana,
+            data: nextData,
+            dia_semana: nextDiaSemana,
             materia: nextMateria,
-            tempo: patch.tempo !== undefined ? patch.tempo.trim() : g.tempo,
-            observacoes:
-              patch.observacoes !== undefined ? patch.observacoes.trim() : g.observacoes,
+            tempo: nextTempo,
+            observacoes: nextObservacoes,
+            disciplina_fixa: resolvedSubject,
+            studyRecordId: nextStudyRecordId,
+            estudado_segundos: parsedSeconds > 0 ? parsedSeconds : g.estudado_segundos,
           };
-        }),
-      }));
+        });
+
+        return {
+          ...prev,
+          completedGoals: nextGoals,
+          studyTimeRecords: nextStudyRecords,
+        };
+      });
       toast('Meta concluída atualizada.');
     },
     [toast],
@@ -13334,26 +13760,127 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const target = db.completedGoals.find((g) => g.id === id);
       if (!target) return;
       const reopenedAt = localDateTimeBrazilian();
-      setDb((prev) => ({
-        ...prev,
-        completedGoals: prev.completedGoals.filter((g) => g.id !== id),
-        incompleteGoals: [
-          {
-            id: uid(10),
-            data: target.data,
-            dia_semana: target.dia_semana,
-            materia: target.materia,
-            tempo: target.tempo,
-            observacoes: target.observacoes,
-            arquivado_em: reopenedAt,
-          },
-          ...prev.incompleteGoals,
-        ],
-      }));
+      setDb((prev) => {
+        const removeRecordId =
+          target.studyRecordId && target.studyRecordId.startsWith('schedule-manual-')
+            ? target.studyRecordId
+            : null;
+        return {
+          ...prev,
+          completedGoals: prev.completedGoals.filter((g) => g.id !== id),
+          studyTimeRecords: removeRecordId
+            ? prev.studyTimeRecords.filter((r) => r.quizId !== removeRecordId)
+            : prev.studyTimeRecords,
+          incompleteGoals: [
+            {
+              id: uid(10),
+              data: target.data,
+              dia_semana: target.dia_semana,
+              materia: target.materia,
+              tempo: target.tempo,
+              observacoes: target.observacoes,
+              arquivado_em: reopenedAt,
+              ...(target.disciplina_fixa ? { disciplina_fixa: target.disciplina_fixa } : {}),
+              ...(target.concurso_alvo ? { concurso_alvo: target.concurso_alvo } : {}),
+              ...(target.topicId ? { topicId: target.topicId } : {}),
+            },
+            ...prev.incompleteGoals,
+          ],
+        };
+      });
       toast('Meta movida para Metas Não Concluídas.');
     },
     [db.completedGoals, toast],
   );
+
+  const syncUncountedCompletedGoals = useCallback((): number => {
+    let syncedCount = 0;
+    let totalAddedSeconds = 0;
+
+    setDb((prev) => {
+      const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
+      const existingRecordIds = new Set(prev.studyTimeRecords.map((r) => r.quizId));
+      const existingTopicIds = new Set<string>();
+      prev.studyTimeRecords.forEach((rec) => {
+        rec.allocations.forEach((a) => {
+          if (a.topicId) existingTopicIds.add(a.topicId);
+        });
+      });
+
+      const newRecords: StudyTimeRecord[] = [];
+      const nextGoals = prev.completedGoals.map((g) => {
+        const parsedSec = scheduleDurationSeconds(g.tempo || '');
+        if (parsedSec <= 0) return g;
+        if (g.studyRecordId && existingRecordIds.has(g.studyRecordId)) return g;
+        if (g.topicId && existingTopicIds.has(g.topicId)) return g;
+
+        const resolvedSubject =
+          g.disciplina_fixa?.trim() ||
+          inferFixedSubjectFromTopic(
+            { disciplina_fixa: g.disciplina_fixa, materia: g.materia },
+            fixedList,
+          ) ||
+          g.materia?.trim() ||
+          'Estudo Geral';
+        const resolvedWeekday = (WEEKDAYS.includes(g.dia_semana as WeekdayName)
+          ? g.dia_semana
+          : WEEKDAYS[(new Date().getDay() + 6) % 7]) as WeekdayName;
+        const resolvedDateIso = goalDateIso(g.data) || localDateIso();
+        const recordId = `schedule-manual-${uid(12)}`;
+
+        const specificAssunto =
+          g.materia?.trim() &&
+          normalizeSearch(g.materia) !== normalizeSearch(resolvedSubject)
+            ? g.materia.trim()
+            : '';
+        const combinedLabel =
+          [specificAssunto, g.observacoes?.trim()].filter(Boolean).join(' · ') || undefined;
+
+        newRecords.push({
+          quizId: recordId,
+          day: resolvedWeekday,
+          date: resolvedDateIso,
+          source: 'schedule',
+          recordedAt: new Date().toISOString(),
+          allocations: [
+            {
+              subject: resolvedSubject,
+              seconds: parsedSec,
+              ...(g.topicId ? { topicId: g.topicId } : {}),
+              topicLabel: combinedLabel,
+              ...(g.concurso_alvo ? { concursoAlvo: g.concurso_alvo } : {}),
+            },
+          ],
+        });
+
+        syncedCount += 1;
+        totalAddedSeconds += parsedSec;
+
+        return {
+          ...g,
+          disciplina_fixa: resolvedSubject,
+          studyRecordId: recordId,
+          estudado_segundos: Math.max(g.estudado_segundos || 0, parsedSec),
+        };
+      });
+
+      if (!newRecords.length) return prev;
+      return {
+        ...prev,
+        completedGoals: nextGoals,
+        studyTimeRecords: [...prev.studyTimeRecords, ...newRecords],
+      };
+    });
+
+    if (syncedCount > 0) {
+      toast(
+        `${syncedCount} meta(s) concluída(s) contabilizada(s) (+${formatScheduleDuration(totalAddedSeconds)}) no Portal da Transparência!`,
+      );
+    } else {
+      toast('Todas as metas concluídas com tempo válido já estão contabilizadas.');
+    }
+    return syncedCount;
+  }, [toast]);
 
   const saveWeeklyGoalNote = useCallback(
     (weekMondayIso: string, notes: string, silent = false) => {
@@ -13374,22 +13901,98 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     (id: string) => {
       const target = db.incompleteGoals.find((g) => g.id === id);
       if (!target) return;
-      setDb((prev) => ({
-        ...prev,
-        incompleteGoals: prev.incompleteGoals.filter((g) => g.id !== id),
-        completedGoals: [
-          {
-            id: uid(10),
-            data: target.data || localDateBrazilian(),
-            dia_semana: target.dia_semana,
-            materia: target.materia,
-            tempo: target.tempo,
-            observacoes: target.observacoes,
-          },
-          ...prev.completedGoals,
-        ],
-      }));
-      toast('Meta movida para Metas Concluídas.');
+      let creditedSeconds = 0;
+      let creditedSubject = '';
+
+      setDb((prev) => {
+        const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
+        const resolvedSubject =
+          target.disciplina_fixa?.trim() ||
+          inferFixedSubjectFromTopic(
+            { disciplina_fixa: target.disciplina_fixa, materia: target.materia },
+            fixedList,
+          ) ||
+          target.materia?.trim() ||
+          'Estudo Geral';
+        const resolvedWeekday = (WEEKDAYS.includes(target.dia_semana as WeekdayName)
+          ? target.dia_semana
+          : WEEKDAYS[(new Date().getDay() + 6) % 7]) as WeekdayName;
+        const goalDateBr = target.data || localDateBrazilian();
+        const resolvedDateIso = goalDateIso(goalDateBr) || localDateIso();
+
+        const manualSeconds = scheduleDurationSeconds(target.tempo || '');
+        const alreadyLoggedSeconds = target.estudado_segundos || 0;
+        const secondsToAdd =
+          manualSeconds > alreadyLoggedSeconds ? manualSeconds - alreadyLoggedSeconds : 0;
+
+        let nextStudyTimeRecords = prev.studyTimeRecords;
+        let createdRecordId: string | undefined;
+
+        if (secondsToAdd > 0) {
+          createdRecordId = `schedule-manual-${uid(12)}`;
+          const specificAssunto =
+            target.materia?.trim() &&
+            normalizeSearch(target.materia) !== normalizeSearch(resolvedSubject)
+              ? target.materia.trim()
+              : '';
+          const combinedLabel =
+            [specificAssunto, target.observacoes?.trim()].filter(Boolean).join(' · ') || undefined;
+
+          nextStudyTimeRecords = [
+            ...prev.studyTimeRecords,
+            {
+              quizId: createdRecordId,
+              day: resolvedWeekday,
+              date: resolvedDateIso,
+              source: 'schedule',
+              recordedAt: new Date().toISOString(),
+              allocations: [
+                {
+                  subject: resolvedSubject,
+                  seconds: secondsToAdd,
+                  ...(target.topicId ? { topicId: target.topicId } : {}),
+                  topicLabel: combinedLabel,
+                  ...(target.concurso_alvo ? { concursoAlvo: target.concurso_alvo } : {}),
+                },
+              ],
+            },
+          ];
+          creditedSeconds = secondsToAdd;
+          creditedSubject = resolvedSubject;
+        }
+
+        return {
+          ...prev,
+          studyTimeRecords: nextStudyTimeRecords,
+          incompleteGoals: prev.incompleteGoals.filter((g) => g.id !== id),
+          completedGoals: [
+            {
+              id: uid(10),
+              data: goalDateBr,
+              dia_semana: target.dia_semana,
+              materia: target.materia,
+              tempo: target.tempo,
+              observacoes: target.observacoes,
+              disciplina_fixa: resolvedSubject,
+              ...(target.concurso_alvo ? { concurso_alvo: target.concurso_alvo } : {}),
+              ...(target.topicId ? { topicId: target.topicId } : {}),
+              ...(createdRecordId ? { studyRecordId: createdRecordId } : {}),
+              ...(Math.max(manualSeconds, alreadyLoggedSeconds) > 0
+                ? { estudado_segundos: Math.max(manualSeconds, alreadyLoggedSeconds) }
+                : {}),
+            },
+            ...prev.completedGoals,
+          ],
+        };
+      });
+
+      if (creditedSeconds > 0 && creditedSubject) {
+        toast(
+          `Meta concluída! +${formatScheduleDuration(creditedSeconds)} contabilizados em ${visibleName(creditedSubject)} no Portal da Transparência.`,
+        );
+      } else {
+        toast('Meta movida para Metas Concluídas.');
+      }
     },
     [db.incompleteGoals, toast],
   );
@@ -15960,6 +16563,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         commitTimerToSchedule,
         logQuickStudyMinutes,
         deleteStudyTimeRecord,
+        updateStudyCycle,
+        completeStudyCycleBlock,
+        rateFlashcardSrs,
         disciplines,
         fixedSubjects,
         addFixedSubject,
@@ -16025,6 +16631,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deleteCompletedGoal,
         updateCompletedGoal,
         reopenCompletedGoal,
+        syncUncountedCompletedGoals,
         saveWeeklyGoalNote,
         completeIncompleteGoal,
         deleteIncompleteGoal,

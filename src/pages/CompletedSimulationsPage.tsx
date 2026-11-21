@@ -7,6 +7,7 @@ import { analyzeSimulationTiming } from '../lib/simulationTimeAnalytics';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { SimulationReportOfficialPrintSheet } from '../components/print/SimulationReportOfficialPrintSheet';
+import { SimulationGuessingSimulatorPanel } from '../components/simulations/SimulationGuessingSimulatorPanel';
 
 export const CompletedSimulationsPage: React.FC = () => {
   const { db, googleUser, toast } = useStudy();
@@ -323,6 +324,9 @@ export const CompletedSimulationsPage: React.FC = () => {
                         </div>
                       </div>
                     </div>
+
+                    {/* Simulador de Nota de Corte & Análise "E se eu não chutasse?" */}
+                    <SimulationGuessingSimulatorPanel sim={sim} cutoffPercent={cutoffPercent} />
 
                     {/* Análise de Tempo por Disciplina */}
                     {simTiming.hasPerQuestionTiming && (

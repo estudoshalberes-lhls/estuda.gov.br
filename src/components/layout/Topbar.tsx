@@ -105,7 +105,7 @@ const TopbarTimerReadout: React.FC = React.memo(() => {
         {pomodoroMode === 'continuous'
           ? 'CRONÔMETRO'
           : pomodoroPhase === 'focus'
-          ? `POMO ${pomodoroMode}`
+          ? `POMO ${pomodoroMode === 'custom' ? 'PERS.' : pomodoroMode}`
           : `PAUSA`}
       </span>
       <strong
@@ -173,11 +173,14 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
     toast,
   } = useStudy();
 
-  const cyclePomodoroMode = () => {
-    const order = ['continuous', '25-5', '50-10'] as const;
-    const next = order[(order.indexOf(pomodoroMode) + 1) % order.length];
-    setPomodoroMode(next);
-  };
+  const [pomoMenuOpen, setPomoMenuOpen] = useState(false);
+  const [pomoFocusInput, setPomoFocusInput] = useState<string>(
+    String(db.preferences?.pomodoro_focus_minutes || 40),
+  );
+  const [pomoBreakInput, setPomoBreakInput] = useState<string>(
+    String(db.preferences?.pomodoro_break_minutes || 10),
+  );
+  const pomoAutoCommit = db.preferences?.pomodoro_auto_commit !== false;
 
   const [linkMenuOpen, setLinkMenuOpen] = useState(false);
   const [customSubject, setCustomSubject] = useState('');
@@ -220,6 +223,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
     const handleOutside = (e: MouseEvent) => {
       if (linkPopoverRef.current && !linkPopoverRef.current.contains(e.target as Node)) {
         setLinkMenuOpen(false);
+        setPomoMenuOpen(false);
       }
       if (quickPopoverRef.current && !quickPopoverRef.current.contains(e.target as Node)) {
         setQuickConfigOpen(false);
@@ -228,11 +232,11 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
         setPendingSyncOpen(false);
       }
     };
-    if (linkMenuOpen || quickConfigOpen || pendingSyncOpen) {
+    if (linkMenuOpen || pomoMenuOpen || quickConfigOpen || pendingSyncOpen) {
       document.addEventListener('mousedown', handleOutside);
     }
     return () => document.removeEventListener('mousedown', handleOutside);
-  }, [linkMenuOpen, quickConfigOpen, pendingSyncOpen]);
+  }, [linkMenuOpen, pomoMenuOpen, quickConfigOpen, pendingSyncOpen]);
 
   const handleSyncPendingNow = async () => {
     if (manualSyncing) return;
@@ -470,21 +474,33 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
         <div className="flex items-center gap-1 sm:gap-1.5 pl-2 sm:pl-2.5 border-l border-[var(--line)] h-7 shrink-0">
           <button
             type="button"
-            onClick={cyclePomodoroMode}
-            title="Alternar modo"
-            className={`inline-flex items-center justify-center gap-1 h-7 px-2 rounded-lg border text-[10.5px] font-bold whitespace-nowrap leading-none transition-colors ${
+            onClick={() => {
+              setLinkMenuOpen(false);
+              setPomoFocusInput(String(db.preferences?.pomodoro_focus_minutes || 40));
+              setPomoBreakInput(String(db.preferences?.pomodoro_break_minutes || 10));
+              setPomoMenuOpen((v) => !v);
+            }}
+            title="Configurar Pomodoro (25/5, 45/10, 50/10 ou Personalizado)"
+            className={`inline-flex items-center justify-center gap-1 h-7 px-2 rounded-lg border text-[10.5px] font-bold whitespace-nowrap leading-none transition-colors cursor-pointer ${
               pomodoroMode !== 'continuous'
                 ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
                 : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)]'
             }`}
           >
             <Timer className="w-3 h-3 shrink-0" />
-            <span className="hidden sm:inline">{pomodoroMode === 'continuous' ? 'Pomo' : pomodoroMode}</span>
+            <span className="hidden sm:inline">
+              {pomodoroMode === 'continuous'
+                ? 'Pomo'
+                : pomodoroMode === 'custom'
+                ? `${db.preferences?.pomodoro_focus_minutes || 40}/${db.preferences?.pomodoro_break_minutes || 10}`
+                : pomodoroMode}
+            </span>
           </button>
 
           <button
             type="button"
             onClick={() => {
+              setPomoMenuOpen(false);
               setPickerDay(todayWeekday);
               setLinkMenuOpen((v) => !v);
             }}
@@ -525,6 +541,105 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
             <RotateCcw className="w-3 h-3" />
           </button>
         </div>
+
+        {pomoMenuOpen && (
+          <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+            <div className="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-[var(--line)]">
+              <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
+                Modo Pomodoro &amp; Ponto Eletrônico
+              </strong>
+              <button
+                type="button"
+                onClick={() => setPomoMenuOpen(false)}
+                className="grid place-items-center w-6 h-6 rounded-lg text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-soft)] cursor-pointer"
+                aria-label="Fechar Pomodoro"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 mb-3">
+              {(
+                [
+                  { id: 'continuous', label: 'Livre (Contínuo)' },
+                  { id: '25-5', label: '25 / 5 min' },
+                  { id: '45-10', label: '45 / 10 min' },
+                  { id: '50-10', label: '50 / 10 min' },
+                ] as const
+              ).map((preset) => (
+                <button
+                  key={preset.id}
+                  type="button"
+                  onClick={() => {
+                    setPomodoroMode(preset.id);
+                    setPomoMenuOpen(false);
+                  }}
+                  className={`h-8 px-2.5 rounded-lg border text-[11.5px] font-bold transition-colors cursor-pointer ${
+                    pomodoroMode === preset.id
+                      ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                      : 'border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+                  }`}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </div>
+
+            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5 mb-3">
+              <div className="text-[10.5px] font-bold uppercase tracking-wider text-[var(--muted)] mb-1.5">
+                Personalizado (Foco / Pausa em min)
+              </div>
+              <div className="flex items-center gap-1.5">
+                <input
+                  type="number"
+                  min={5}
+                  max={180}
+                  value={pomoFocusInput}
+                  onChange={(e) => setPomoFocusInput(e.target.value)}
+                  className="ce-input w-16 h-8 rounded-lg px-2 text-center font-mono-num text-[12px]"
+                  aria-label="Minutos de foco"
+                />
+                <span className="text-[11px] font-bold text-[var(--muted)]">/</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={60}
+                  value={pomoBreakInput}
+                  onChange={(e) => setPomoBreakInput(e.target.value)}
+                  className="ce-input w-14 h-8 rounded-lg px-2 text-center font-mono-num text-[12px]"
+                  aria-label="Minutos de pausa"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const f = Math.max(5, Math.min(180, Math.round(Number(pomoFocusInput) || 40)));
+                    const b = Math.max(1, Math.min(60, Math.round(Number(pomoBreakInput) || 10)));
+                    updatePreferences({ pomodoro_focus_minutes: f, pomodoro_break_minutes: b });
+                    window.setTimeout(() => setPomodoroMode('custom'), 0);
+                    setPomoMenuOpen(false);
+                  }}
+                  className="flex-1 h-8 px-2 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-extrabold hover:bg-[var(--accent)] hover:text-white transition-colors cursor-pointer"
+                >
+                  Aplicar
+                </button>
+              </div>
+            </div>
+
+            <label className="flex items-start gap-2 text-[11px] text-[var(--text)] cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={pomoAutoCommit}
+                onChange={(e) =>
+                  updatePreferences({ pomodoro_auto_commit: e.target.checked })
+                }
+                className="mt-0.5 accent-[var(--accent)]"
+              />
+              <span>
+                <strong>Lançar automaticamente</strong> na Matéria Fixa vinculada ao concluir cada ciclo de foco
+              </span>
+            </label>
+          </div>
+        )}
 
         {linkMenuOpen && (
           <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[320px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">

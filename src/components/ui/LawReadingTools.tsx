@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Eye,
+  EyeOff,
   Flame,
   Maximize2,
   Minimize2,
@@ -17,6 +18,7 @@ import {
   localDateIso,
   resolveCanonicalArticleKeyFromQuery,
 } from '../../lib/parsers';
+import { tokenizeLawCloze } from '../../lib/studyTools';
 import { LawItem } from '../../types/study';
 
 export type LawFontSizeKey = 'sm' | 'md' | 'lg' | 'xl';
@@ -28,6 +30,7 @@ export interface LawReadingPrefs {
   comfortableWidth: boolean;
   highlightExamWords: boolean;
   cleanMode: boolean;
+  clozeMode?: boolean;
 }
 
 const STORAGE_KEY = 'ce-law-reading-prefs-v1';
@@ -38,6 +41,7 @@ const DEFAULT_PREFS: LawReadingPrefs = {
   comfortableWidth: false,
   highlightExamWords: true,
   cleanMode: false,
+  clozeMode: false,
 };
 
 export const FONT_SIZE_PX: Record<LawFontSizeKey, string> = {
@@ -103,6 +107,9 @@ export function useLawReadingPrefs() {
   const toggleCleanMode = () =>
     setPrefs((prev) => ({ ...prev, cleanMode: !prev.cleanMode }));
 
+  const toggleClozeMode = () =>
+    setPrefs((prev) => ({ ...prev, clozeMode: !prev.clozeMode }));
+
   return {
     prefs,
     setPrefs,
@@ -111,6 +118,7 @@ export function useLawReadingPrefs() {
     toggleComfortableWidth,
     toggleHighlightExamWords,
     toggleCleanMode,
+    toggleClozeMode,
   };
 }
 
@@ -169,12 +177,98 @@ export function renderLawTextWithExamHighlights(
   });
 }
 
+interface LawClozeTextProps {
+  text: string;
+  scopeKey: string;
+  revealAllSignal: number;
+  hideAllSignal: number;
+}
+
+export const LawClozeText: React.FC<LawClozeTextProps> = ({
+  text,
+  scopeKey,
+  revealAllSignal,
+  hideAllSignal,
+}) => {
+  const { tokens } = useMemo(() => tokenizeLawCloze(text), [text]);
+  const [revealedMap, setRevealedMap] = useState<Record<number, boolean>>({});
+  const [allRevealed, setAllRevealed] = useState(false);
+
+  useEffect(() => {
+    if (revealAllSignal > 0) {
+      setAllRevealed(true);
+      setRevealedMap({});
+    }
+  }, [revealAllSignal]);
+
+  useEffect(() => {
+    if (hideAllSignal > 0) {
+      setAllRevealed(false);
+      setRevealedMap({});
+    }
+  }, [hideAllSignal]);
+
+  if (!text) return null;
+
+  return (
+    <>
+      {tokens.map((tk, idx) => {
+        if (tk.type === 'text') {
+          return <React.Fragment key={`${scopeKey}-t-${idx}`}>{tk.text}</React.Fragment>;
+        }
+        const tokenIdx = tk.tokenIndex ?? idx;
+        const isShown = allRevealed || Boolean(revealedMap[tokenIdx]);
+        const badgeColor =
+          tk.category === 'deadline'
+            ? 'border-[var(--accent)]/60 bg-[var(--accent)]/12 text-[var(--accent)]'
+            : tk.category === 'quorum'
+            ? 'border-purple-500/50 bg-purple-500/12 text-purple-400'
+            : tk.category === 'exception'
+            ? 'border-[var(--warning)]/60 bg-[var(--warning)]/14 text-[var(--warning)]'
+            : 'border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--text)]';
+
+        return (
+          <button
+            key={`${scopeKey}-c-${idx}`}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (allRevealed) {
+                setAllRevealed(false);
+                setRevealedMap({});
+                return;
+              }
+              setRevealedMap((prev) => ({ ...prev, [tokenIdx]: !prev[tokenIdx] }));
+            }}
+            title={
+              isShown
+                ? `Clique para ocultar novamente (${tk.hint || 'Termo-chave'})`
+                : `Clique para revelar: ${tk.hint || 'Termo-chave'}`
+            }
+            className={`inline-flex items-center mx-0.5 px-1.5 py-0 rounded border font-bold text-[0.92em] align-baseline transition-colors cursor-pointer ${
+              isShown
+                ? `${badgeColor}`
+                : 'border-dashed border-[var(--accent)] bg-[var(--accent)]/15 text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white'
+            }`}
+          >
+            {isShown ? tk.text : ` ${tk.hint || '•••'} `}
+          </button>
+        );
+      })}
+    </>
+  );
+};
+
 interface LawReadingToolbarProps {
   prefs: LawReadingPrefs;
   onStepFontSize: (dir: -1 | 1) => void;
   onCycleLineHeight: () => void;
   onToggleComfortableWidth: () => void;
   onToggleHighlightExamWords: () => void;
+  showClozeModeToggle?: boolean;
+  onToggleClozeMode?: () => void;
+  onClozeRevealAll?: () => void;
+  onClozeHideAll?: () => void;
   showCleanModeToggle?: boolean;
   onToggleCleanMode?: () => void;
   lastReadPosition?: string;
@@ -187,6 +281,10 @@ export const LawReadingToolbar: React.FC<LawReadingToolbarProps> = ({
   onCycleLineHeight,
   onToggleComfortableWidth,
   onToggleHighlightExamWords,
+  showClozeModeToggle,
+  onToggleClozeMode,
+  onClozeRevealAll,
+  onClozeHideAll,
   showCleanModeToggle,
   onToggleCleanMode,
   lastReadPosition,
@@ -272,6 +370,43 @@ export const LawReadingToolbar: React.FC<LawReadingToolbarProps> = ({
           <Sparkles className="w-3 h-3" />
           Palavras de Prova {prefs.highlightExamWords ? '(Ligado)' : '(Desligado)'}
         </button>
+
+        {showClozeModeToggle && onToggleClozeMode && (
+          <>
+            <button
+              type="button"
+              onClick={onToggleClozeMode}
+              title="Ocultar prazos, quóruns, porcentagens e exceções (salvo, exceto, vedado) para memorização ativa — clique nas lacunas para revelar"
+              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors cursor-pointer ${
+                prefs.clozeMode
+                  ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                  : 'border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+              }`}
+            >
+              <EyeOff className="w-3 h-3" />
+              {prefs.clozeMode ? 'Leitura Ativa Cloze (Ativo)' : 'Ocultar Prazos / Exceções'}
+            </button>
+
+            {prefs.clozeMode && onClozeRevealAll && onClozeHideAll && (
+              <div className="inline-flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={onClozeRevealAll}
+                  className="px-2 py-1 rounded-lg border border-[var(--good)]/50 bg-[var(--good)]/10 text-[var(--good)] text-[10.5px] font-bold hover:bg-[var(--good)] hover:text-white transition-colors cursor-pointer"
+                >
+                  Revelar tudo
+                </button>
+                <button
+                  type="button"
+                  onClick={onClozeHideAll}
+                  className="px-2 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)] text-[10.5px] font-bold hover:text-[var(--text)] transition-colors cursor-pointer"
+                >
+                  Ocultar tudo
+                </button>
+              </div>
+            )}
+          </>
+        )}
 
         {showCleanModeToggle && onToggleCleanMode && (
           <button

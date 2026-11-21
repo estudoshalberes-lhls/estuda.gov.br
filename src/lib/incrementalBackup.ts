@@ -20,6 +20,7 @@ import {
   SavedIncidenceFilter,
   ScheduleMap,
   ScheduleTopic,
+  StudyCycleConfig,
   StudyDatabase,
   StudyTimeRecord,
   SubmittedSimulation,
@@ -77,6 +78,7 @@ export interface IncrementalDatabaseDelta {
   proofBanks?: string[];
   fixedSubjects?: string[];
   phrases?: string[];
+  studyCycle?: StudyCycleConfig;
   preferences?: AppPreferences;
   deletedTombstones?: Record<string, number>;
 }
@@ -306,6 +308,13 @@ export function buildIncrementalDatabaseBackup(
     delta.phrases = currentDb.phrases;
     changedSections.push('phrases');
     addedOrUpdated += 1;
+  }
+  if (!baseDb || stableJson(baseDb.studyCycle) !== stableJson(currentDb.studyCycle)) {
+    if (currentDb.studyCycle) {
+      delta.studyCycle = currentDb.studyCycle;
+      changedSections.push('studyCycle');
+      addedOrUpdated += 1;
+    }
   }
   if (!baseDb || stableJson(baseDb.preferences) !== stableJson(currentDb.preferences)) {
     delta.preferences = currentDb.preferences;
@@ -724,6 +733,7 @@ export function applyIncrementalDeltaToDatabase(
           ? mergeUniqueStrings(baseDb.phrases, d.phrases)
           : d.phrases
         : baseDb.phrases,
+    studyCycle: d.studyCycle !== undefined ? d.studyCycle : baseDb.studyCycle,
     preferences: d.preferences
       ? (() => {
           const baseFolder = baseDb.preferences?.default_drive_folder;

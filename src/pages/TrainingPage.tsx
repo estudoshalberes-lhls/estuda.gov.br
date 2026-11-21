@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
   AlignLeft,
+  Crosshair,
   Database,
   Eye,
   Filter,
@@ -15,6 +16,7 @@ import {
 import { useStudy } from '../context/StudyContext';
 import { Question, QuestionAlternative, QuestionType } from '../types/study';
 import { normalizeSearch, questionStatement, shuffled, uid, visibleName } from '../lib/parsers';
+import { buildSurgicalTrainingPlan } from '../lib/studyTools';
 import {
   formatCorrectionTextStructured,
   insertFormattedPaste,
@@ -53,6 +55,7 @@ export const TrainingPage: React.FC = () => {
   const [printIncludeAnswers, setPrintIncludeAnswers] = useState<boolean>(true);
   const [showPrintPreview, setShowPrintPreview] = useState<boolean>(false);
   const [isPrintSheetMounted, setIsPrintSheetMounted] = useState<boolean>(false);
+  const [surgicalCount, setSurgicalCount] = useState<number>(20);
 
   useEffect(() => {
     const onBeforePrint = () => setIsPrintSheetMounted(true);
@@ -146,6 +149,33 @@ export const TrainingPage: React.FC = () => {
       studySeconds: 0,
       timerBaseline: getCurrentTimerSeconds(),
     });
+  };
+
+  const surgicalPreview = useMemo(
+    () => buildSurgicalTrainingPlan(db, surgicalCount),
+    [db, surgicalCount],
+  );
+
+  const startSurgicalTraining = () => {
+    const plan = buildSurgicalTrainingPlan(db, surgicalCount);
+    if (!plan.questions.length) {
+      toast('Cadastre ou importe questões no acervo antes de iniciar o Treino Cirúrgico.', true);
+      return;
+    }
+    ensureTimerRunning();
+    setQuiz({
+      id: uid(16),
+      kind: 'training',
+      materia: 'Treino Cirúrgico (Foco nas Fraquezas)',
+      questions: plan.questions,
+      index: 0,
+      answers: Array(plan.questions.length),
+      studySeconds: 0,
+      timerBaseline: getCurrentTimerSeconds(),
+    });
+    toast(
+      `Treino Cirúrgico montado com ${plan.questions.length} questões priorizando suas matérias de menor acerto e erros pendentes.`,
+    );
   };
 
   const openEditor = (q: Question) => {
@@ -328,6 +358,64 @@ export const TrainingPage: React.FC = () => {
           </div>
         }
       />
+
+      {mode === 'train' && !activeTraining && (
+        <section className="ce-panel rounded-xl p-4 sm:p-5 mb-4 border border-[var(--accent)]/40 bg-[var(--accent-soft)]/35">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="inline-flex items-center gap-1.5 text-[10.5px] font-extrabold uppercase tracking-[0.06em] text-[var(--accent)]">
+                <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                <span>Treino Inteligente &ldquo;Cirúrgico&rdquo; · Algoritmo de Fraquezas</span>
+              </div>
+              <h3 className="m-0 mt-1 font-display text-[16.5px] font-extrabold text-[var(--text)]">
+                Bateria Personalizada com Foco nas suas Lacunas do Edital
+              </h3>
+              <p className="m-0 mt-1 text-[12px] text-[var(--muted)]">
+                Combina automaticamente disciplinas de menor % de acerto no histórico, pendências do Caderno de Erros e tópicos de alta incidência na Lei Seca.
+              </p>
+
+              {surgicalPreview.diagnostics.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+                  {surgicalPreview.diagnostics.slice(0, 5).map((d) => (
+                    <span
+                      key={d.subject}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--text)]"
+                    >
+                      <span className="text-[var(--accent)] font-mono-num">{d.selectedCount}q</span>
+                      <span>{d.subject}</span>
+                      <span className="text-[10px] font-normal text-[var(--muted)]">({d.reason})</span>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <select
+                aria-label="Quantidade de questões do Treino Cirúrgico"
+                value={surgicalCount}
+                onChange={(e) => setSurgicalCount(Number(e.target.value) || 20)}
+                className="ce-select !w-auto h-9 text-[12px]"
+              >
+                <option value={10}>10 questões</option>
+                <option value={15}>15 questões</option>
+                <option value={20}>20 questões</option>
+                <option value={30}>30 questões</option>
+                <option value={50}>50 questões</option>
+              </select>
+              <button
+                type="button"
+                onClick={startSurgicalTraining}
+                disabled={surgicalPreview.totalCandidates === 0}
+                className="inline-flex items-center gap-1.5 h-9 px-4 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12.5px] font-extrabold hover:opacity-95 disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              >
+                <Crosshair className="w-3.5 h-3.5" />
+                Iniciar Treino Cirúrgico
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
 
       <Panel className="mb-4">
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 items-end">

@@ -221,6 +221,11 @@ export interface CompletedGoal {
   materia: string;
   tempo: string;
   observacoes: string;
+  disciplina_fixa?: string;
+  concurso_alvo?: string;
+  topicId?: string;
+  studyRecordId?: string;
+  estudado_segundos?: number;
 }
 
 export interface IncompleteGoal {
@@ -231,6 +236,10 @@ export interface IncompleteGoal {
   tempo: string;
   observacoes: string;
   arquivado_em: string;
+  disciplina_fixa?: string;
+  concurso_alvo?: string;
+  topicId?: string;
+  estudado_segundos?: number;
 }
 
 export type IncidenceGrade =
@@ -410,6 +419,30 @@ export interface CareerMeta {
   last_notified_medals?: string[];
 }
 
+export interface StudyCycleItem {
+  id: string;
+  subject: string;
+  targetMinutes: number;
+  contest?: string;
+  notes?: string;
+  completedMinutes: number;
+  completions: number;
+  lastStudiedAt?: string;
+}
+
+export interface StudyCycleConfig {
+  activeIndex: number;
+  completedCycles: number;
+  items: StudyCycleItem[];
+}
+
+export interface FlashcardSrsState {
+  level: number;
+  nextReviewIso: string;
+  lastReviewedIso: string;
+  reviews: number;
+}
+
 export interface AppPreferences {
   tema: ThemeId;
   modules_top: boolean;
@@ -420,6 +453,14 @@ export interface AppPreferences {
   quick_access_modules?: ModuleName[];
   default_drive_folder?: DefaultDriveFolderPreference;
   career_meta?: CareerMeta;
+  daily_hours_goal?: number;
+  daily_questions_goal?: number;
+  final_review_margin_days?: number;
+  target_exam_contest_id?: string;
+  pomodoro_focus_minutes?: number;
+  pomodoro_break_minutes?: number;
+  pomodoro_auto_commit?: boolean;
+  flashcard_srs?: Record<string, FlashcardSrsState>;
 }
 
 export interface QuizAnswer {
@@ -495,6 +536,7 @@ export interface StudyDatabase {
   schedule: ScheduleMap;
   scheduleDayDates?: Partial<Record<WeekdayName, string>>;
   weeklySchedules?: Record<string, WeeklyScheduleFileRecord>;
+  studyCycle?: StudyCycleConfig;
   completedGoals: CompletedGoal[];
   incompleteGoals: IncompleteGoal[];
   weeklyGoalNotes: Record<string, string>;
@@ -518,7 +560,7 @@ export interface StudyDatabase {
   deletedTombstones?: Record<string, number>;
 }
 
-export type PomodoroMode = 'continuous' | '25-5' | '50-10';
+export type PomodoroMode = 'continuous' | '25-5' | '50-10' | '45-10' | 'custom';
 
 export interface RestoreProgress {
   current: number;

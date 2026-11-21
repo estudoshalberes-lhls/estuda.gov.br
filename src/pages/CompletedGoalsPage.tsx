@@ -1,13 +1,15 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Pencil, RotateCcw, Save, Trash2, X } from 'lucide-react';
+import { ChevronDown, Clock3, Pencil, RotateCcw, Save, Trash2, X } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import {
   WEEKDAYS,
   dateInputToBrazilian,
+  formatScheduleDuration,
   goalDateIso,
   isoWeekInputValue,
   isoWeekStartDate,
   localDateIso,
+  scheduleDurationSeconds,
 } from '../lib/parsers';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { CompletedGoal } from '../types/study';
@@ -25,9 +27,31 @@ export const CompletedGoalsPage: React.FC = () => {
     deleteCompletedGoal,
     updateCompletedGoal,
     reopenCompletedGoal,
+    syncUncountedCompletedGoals,
     saveWeeklyGoalNote,
     toast,
   } = useStudy();
+
+  const uncountedSummary = useMemo(() => {
+    const existingRecordIds = new Set(db.studyTimeRecords.map((r) => r.quizId));
+    const existingTopicIds = new Set<string>();
+    db.studyTimeRecords.forEach((rec) => {
+      rec.allocations.forEach((a) => {
+        if (a.topicId) existingTopicIds.add(a.topicId);
+      });
+    });
+    let count = 0;
+    let totalSeconds = 0;
+    db.completedGoals.forEach((g) => {
+      const sec = scheduleDurationSeconds(g.tempo || '');
+      if (sec <= 0) return;
+      if (g.studyRecordId && existingRecordIds.has(g.studyRecordId)) return;
+      if (g.topicId && existingTopicIds.has(g.topicId)) return;
+      count += 1;
+      totalSeconds += sec;
+    });
+    return { count, totalSeconds };
+  }, [db.completedGoals, db.studyTimeRecords]);
 
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
@@ -161,6 +185,28 @@ export const CompletedGoalsPage: React.FC = () => {
         title="Histórico de metas concluídas e notas semanais"
         description="Filtre por período, revise metas arquivadas por data e registre balanços oficiais de rendimento semanal."
       />
+
+      {uncountedSummary.count > 0 && (
+        <div className="mb-4 rounded-xl border border-[var(--accent)]/45 bg-[var(--accent-soft)] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-extrabold text-[var(--text)]">
+              {uncountedSummary.count} meta(s) concluída(s) com tempo manual (+
+              {formatScheduleDuration(uncountedSummary.totalSeconds)}) ainda não lançadas no Portal da Transparência
+            </div>
+            <p className="m-0 mt-0.5 text-[11.5px] text-[var(--muted)]">
+              Clique ao lado para somar essas horas nas respectivas matérias sem duplicidade.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => syncUncountedCompletedGoals()}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+          >
+            <Clock3 className="w-3.5 h-3.5" />
+            Contabilizar no Desempenho (+{formatScheduleDuration(uncountedSummary.totalSeconds)})
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-3.5 mb-4 items-start">
         <Panel title="Filtrar por período">

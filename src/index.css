@@ -997,6 +997,34 @@ details summary::-webkit-details-marker {
   padding-left: 0;
 }
 
+@page gov-final-sprint {
+  size: A4 portrait;
+  margin: 16mm 14mm 18mm 14mm;
+  @top-left {
+    content: "ESTUDA.GOV.BR · CADERNO DE REVISÃO DE VÉSPERA";
+    font-size: 7.5pt;
+    font-weight: 700;
+    color: #475569;
+  }
+  @bottom-left {
+    content: "Documento Oficial de Reta Final — Uso Pessoal";
+    font-size: 7.5pt;
+    color: #475569;
+  }
+  @bottom-right {
+    content: "Página " counter(page) " de " counter(pages);
+    font-size: 8pt;
+    font-weight: 700;
+    color: #071D41;
+  }
+}
+
+@page gov-final-sprint:first {
+  @top-left {
+    content: "";
+  }
+}
+
 @media print {
   .gov-error-notebook-print {
     page: gov-error-notebook;
@@ -1008,6 +1036,15 @@ details summary::-webkit-details-marker {
 
   .gov-simulation-report-print {
     page: gov-simulation-report;
+  }
+
+  .gov-final-sprint-print {
+    page: gov-final-sprint;
+    width: 100% !important;
+    max-width: none !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    box-shadow: none !important;
   }
 
   .gov-error-notebook-print,

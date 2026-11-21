@@ -34,12 +34,14 @@ import {
   isoWeekInputValue,
   localDateBrazilian,
   localDateIso,
+  scheduleDurationSeconds,
   visibleName,
 } from '../lib/parsers';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { ScheduleMap, ScheduleTopic, WeekdayName, WeeklyScheduleFileRecord } from '../types/study';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 import { ScheduleOfficialPrintSheet } from '../components/schedule/ScheduleOfficialPrintSheet';
+import { DynamicStudyCyclePanel } from '../components/schedule/DynamicStudyCyclePanel';
 import { useStudyTimer } from '../lib/timerTickStore';
 
 const ScheduleBannerTimerActions: React.FC<{
@@ -545,6 +547,9 @@ export const SchedulePage: React.FC = () => {
         }
       />
 
+      {/* Ciclo de Estudos Dinâmico (Rotação Automática de Matérias) */}
+      <DynamicStudyCyclePanel />
+
       {/* Painel de Matérias Fixadas e Concurso/Edital Alvo */}
       <Panel className="mb-3 p-0 overflow-hidden">
         <div className="flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 bg-[var(--panel-soft)] border-b border-[var(--line)]">
@@ -968,6 +973,11 @@ export const SchedulePage: React.FC = () => {
                       {topics.map((topic, idx) => {
                         const isLinked = activeTimerTopic?.topicId === topic.id;
                         const studiedSec = topic.estudado_segundos || 0;
+                        const manualTempoSec = scheduleDurationSeconds(topic.tempo || '');
+                        const pendingManualCreditSec =
+                          manualTempoSec > studiedSec ? manualTempoSec - studiedSec : 0;
+                        const hasInvalidManualTempo =
+                          Boolean(topic.tempo?.trim()) && manualTempoSec <= 0;
                         const isCustomDate = Boolean(
                           topic.data_personalizada && topic.data && topic.data !== generalDayDate,
                         );
@@ -1110,8 +1120,8 @@ export const SchedulePage: React.FC = () => {
                               </div>
                             </div>
 
-                            {/* Linha 2: Data + Tempo Previsto + Observações + Ações */}
-                            <div className="grid grid-cols-1 md:grid-cols-[145px_125px_1fr_auto] gap-2 items-center">
+                            {/* Linha 2: Data + Tempo Manual/Previsto + Observações + Ações */}
+                            <div className="grid grid-cols-1 md:grid-cols-[145px_155px_1fr_auto] gap-2 items-center">
                               <input
                                 type="date"
                                 aria-label="Data da meta"
@@ -1129,14 +1139,15 @@ export const SchedulePage: React.FC = () => {
                               />
                               <input
                                 type="text"
-                                aria-label="Tempo previsto"
+                                aria-label="Tempo de estudo (minutos, 1h26min ou 01:26:26)"
+                                title="Aceita minutos (ex.: 45), horas/minutos (ex.: 1h26min) ou relógio HH:MM:SS (ex.: 01:26:26). Ao concluir, o tempo é somado na matéria no Portal da Transparência."
                                 value={topic.tempo}
                                 onChange={(e) =>
                                   updateTopicFields(day, idx, { tempo: e.target.value })
                                 }
                                 onBlur={() => flushDaySave(day)}
-                                placeholder="Ex.: 1h 30min"
-                                className="ce-input text-[12px]"
+                                placeholder="Ex: 45, 1h26min, 01:26:26"
+                                className="ce-input font-mono-num text-[12px]"
                               />
                               <input
                                 type="text"
@@ -1190,7 +1201,11 @@ export const SchedulePage: React.FC = () => {
                                     }
                                     completeScheduleTopic(day, idx, latestDayTopics);
                                   }}
-                                  title={`Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')}`}
+                                  title={
+                                    pendingManualCreditSec > 0
+                                      ? `Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')} e somar +${formatScheduleDuration(pendingManualCreditSec)} em ${visibleName(effectiveFixedSubject || topic.materia || 'Estudo Geral')} no Portal da Transparência`
+                                      : `Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')}`
+                                  }
                                   aria-label="Concluir tópico"
                                   className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-[var(--good)]/50 bg-[var(--good)]/15 text-[var(--good)] hover:bg-[var(--good)] hover:text-white transition-colors"
                                 >
@@ -1222,7 +1237,11 @@ export const SchedulePage: React.FC = () => {
                               </div>
                             </div>
 
-                            {(studiedSec > 0 || isLinked || isCustomDate) && (
+                            {(studiedSec > 0 ||
+                              pendingManualCreditSec > 0 ||
+                              hasInvalidManualTempo ||
+                              isLinked ||
+                              isCustomDate) && (
                               <div className="mt-2 pt-1.5 border-t border-[var(--line)]/60 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                                 <div className="flex flex-wrap items-center gap-2 text-[var(--muted)]">
                                   {isCustomDate && (
@@ -1245,7 +1264,19 @@ export const SchedulePage: React.FC = () => {
                                   {studiedSec > 0 && (
                                     <span className="inline-flex items-center gap-1 font-bold text-[var(--good)] font-mono-num">
                                       <Timer className="w-3 h-3" />
-                                      Tempo contabilizado em {visibleName(effectiveFixedSubject || topic.materia)}: {formatScheduleDuration(studiedSec)}
+                                      Já contabilizado em {visibleName(effectiveFixedSubject || topic.materia)}: {formatScheduleDuration(studiedSec)}
+                                    </span>
+                                  )}
+                                  {pendingManualCreditSec > 0 && (
+                                    <span className="inline-flex items-center gap-1 font-bold text-[var(--accent)] font-mono-num">
+                                      <Clock3 className="w-3 h-3" />
+                                      Ao finalizar: +{formatScheduleDuration(pendingManualCreditSec)} ({formatClock(pendingManualCreditSec)}) →{' '}
+                                      {visibleName(effectiveFixedSubject || topic.materia || 'Estudo Geral')}
+                                    </span>
+                                  )}
+                                  {hasInvalidManualTempo && (
+                                    <span className="inline-flex items-center gap-1 font-semibold text-[var(--warning)]">
+                                      Formato não reconhecido — use ex.: 45, 1h26min ou 01:26:26
                                     </span>
                                   )}
                                   {isLinked && <ScheduleTopicLiveClock />}

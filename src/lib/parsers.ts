@@ -293,19 +293,72 @@ export function getCurrentWeekDates(): Record<WeekdayName, string> {
 }
 
 export function scheduleDurationSeconds(value: string): number {
-  const text = String(value || '').trim().toLowerCase();
-  const clock = text.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  const raw = String(value || '').trim().toLowerCase();
+  if (!raw) return 0;
+
+  // Normalize trailing punctuation and extra whitespace
+  const text = raw.replace(/\s+/g, ' ').replace(/\.+$/, '').trim();
+
+  // 1. Clock formats: HH:MM:SS or HH:MM (e.g., 01:26:26, 1:26:26, 01:26, 00:45:10)
+  const clock = text.match(/^(\d{1,3}):(\d{1,2})(?::(\d{1,2}))?$/);
   if (clock) {
-    return Number(clock[1]) * 3600 + Number(clock[2]) * 60 + Number(clock[3] || 0);
+    const h = Number(clock[1]) || 0;
+    const m = Number(clock[2]) || 0;
+    const s = Number(clock[3] || 0) || 0;
+    return Math.max(0, h * 3600 + m * 60 + s);
   }
-  const hours = text.match(/(\d+)\s*h/);
-  const minutes = text.match(/(\d+)\s*(?:min|m)\b/);
-  const seconds = text.match(/(\d+)\s*(?:s|seg)\b/);
-  return (
-    (hours ? Number(hours[1]) * 3600 : 0) +
-    (minutes ? Number(minutes[1]) * 60 : 0) +
-    (seconds ? Number(seconds[1]) : 0)
-  );
+
+  // 2. Plain number interpreted as minutes (e.g., "45", "86", "120", "45,5")
+  const plainMinutes = text.match(/^(\d+(?:[.,]\d+)?)$/);
+  if (plainMinutes) {
+    const mins = Number(plainMinutes[1].replace(',', '.'));
+    return Number.isFinite(mins) && mins > 0 ? Math.round(mins * 60) : 0;
+  }
+
+  // 3. Decimal hours only (e.g., "1,5h", "1.5 horas", "2,5 h")
+  const decimalHours = text.match(/^(\d+[.,]\d+)\s*(?:h|hs|hr|hrs|hora|horas)$/);
+  if (decimalHours) {
+    const hrs = Number(decimalHours[1].replace(',', '.'));
+    return Number.isFinite(hrs) && hrs > 0 ? Math.round(hrs * 3600) : 0;
+  }
+
+  // 4. Shorthand "1h26" or "1h 26" (hours followed by bare minutes without unit)
+  const compactHoursMinutes = text.match(/^(\d+)\s*(?:h|hs|hr|hrs|hora|horas)\s*(\d{1,2})$/);
+  if (compactHoursMinutes) {
+    const h = Number(compactHoursMinutes[1]) || 0;
+    const m = Number(compactHoursMinutes[2]) || 0;
+    return Math.max(0, h * 3600 + m * 60);
+  }
+
+  // 5. General human-readable / compact unit combinations:
+  //    "1h26min", "1h 26min 26s", "1h26m26s", "45 minutos", "1 hora e 26 minutos e 26 segundos", "30seg"
+  let total = 0;
+  const hoursMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(?:horas?|hrs?|hs|h)(?![a-z])/);
+  const minutesMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(?:minutos?|mins?|m)(?![a-z])/);
+  const secondsMatch = text.match(/(\d+(?:[.,]\d+)?)\s*(?:segundos?|segs?|s)(?![a-z])/);
+
+  if (hoursMatch) {
+    const h = Number(hoursMatch[1].replace(',', '.'));
+    if (Number.isFinite(h)) total += Math.round(h * 3600);
+  }
+  if (minutesMatch) {
+    const m = Number(minutesMatch[1].replace(',', '.'));
+    if (Number.isFinite(m)) total += Math.round(m * 60);
+  }
+  if (secondsMatch) {
+    const s = Number(secondsMatch[1].replace(',', '.'));
+    if (Number.isFinite(s)) total += Math.round(s);
+  }
+
+  // Handle "1h26min26" or "1h 26m 10" or "1h 26" inside longer expressions if minutes had no unit after h
+  if (hoursMatch && !minutesMatch) {
+    const trailingAfterH = text.match(/(?:horas?|hrs?|hs|h)\s*(?:e\s*)?(\d{1,2})(?:\s*$)/);
+    if (trailingAfterH) {
+      total += (Number(trailingAfterH[1]) || 0) * 60;
+    }
+  }
+
+  return Math.max(0, total);
 }
 
 export function formatScheduleDuration(seconds: number): string {

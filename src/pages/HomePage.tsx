@@ -9,12 +9,16 @@ import {
   Check,
   CheckCircle2,
   ClipboardList,
+  Crosshair,
   Database,
   FileCheck2,
   FileDown,
+  Flame,
+  Layers,
   ListChecks,
   Play,
   Plus,
+  RefreshCw,
   Scale,
   Timer,
 } from 'lucide-react';
@@ -33,6 +37,9 @@ import {
 import { ModuleName } from '../types/study';
 import { ModuleIcon } from '../components/ui/ModuleIcon';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { DailyGoalPacePanel } from '../components/home/DailyGoalPacePanel';
+import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
+import { FinalSprintReviewModal } from '../components/study/FinalSprintReviewModal';
 
 const QUICK_ACCESS: ReadonlyArray<{ page: ModuleName; caption: string; icon: string }> = [
   { page: 'Treino Diário', caption: 'Resolver questões do banco oficial', icon: 'target' },
@@ -76,6 +83,9 @@ export const HomePage: React.FC = () => {
     googleUser,
     toast,
   } = useStudy();
+
+  const [flashcardsOpen, setFlashcardsOpen] = useState(false);
+  const [finalSprintOpen, setFinalSprintOpen] = useState(false);
 
   const todayIso = localDateIso();
   const todayWeekday = WEEKDAYS[(new Date().getDay() + 6) % 7];
@@ -315,6 +325,7 @@ export const HomePage: React.FC = () => {
 
   return (
     <div>
+      <div className="print:hidden">
       <PageHeader
         eyebrow="PORTAL DE SERVIÇOS AO ESTUDANTE"
         title="Comprovante de Situação nos Estudos"
@@ -380,6 +391,84 @@ export const HomePage: React.FC = () => {
             <span className="font-mono-num text-white/85">DF · BR</span>
           </div>
         </div>
+      </section>
+
+      {/* Meta Diária de Horas/Questões + Alerta de Ritmo até a Prova */}
+      <DailyGoalPacePanel />
+
+      {/* Central de Ferramentas Ativas de Estudo */}
+      <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
+        <button
+          type="button"
+          onClick={() => setFlashcardsOpen(true)}
+          className="ce-panel rounded-xl p-3.5 text-left hover:border-[var(--accent)] transition-colors flex items-start gap-3 cursor-pointer"
+        >
+          <span className="grid place-items-center w-9 h-9 rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] shrink-0">
+            <Layers className="w-4 h-4" />
+          </span>
+          <span className="min-w-0">
+            <strong className="block text-[13px] font-extrabold text-[var(--text)]">
+              Flashcards SRS
+            </strong>
+            <small className="block text-[11px] text-[var(--muted)] mt-0.5 leading-snug">
+              Revisão ativa de Erros, Súmulas, Pontos Críticos e Lei Seca
+            </small>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActivePage('Treino Diário')}
+          className="ce-panel rounded-xl p-3.5 text-left hover:border-[var(--accent)] transition-colors flex items-start gap-3 cursor-pointer"
+        >
+          <span className="grid place-items-center w-9 h-9 rounded-lg bg-[var(--accent-soft)] text-[var(--accent)] shrink-0">
+            <Crosshair className="w-4 h-4" />
+          </span>
+          <span className="min-w-0">
+            <strong className="block text-[13px] font-extrabold text-[var(--text)]">
+              Treino Cirúrgico
+            </strong>
+            <small className="block text-[11px] text-[var(--muted)] mt-0.5 leading-snug">
+              Bateria automática focada nas matérias mais fracas do edital
+            </small>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setFinalSprintOpen(true)}
+          className="ce-panel rounded-xl p-3.5 text-left hover:border-[var(--accent)] transition-colors flex items-start gap-3 cursor-pointer"
+        >
+          <span className="grid place-items-center w-9 h-9 rounded-lg bg-[var(--warning)]/15 text-[var(--warning)] shrink-0">
+            <Flame className="w-4 h-4" />
+          </span>
+          <span className="min-w-0">
+            <strong className="block text-[13px] font-extrabold text-[var(--text)]">
+              Revisão de Véspera (A4)
+            </strong>
+            <small className="block text-[11px] text-[var(--muted)] mt-0.5 leading-snug">
+              Caderno consolidado de Reta Final pronto para impressão oficial
+            </small>
+          </span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActivePage('Cronograma')}
+          className="ce-panel rounded-xl p-3.5 text-left hover:border-[var(--accent)] transition-colors flex items-start gap-3 cursor-pointer"
+        >
+          <span className="grid place-items-center w-9 h-9 rounded-lg bg-[var(--good)]/15 text-[var(--good)] shrink-0">
+            <RefreshCw className="w-4 h-4" />
+          </span>
+          <span className="min-w-0">
+            <strong className="block text-[13px] font-extrabold text-[var(--text)]">
+              Ciclo Dinâmico
+            </strong>
+            <small className="block text-[11px] text-[var(--muted)] mt-0.5 leading-snug">
+              Rotação automática de matérias integrada ao Ponto Eletrônico
+            </small>
+          </span>
+        </button>
       </section>
 
       {/* Central de Pendências do Protocolo */}
@@ -1274,6 +1363,16 @@ export const HomePage: React.FC = () => {
           ))}
         </div>
       </div>
+      </div>
+
+      <FlashcardsReviewModal
+        open={flashcardsOpen}
+        onClose={() => setFlashcardsOpen(false)}
+      />
+      <FinalSprintReviewModal
+        open={finalSprintOpen}
+        onClose={() => setFinalSprintOpen(false)}
+      />
     </div>
   );
 };

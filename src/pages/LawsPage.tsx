@@ -51,6 +51,7 @@ import {
   ArticleJumpBar,
   FONT_SIZE_PX,
   LINE_HEIGHT_VAL,
+  LawClozeText,
   LawReadingToolbar,
   buildArticleAnchorId,
   renderLawTextWithExamHighlights,
@@ -93,12 +94,16 @@ export const LawsPage: React.FC = () => {
   const [visibleArticleLimit, setVisibleArticleLimit] = useState(80);
   const [showStructuralOutline, setShowStructuralOutline] = useState(false);
 
+  const [clozeRevealSignal, setClozeRevealSignal] = useState(0);
+  const [clozeHideSignal, setClozeHideSignal] = useState(0);
+
   const {
     prefs: readingPrefs,
     stepFontSize,
     cycleLineHeight,
     toggleComfortableWidth,
     toggleHighlightExamWords,
+    toggleClozeMode,
   } = useLawReadingPrefs();
 
   useEffect(() => {
@@ -772,9 +777,21 @@ export const LawsPage: React.FC = () => {
   );
 
   const renderSegmentWithSearchFocus = (segText: string, segIdx: number, isFirstMatchRef: { used: boolean }) => {
+    const renderPlainOrCloze = (chunk: string, suffix: string) =>
+      readingPrefs.clozeMode ? (
+        <LawClozeText
+          text={chunk}
+          scopeKey={`seg-${segIdx}-${suffix}`}
+          revealAllSignal={clozeRevealSignal}
+          hideAllSignal={clozeHideSignal}
+        />
+      ) : (
+        renderLawTextWithExamHighlights(chunk, readingPrefs.highlightExamWords)
+      );
+
     const q = (focusSearchTerm || search).trim();
     if (!q || filterOnlyMatches) {
-      return renderLawTextWithExamHighlights(segText, readingPrefs.highlightExamWords);
+      return renderPlainOrCloze(segText, 'full');
     }
 
     let pos = -1;
@@ -801,7 +818,7 @@ export const LawsPage: React.FC = () => {
     }
 
     if (pos === -1) {
-      return renderLawTextWithExamHighlights(segText, readingPrefs.highlightExamWords);
+      return renderPlainOrCloze(segText, 'nomatch');
     }
 
     const before = segText.slice(0, pos);
@@ -812,7 +829,7 @@ export const LawsPage: React.FC = () => {
 
     return (
       <>
-        {renderLawTextWithExamHighlights(before, readingPrefs.highlightExamWords)}
+        {renderPlainOrCloze(before, 'before')}
         <span
           key={`focus-${segIdx}`}
           ref={attachRef ? focusMarkRef : undefined}
@@ -820,7 +837,7 @@ export const LawsPage: React.FC = () => {
         >
           {match}
         </span>
-        {renderLawTextWithExamHighlights(after, readingPrefs.highlightExamWords)}
+        {renderPlainOrCloze(after, 'after')}
       </>
     );
   };
@@ -1477,6 +1494,10 @@ export const LawsPage: React.FC = () => {
             onCycleLineHeight={cycleLineHeight}
             onToggleComfortableWidth={toggleComfortableWidth}
             onToggleHighlightExamWords={toggleHighlightExamWords}
+            showClozeModeToggle
+            onToggleClozeMode={toggleClozeMode}
+            onClozeRevealAll={() => setClozeRevealSignal((n) => n + 1)}
+            onClozeHideAll={() => setClozeHideSignal((n) => n + 1)}
             lastReadPosition={db.lawLastReadPosition?.[activeFolder]}
             onResumeLastPosition={handleJumpToArticle}
           />
@@ -2430,9 +2451,18 @@ export const LawsPage: React.FC = () => {
                               }}
                               className="m-0 text-[var(--text)] whitespace-pre-line"
                             >
-                              {renderLawTextWithExamHighlights(
-                                item.texto,
-                                readingPrefs.highlightExamWords,
+                              {readingPrefs.clozeMode ? (
+                                <LawClozeText
+                                  text={item.texto}
+                                  scopeKey={`item-${item.id}`}
+                                  revealAllSignal={clozeRevealSignal}
+                                  hideAllSignal={clozeHideSignal}
+                                />
+                              ) : (
+                                renderLawTextWithExamHighlights(
+                                  item.texto,
+                                  readingPrefs.highlightExamWords,
+                                )
                               )}
                             </p>
                             {(item.dica || item.observacao) && (

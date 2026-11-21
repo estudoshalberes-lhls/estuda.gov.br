@@ -21,8 +21,10 @@ import { useStudy } from '../context/StudyContext';
 import {
   WEEKDAYS,
   formatClock,
+  formatScheduleDuration,
   inferFixedSubjectFromTopic,
   localDateIso,
+  scheduleDurationSeconds,
   visibleName,
 } from '../lib/parsers';
 import { captureD3ChartsFromContainer } from '../lib/d3SvgCapture';
@@ -136,12 +138,16 @@ const StudySessionListRow = React.memo(
               <span className="text-[11px] text-[var(--muted)]">({rec.day})</span>
               <span
                 className={`px-1.5 py-0.2 rounded border text-[10px] font-bold ${
-                  rec.source === 'schedule'
+                  rec.source === 'schedule' || rec.source === 'manual'
                     ? 'border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)]'
                     : 'border-[var(--line)] bg-[var(--panel)] text-[var(--muted)]'
                 }`}
               >
-                {rec.source === 'schedule' ? 'Cronograma' : 'Treino / Simulado'}
+                {rec.source === 'schedule'
+                  ? 'Cronograma'
+                  : rec.source === 'manual'
+                    ? 'Manual'
+                    : 'Treino / Simulado'}
               </span>
             </div>
 
@@ -242,11 +248,33 @@ export const PerformancePage: React.FC = () => {
     fixedSubjects,
     setActivePage,
     deleteStudyTimeRecord,
+    syncUncountedCompletedGoals,
     requestConfirm,
     updatePreferences,
     googleUser,
     toast,
   } = useStudy();
+
+  const uncountedCompletedSummary = useMemo(() => {
+    const existingRecordIds = new Set(db.studyTimeRecords.map((r) => r.quizId));
+    const existingTopicIds = new Set<string>();
+    db.studyTimeRecords.forEach((rec) => {
+      rec.allocations.forEach((a) => {
+        if (a.topicId) existingTopicIds.add(a.topicId);
+      });
+    });
+    let count = 0;
+    let totalSeconds = 0;
+    db.completedGoals.forEach((g) => {
+      const sec = scheduleDurationSeconds(g.tempo || '');
+      if (sec <= 0) return;
+      if (g.studyRecordId && existingRecordIds.has(g.studyRecordId)) return;
+      if (g.topicId && existingTopicIds.has(g.topicId)) return;
+      count += 1;
+      totalSeconds += sec;
+    });
+    return { count, totalSeconds };
+  }, [db.completedGoals, db.studyTimeRecords]);
 
   const careerSummary = useMemo(() => computeCareerSummary(db), [db]);
   const pinnedMedalIds = db.preferences?.career_meta?.pinned_medals || [];
@@ -1088,6 +1116,28 @@ export const PerformancePage: React.FC = () => {
           </div>
         }
       />
+
+      {uncountedCompletedSummary.count > 0 && (
+        <div className="mb-4 rounded-xl border border-[var(--accent)]/45 bg-[var(--accent-soft)] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0 flex-1">
+            <div className="text-[12.5px] font-extrabold text-[var(--text)]">
+              {uncountedCompletedSummary.count} meta(s) concluída(s) no Cronograma ainda não foram somadas aqui (+
+              {formatScheduleDuration(uncountedCompletedSummary.totalSeconds)})
+            </div>
+            <p className="m-0 mt-0.5 text-[11.5px] text-[var(--muted)]">
+              A partir de agora toda meta finalizada no Cronograma soma automaticamente. Clique ao lado para importar também as metas concluídas anteriormente sem duplicar horas.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => syncUncountedCompletedGoals()}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+          >
+            <Clock className="w-3.5 h-3.5" />
+            Contabilizar metas anteriores (+{formatScheduleDuration(uncountedCompletedSummary.totalSeconds)})
+          </button>
+        </div>
+      )}
 
       {/* Níveis de Carreira e Medalhas de Mérito */}
       <CareerAchievementsBanner
