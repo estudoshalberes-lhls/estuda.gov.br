@@ -24,6 +24,12 @@ import { useStudyTimer } from '../lib/timerTickStore';
 import { getGovModuleLabel } from '../data/seedData';
 import { WEEKDAYS, formatScheduleDuration, localDateIso, paymentDateValue, visibleName } from '../lib/parsers';
 import { exportStudentClearanceCertificatePdf } from '../lib/pdfExport';
+import {
+  MEDAL_TIER_LABELS,
+  MedalTier,
+  computeCareerSummary,
+  formatCareerDateBr,
+} from '../lib/careerGamification';
 import { ModuleName } from '../types/study';
 import { ModuleIcon } from '../components/ui/ModuleIcon';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
@@ -232,37 +238,7 @@ export const HomePage: React.FC = () => {
     return sum;
   }, [db.studyTimeRecords]);
 
-  const studentRank = useMemo(() => {
-    const score = attempted + db.completedSimulations.length * 10;
-    if (score >= 500) {
-      return {
-        title: 'Ministro da Aprovação',
-        nextTarget: 'Nível máximo atingido no escalão ministerial',
-      };
-    }
-    if (score >= 250) {
-      return {
-        title: 'Auditor da Lei Seca',
-        nextTarget: `${500 - score} pts para Ministro da Aprovação`,
-      };
-    }
-    if (score >= 100) {
-      return {
-        title: 'Analista de Gabarito',
-        nextTarget: `${250 - score} pts para Auditor da Lei Seca`,
-      };
-    }
-    if (score >= 30) {
-      return {
-        title: 'Técnico em Café Forte',
-        nextTarget: `${100 - score} pts para Analista de Gabarito`,
-      };
-    }
-    return {
-      title: 'Estagiário do Edital',
-      nextTarget: `${Math.max(1, 30 - score)} pts para Técnico em Café Forte`,
-    };
-  }, [attempted, db.completedSimulations.length]);
+  const careerSummary = useMemo(() => computeCareerSummary(db), [db]);
 
   const holderName =
     googleUser?.displayName ||
@@ -280,7 +256,17 @@ export const HomePage: React.FC = () => {
       exportStudentClearanceCertificatePdf({
         holderName,
         protocolNumber,
-        rankTitle: studentRank.title,
+        rankTitle: careerSummary.currentLevel.title,
+        rankLevel: careerSummary.currentLevel.level,
+        maxRankLevel: careerSummary.allLevels.length,
+        totalXp: careerSummary.totalXp,
+        unlockedMedalsCount: careerSummary.unlockedMedalsCount,
+        totalMedalsCount: careerSummary.medals.length,
+        pinnedMedals: careerSummary.showcaseMedals.map((m) => ({
+          title: m.title,
+          tierLabel: MEDAL_TIER_LABELS[m.tier],
+          awardDate: formatCareerDateBr(m.unlockedAt) || undefined,
+        })),
         isRegular: isCadastralRegular,
         answeredQuestions: attempted,
         correctQuestions: totalCorrect,
@@ -651,26 +637,36 @@ export const HomePage: React.FC = () => {
       {/* Carteirinha Digital do Concurseiro */}
       <Panel
         title="Identidade Nacional do Concurseiro (Documento Digital)"
-        subtitle={`Protocolo ${protocolNumber} · Classificação calculada pelo histórico de questões e simulados.`}
+        subtitle={`Protocolo ${protocolNumber} · Carreira unificada por XP, metas, horas líquidas e medalhas de mérito.`}
         className="mb-5"
         action={
-          <button
-            type="button"
-            onClick={handleDownloadCertificate}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer"
-          >
-            <FileDown className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-            <span>Emitir Certidão (PDF)</span>
-          </button>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActivePage('Monitor de Desempenho')}
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] hover:border-[var(--accent)] text-[var(--text)] text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Award className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+              <span>Ver Carreira &amp; Medalhas</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleDownloadCertificate}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <FileDown className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+              <span>Emitir Certidão (PDF)</span>
+            </button>
+          </div>
         }
       >
-        <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_1.8fr] gap-4 items-center">
+        <div className="grid grid-cols-1 lg:grid-cols-[1.25fr_1.75fr] gap-4 items-center">
           <div className="flex items-start gap-3.5 min-w-0">
             <span className="grid place-items-center w-12 h-12 rounded-xl border border-[var(--accent)]/30 bg-[var(--accent-soft)] text-[var(--accent)] shrink-0">
               <Award className="w-6 h-6" aria-hidden="true" />
             </span>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold uppercase tracking-[0.05em]">
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-bold">
                 <span className={isCadastralRegular ? 'text-[var(--good)]' : 'text-[var(--warning)]'}>
                   {isCadastralRegular ? 'Situação Regular' : 'Pendência na Ouvidoria'}
                 </span>
@@ -682,8 +678,35 @@ export const HomePage: React.FC = () => {
               </strong>
               <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[12px]">
                 <BadgeCheck className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
-                <span className="font-bold text-[var(--accent)]">{studentRank.title}</span>
-                <span className="text-[var(--muted)]">· {studentRank.nextTarget}</span>
+                <span className="font-mono-num font-bold text-[var(--accent)]">
+                  Nv. {careerSummary.currentLevel.level}/{careerSummary.allLevels.length}
+                </span>
+                <span className="font-bold text-[var(--text)]">
+                  {careerSummary.currentLevel.title}
+                </span>
+                <span className="text-[var(--muted)] font-mono-num">
+                  · {careerSummary.totalXp.toLocaleString('pt-BR')} XP
+                </span>
+              </div>
+              <div className="mt-2 max-w-[360px]">
+                <div className="flex items-center justify-between gap-2 text-[10.5px] text-[var(--muted)] font-mono-num mb-1">
+                  <span className="truncate">
+                    {careerSummary.nextLevel
+                      ? `Próximo: ${careerSummary.nextLevel.title}`
+                      : 'Patamar máximo atingido'}
+                  </span>
+                  <span className="shrink-0 font-bold text-[var(--accent)]">
+                    {careerSummary.nextLevel
+                      ? `faltam ${careerSummary.xpRemaining.toLocaleString('pt-BR')} XP`
+                      : '100%'}
+                  </span>
+                </div>
+                <div className="h-1.5 w-full rounded-full bg-[var(--panel-soft)] border border-[var(--line)] overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-[var(--accent)] transition-all duration-300"
+                    style={{ width: `${Math.max(4, careerSummary.levelProgressPct)}%` }}
+                  />
+                </div>
               </div>
             </div>
           </div>
@@ -715,13 +738,76 @@ export const HomePage: React.FC = () => {
             </div>
             <div>
               <span className="block text-[10.5px] font-bold uppercase tracking-[0.04em] text-[var(--muted)]">
-                Metas Cumpridas
+                Medalhas
               </span>
               <strong className="block font-mono-num text-[17px] font-extrabold text-[var(--text)] mt-0.5">
-                {db.completedGoals.length.toLocaleString('pt-BR')}
+                {careerSummary.unlockedMedalsCount}
+                <span className="text-[12px] font-bold text-[var(--muted)]">
+                  /{careerSummary.medals.length}
+                </span>
               </strong>
             </div>
           </div>
+        </div>
+
+        {/* Vitrine de Honra (Medalhas Fixadas ou Top 3 Conquistadas) */}
+        <div className="mt-4 pt-3 border-t border-[var(--line)] flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 min-w-0">
+            <span className="text-[11px] font-extrabold text-[var(--muted)] whitespace-nowrap">
+              Vitrine de Honra
+              {!careerSummary.hasCustomPinnedMedals && careerSummary.showcaseMedals.length > 0
+                ? ' (Destaques)'
+                : ''}
+              :
+            </span>
+            {careerSummary.showcaseMedals.length > 0 ? (
+              <div className="flex flex-wrap items-center gap-2">
+                {careerSummary.showcaseMedals.map((m) => {
+                  const tierColor: Record<MedalTier, string> = {
+                    bronze: '#c26a2e',
+                    prata: '#64748b',
+                    ouro: '#ca8a04',
+                    diamante: '#0284c7',
+                    supremo: '#9333ea',
+                  };
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => setActivePage('Monitor de Desempenho')}
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] hover:border-[var(--accent)] text-[11.5px] transition-colors cursor-pointer"
+                      title={`${m.title} · ${MEDAL_TIER_LABELS[m.tier]} (+${m.bonusXp} XP)`}
+                    >
+                      <Award
+                        className="w-3.5 h-3.5 shrink-0"
+                        style={{ color: tierColor[m.tier] }}
+                        aria-hidden="true"
+                      />
+                      <span className="font-bold text-[var(--text)]">{m.title}</span>
+                      <span
+                        className="text-[10.5px] font-semibold"
+                        style={{ color: tierColor[m.tier] }}
+                      >
+                        · {MEDAL_TIER_LABELS[m.tier]}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <span className="text-[11.5px] text-[var(--subtle)]">
+                Conclua metas, horas ou questões para desbloquear e fixar até 3 medalhas aqui.
+              </span>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => setActivePage('Monitor de Desempenho')}
+            className="text-[11.5px] font-bold text-[var(--accent)] hover:underline whitespace-nowrap shrink-0 self-start sm:self-auto cursor-pointer bg-transparent border-0 p-0"
+          >
+            {careerSummary.hasCustomPinnedMedals ? 'Alterar Vitrine' : 'Personalizar Vitrine'}
+          </button>
         </div>
       </Panel>
 

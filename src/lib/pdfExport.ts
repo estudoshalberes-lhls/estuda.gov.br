@@ -5,7 +5,8 @@ import {
   LawHighlight,
   LawItem,
 } from '../types/study';
-import { cleanSafeName, formatSequentialDeviceLabel, localDateIso, normalizeSearch, visibleName } from './parsers';
+import { cleanSafeName, formatIsoDateBr, formatSequentialDeviceLabel, localDateBrazilian, localDateIso, localDateTimeBrazilian, normalizeSearch, visibleName } from './parsers';
+import { LegalBlockKind, normalizePdfLegalText, segmentLegalText } from './legalTextFormatter';
 import type { CapturedD3Chart } from './d3SvgCapture';
 
 export const HIGHLIGHT_COLOR_RGB: Record<
@@ -285,6 +286,13 @@ export interface ErrorNotebookPdfOptions {
   statusFilter?: 'pending' | 'corrected' | 'all';
   pageBreakBySubject?: boolean;
   scopeLabel?: string;
+  holderName?: string;
+}
+
+interface StyledWordToken {
+  text: string;
+  bold: boolean;
+  width: number;
 }
 
 export function exportErrorNotebookPdf(
@@ -341,165 +349,717 @@ export function exportErrorNotebookPdf(
     a.label.localeCompare(b.label, 'pt-BR'),
   );
 
-  const ctx = createDoc();
-  const { doc, margin, maxWidth, pageWidth } = ctx;
+  const doc = new jsPDF({ unit: 'mm', format: 'a4' });
+  const margin = 15;
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageHeight = doc.internal.pageSize.getHeight();
+  const maxWidth = pageWidth - margin * 2;
+  const bottomLimit = pageHeight - 17;
+  const topContinueY = 19;
 
-  // Institutional Gov.br Header Bar
+  let y = 14;
+  let currentRunningSubject = '';
+  const pageSubjects = new Map<number, string>();
+
+  const startNewPage = () => {
+    doc.addPage();
+    y = topContinueY;
+    if (currentRunningSubject) {
+      pageSubjects.set(doc.getNumberOfPages(), currentRunningSubject);
+    }
+  };
+
+  const ensureSpace = (heightNeeded: number) => {
+    if (y + heightNeeded > bottomLimit) {
+      startNewPage();
+    }
+  };
+
+  /**
+   * Renders a single paragraph with optional bold prefix, true justified alignment
+   * (protecting against excessive word spacing), hanging indent, and optional
+   * continuous left vertical guide rule across page breaks.
+   */
+  const renderJustifiedRichParagraph = (params: {
+    leadBold?: string;
+    body: string;
+    x: number;
+    width: number;
+    fontSize: number;
+    lineHeight: number;
+    hangingIndent?: number;
+    textColor?: [number, number, number];
+    leadColor?: [number, number, number];
+    justify?: boolean;
+    leftGuide?: { x: number; color: [number, number, number]; width?: number };
+    lineBg?: { x: number; width: number; color: [number, number, number] };
+  }) => {
+    const {
+      leadBold,
+      body,
+      x,
+      width,
+      fontSize,
+      lineHeight,
+      hangingIndent = 0,
+      textColor = [30, 41, 59],
+      leadColor = [7, 29, 65],
+      justify = true,
+      leftGuide,
+      lineBg,
+    } = params;
+
+    doc.setFontSize(fontSize);
+    doc.setFont('helvetica', 'normal');
+    const normalSpaceW = doc.getTextWidth(' ');
+
+    const tokens: StyledWordToken[] = [];
+    const pushSegment = (segment: string, bold: boolean) => {
+      const clean = normalizePdfLegalText(segment);
+      if (!clean) return;
+      doc.setFont('helvetica', bold ? 'bold' : 'normal');
+      const parts = clean.split(/\s+/).filter(Boolean);
+      parts.forEach((word) => {
+        const w = doc.getTextWidth(word);
+        const maxTokenW = Math.max(12, width - hangingIndent);
+        if (w > maxTokenW) {
+          const splitChunks = doc.splitTextToSize(word, maxTokenW) as string[];
+          splitChunks.forEach((chunk) => {
+            tokens.push({ text: chunk, bold, width: doc.getTextWidth(chunk) });
+          });
+        } else {
+          tokens.push({ text: word, bold, width: w });
+        }
+      });
+    };
+
+    if (leadBold) pushSegment(leadBold, true);
+    if (body) pushSegment(body, false);
+    if (!tokens.length) return;
+
+    // Greedy line breaking respecting hangingIndent on lines >= 1
+    const lines: StyledWordToken[][] = [];
+    let currentLine: StyledWordToken[] = [];
+    let currentLineW = 0;
+
+    for (const token of tokens) {
+      const isFirstLine = lines.length === 0;
+      const availW = isFirstLine ? width : Math.max(15, width - hangingIndent);
+      const nextW = currentLine.length === 0 ? token.width : currentLineW + normalSpaceW + token.width;
+
+      if (currentLine.length > 0 && nextW > availW) {
+        lines.push(currentLine);
+        currentLine = [token];
+        currentLineW = token.width;
+      } else {
+        currentLine.push(token);
+        currentLineW = nextW;
+      }
+    }
+    if (currentLine.length > 0) {
+      lines.push(currentLine);
+    }
+
+    lines.forEach((lineTokens, lineIdx) => {
+      ensureSpace(lineHeight + 0.6);
+
+      if (lineBg) {
+        doc.setFillColor(...lineBg.color);
+        doc.rect(lineBg.x, y - lineHeight + 1.1, lineBg.width, lineHeight + 0.25, 'F');
+      }
+
+      if (leftGuide) {
+        doc.setDrawColor(...leftGuide.color);
+        doc.setLineWidth(leftGuide.width ?? 0.55);
+        doc.line(leftGuide.x, y - lineHeight + 1.0, leftGuide.x, y + 1.4);
+      }
+
+      const isFirstLine = lineIdx === 0;
+      const isLastLine = lineIdx === lines.length - 1;
+      const lineX = isFirstLine ? x : x + hangingIndent;
+      const availW = isFirstLine ? width : Math.max(15, width - hangingIndent);
+      const wordsWidthSum = lineTokens.reduce((sum, t) => sum + t.width, 0);
+      const slack = availW - wordsWidthSum;
+
+      // Justify interior lines when there are multiple words and slack isn't excessively wide
+      const canJustify =
+        justify &&
+        !isLastLine &&
+        lineTokens.length > 1 &&
+        slack > 0 &&
+        slack <= availW * 0.32;
+
+      const gap = canJustify ? slack / (lineTokens.length - 1) : normalSpaceW;
+      let cursorX = lineX;
+
+      lineTokens.forEach((tok) => {
+        doc.setFont('helvetica', tok.bold ? 'bold' : 'normal');
+        doc.setTextColor(...(tok.bold ? leadColor : textColor));
+        doc.text(tok.text, cursorX, y);
+        cursorX += tok.width + gap;
+      });
+
+      y += lineHeight;
+    });
+  };
+
+  /**
+   * Renders multi-paragraph legal/study text with clean separation between
+   * Articles (Art.), Paragraphs (§ / Parágrafo único), Incisos (I -), Alíneas (a)),
+   * Súmulas, bullets, and standard prose.
+   */
+  const renderStructuredLegalContent = (params: {
+    text: string;
+    baseX: number;
+    baseWidth: number;
+    fontSize?: number;
+    lineHeight?: number;
+    leftGuide?: { x: number; color: [number, number, number]; width?: number };
+    lineBg?: { x: number; width: number; color: [number, number, number] };
+  }) => {
+    const {
+      text,
+      baseX,
+      baseWidth,
+      fontSize = 9.2,
+      lineHeight = 4.65,
+      leftGuide,
+      lineBg,
+    } = params;
+
+    const blocks = segmentLegalText(text);
+    if (!blocks.length) return;
+
+    const indentByKind: Record<LegalBlockKind, { left: number; hanging: number; gapBefore: number }> = {
+      article: { left: 0, hanging: 0, gapBefore: 2.2 },
+      sumula: { left: 0, hanging: 0, gapBefore: 2.0 },
+      paragraph: { left: 3.5, hanging: 0, gapBefore: 1.4 },
+      inciso: { left: 6.5, hanging: 6.5, gapBefore: 1.0 },
+      alinea: { left: 10.0, hanging: 5.2, gapBefore: 0.85 },
+      bullet: { left: 3.5, hanging: 4.0, gapBefore: 0.9 },
+      prose: { left: 0, hanging: 0, gapBefore: 1.35 },
+    };
+
+    const leadColorByKind: Record<LegalBlockKind, [number, number, number]> = {
+      article: [7, 29, 65],
+      sumula: [19, 81, 180],
+      paragraph: [15, 48, 102],
+      inciso: [30, 58, 108],
+      alinea: [51, 78, 118],
+      bullet: [19, 81, 180],
+      prose: [7, 29, 65],
+    };
+
+    blocks.forEach((block, idx) => {
+      const cfg = indentByKind[block.kind];
+      const pageBefore = doc.getNumberOfPages();
+
+      // Keep legal article/sumula heading attached to at least 2 lines before rendering gap strip
+      if (block.kind === 'article' || block.kind === 'sumula') {
+        ensureSpace(cfg.gapBefore + lineHeight * 2 + 1.5);
+      } else if (idx > 0) {
+        ensureSpace(cfg.gapBefore + lineHeight + 0.6);
+      }
+
+      const stayedOnSamePage = doc.getNumberOfPages() === pageBefore;
+      if (idx > 0 && stayedOnSamePage) {
+        const gapTop = y - lineHeight + 1.2;
+        if (lineBg) {
+          doc.setFillColor(...lineBg.color);
+          doc.rect(lineBg.x, gapTop, lineBg.width, cfg.gapBefore + 0.3, 'F');
+        }
+        if (leftGuide) {
+          doc.setDrawColor(...leftGuide.color);
+          doc.setLineWidth(leftGuide.width ?? 0.55);
+          doc.line(leftGuide.x, gapTop, leftGuide.x, gapTop + cfg.gapBefore + 0.3);
+        }
+        y += cfg.gapBefore;
+      }
+
+      renderJustifiedRichParagraph({
+        leadBold: block.leadBold,
+        body: block.body,
+        x: baseX + cfg.left,
+        width: Math.max(30, baseWidth - cfg.left),
+        fontSize,
+        lineHeight,
+        hangingIndent: cfg.hanging,
+        leadColor: leadColorByKind[block.kind],
+        textColor: [28, 39, 56],
+        justify: true,
+        leftGuide,
+        lineBg,
+      });
+    });
+  };
+
+  // === PAGE 1: OFFICIAL GOV.BR HEADER BANNER ===
+  const emissionDateTime = localDateTimeBrazilian();
+  const emissionDateOnly = localDateBrazilian();
+
   doc.setFillColor(7, 29, 65);
-  doc.rect(margin, ctx.y - 4, maxWidth, 18, 'F');
+  doc.rect(0, 0, pageWidth, 29, 'F');
+
+  // Official Brasil Tricolore Stripe
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, 29, third, 1.8, 'F');
   doc.setFillColor(255, 205, 7);
-  doc.rect(margin, ctx.y + 14, maxWidth, 1.4, 'F');
+  doc.rect(third, 29, third, 1.8, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, 29, pageWidth - third * 2, 1.8, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.8);
+  doc.setTextColor(255, 205, 7);
+  doc.text('PORTAL ÚNICO DO ESTUDANTE · OUVIDORIA & CORREGEDORIA', margin, 9.5);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(15.5);
+  doc.setTextColor(255, 255, 255);
+  doc.text('Caderno Oficial de Erros e Revisão', margin, 17.5);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(215, 227, 244);
+  doc.text(
+    'Consolidado estruturado de anotações, fundamentação legal e questões para revisão direcionada',
+    margin,
+    23.8,
+  );
 
   doc.setFont('helvetica', 'bold');
   doc.setFontSize(7.5);
   doc.setTextColor(255, 205, 7);
-  doc.text('PORTAL UNICO DO ESTUDANTE · OUVIDORIA & CORREGEDORIA', margin + 3.5, ctx.y + 1.5);
+  doc.text('EMISSÃO OFICIAL', pageWidth - margin, 10.5, { align: 'right' });
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(235, 242, 252);
+  doc.text(emissionDateTime, pageWidth - margin, 15.8, { align: 'right' });
+  if (options?.holderName) {
+    doc.setFontSize(7.8);
+    const shortHolder = doc.splitTextToSize(normalizePdfLegalText(options.holderName), 58)[0] || '';
+    doc.text(shortHolder, pageWidth - margin, 21.2, { align: 'right' });
+  }
 
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(13.5);
-  doc.setTextColor(255, 255, 255);
-  doc.text('Caderno Oficial de Erros e Revisao', margin + 3.5, ctx.y + 8);
+  y = 35.5;
 
+  // === 4-COLUMN SUMMARY METADATA STRIP ===
+  const pendingTotal = rows.filter((r) => !r.corrigido).length;
+  const correctedTotal = rows.length - pendingTotal;
   const statusText =
     statusFilter === 'pending'
-      ? 'Pendentes de Correcao'
+      ? 'Pendentes de Correção'
       : statusFilter === 'corrected'
-        ? 'Ja Corrigidos'
+        ? 'Já Corrigidos'
         : 'Todos os Registros';
-
   const scopeText =
     options?.scopeLabel ||
     (isAllSubjects
-      ? 'Todas as materias (em conjunto)'
+      ? 'Todas as matérias'
       : selectedList.length === 1
-        ? `${visibleName(selectedList[0])} (separado)`
-        : `${selectedList.length} materias em conjunto`);
+        ? visibleName(selectedList[0])
+        : `${selectedList.length} matérias selecionadas`);
 
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.setTextColor(220, 230, 245);
-  doc.text(
-    safePdfText(`${rows.length} registro(s) · ${groups.length} materia(s) · ${statusText} · ${scopeText}`),
-    margin + 3.5,
-    ctx.y + 12.2,
-  );
+  const kpiHeight = 13.5;
+  doc.setFillColor(246, 249, 253);
+  doc.setDrawColor(194, 209, 228);
+  doc.setLineWidth(0.3);
+  doc.rect(margin, y, maxWidth, kpiHeight, 'FD');
 
-  ctx.y += 21;
-
-  // Compact summary index if multiple subjects
-  if (groups.length > 1) {
-    doc.setFillColor(244, 247, 251);
-    doc.setDrawColor(198, 211, 228);
-    const summaryText = groups
-      .map((g) => `${g.label} (${g.items.length})`)
-      .join('  ·  ');
-    const wrappedSummary = doc.splitTextToSize(safePdfText(summaryText), maxWidth - 6) as string[];
-    const boxHeight = Math.max(8, wrappedSummary.length * 4.2 + 4);
-    ctx.ensureSpace(boxHeight + 4);
-    doc.rect(margin, ctx.y - 3, maxWidth, boxHeight, 'FD');
+  const kpiCols = [
+    { label: 'ESCOPO', value: normalizePdfLegalText(scopeText) },
+    { label: 'FILTRO DE SITUAÇÃO', value: statusText },
+    { label: 'REGISTROS / MATÉRIAS', value: `${rows.length} reg. · ${groups.length} matéria(s)` },
+    { label: 'BALANÇO', value: `${pendingTotal} pend. · ${correctedTotal} corr.` },
+  ];
+  const colW = maxWidth / 4;
+  kpiCols.forEach((col, idx) => {
+    const cx = margin + idx * colW;
+    if (idx > 0) {
+      doc.setDrawColor(214, 224, 238);
+      doc.line(cx, y + 1.5, cx, y + kpiHeight - 1.5);
+    }
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
+    doc.setFontSize(6.6);
+    doc.setTextColor(78, 96, 122);
+    doc.text(col.label, cx + 2.8, y + 4.7);
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8.4);
     doc.setTextColor(7, 29, 65);
-    wrappedSummary.forEach((line, idx) => {
-      doc.text(line, margin + 3, ctx.y + 1 + idx * 4.2);
+    const truncated = (doc.splitTextToSize(col.value, colW - 5.5) as string[])[0] || col.value;
+    doc.text(truncated, cx + 2.8, y + 10.2);
+  });
+
+  y += kpiHeight + 4.5;
+
+  // === SUMÁRIO POR MATÉRIA (WHEN MULTIPLE SUBJECTS) ===
+  if (groups.length > 1) {
+    const numCols = 2;
+    const rowsNeeded = Math.ceil(groups.length / numCols);
+    const tocHeight = 7.5 + rowsNeeded * 5.2 + 2.5;
+    ensureSpace(tocHeight + 4);
+
+    doc.setFillColor(250, 252, 255);
+    doc.setDrawColor(204, 216, 232);
+    doc.setLineWidth(0.28);
+    doc.rect(margin, y, maxWidth, tocHeight, 'FD');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.6);
+    doc.setTextColor(19, 81, 180);
+    doc.text('SUMÁRIO POR MATÉRIA', margin + 3.2, y + 4.8);
+
+    const halfW = (maxWidth - 8) / 2;
+    groups.forEach((g, idx) => {
+      const col = idx % 2;
+      const rowIdx = Math.floor(idx / 2);
+      const itemX = margin + 3.2 + col * (halfW + 2);
+      const itemY = y + 9.8 + rowIdx * 5.2;
+      const pend = g.items.filter((i) => !i.corrigido).length;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(7, 29, 65);
+      const subjShort =
+        (doc.splitTextToSize(normalizePdfLegalText(g.label), halfW - 24) as string[])[0] || g.label;
+      doc.text(`${idx + 1}. ${subjShort}`, itemX, itemY);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.6);
+      doc.setTextColor(84, 102, 128);
+      const countText = `${g.items.length} reg.${pend > 0 ? ` (${pend} p.)` : ''}`;
+      doc.text(countText, itemX + halfW - 1.5, itemY, { align: 'right' });
     });
-    ctx.y += boxHeight + 3;
+
+    y += tocHeight + 5.5;
   }
 
+  // === SUBJECT GROUPS & STRUCTURED CARDS ===
   let globalIndex = 0;
 
   groups.forEach((group, groupIdx) => {
+    currentRunningSubject = normalizePdfLegalText(group.label);
+
     if (groupIdx > 0 && pageBreakBySubject) {
-      doc.addPage();
-      ctx.y = 18;
+      startNewPage();
+    } else if (groupIdx > 0) {
+      y += 2;
     }
 
-    ctx.ensureSpace(16);
-    doc.setFillColor(232, 239, 249);
-    doc.setDrawColor(19, 81, 180);
-    doc.rect(margin, ctx.y - 4.5, maxWidth, 8, 'FD');
+    // Never leave a subject banner orphaned without its first entry header
+    ensureSpace(30);
+    if (!pageSubjects.has(doc.getNumberOfPages())) {
+      pageSubjects.set(doc.getNumberOfPages(), currentRunningSubject);
+    }
+
+    // Subject Banner
+    const bannerH = 9;
+    doc.setFillColor(235, 241, 250);
+    doc.setDrawColor(186, 204, 228);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, y, maxWidth, bannerH, 'FD');
+
+    // Crisp Navy Left Indicator
+    doc.setFillColor(7, 29, 65);
+    doc.rect(margin, y, 2.2, bannerH, 'F');
+
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
     doc.setTextColor(7, 29, 65);
+    const subjTitle = (
+      doc.splitTextToSize(normalizePdfLegalText(group.label).toUpperCase(), maxWidth - 52) as string[]
+    )[0];
+    doc.text(subjTitle, margin + 5, y + 6);
+
     const pendingInGroup = group.items.filter((i) => !i.corrigido).length;
-    const sectionHeader = `${group.label.toUpperCase()}  (${group.items.length} registro(s)${
-      pendingInGroup > 0 ? ` · ${pendingInGroup} pendente(s)` : ''
-    })`;
-    doc.text(safePdfText(doc.splitTextToSize(sectionHeader, maxWidth - 6)[0]), margin + 3, ctx.y + 0.6);
-    ctx.y += 8.5;
+    const rightMeta = `${group.items.length} registro(s)${
+      pendingInGroup > 0 ? ` · ${pendingInGroup} pendente(s)` : ' · Em dia'
+    }`;
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.8);
+    doc.setTextColor(19, 81, 180);
+    doc.text(rightMeta, pageWidth - margin - 3, y + 5.8, { align: 'right' });
+
+    y += bannerH + 4;
 
     group.items.forEach((row) => {
       globalIndex += 1;
-      ctx.ensureSpace(18);
-      doc.setFillColor(246, 248, 250);
-      doc.setDrawColor(210, 216, 224);
-      doc.rect(margin, ctx.y - 4.2, maxWidth, 6.6, 'FD');
+      currentRunningSubject = normalizePdfLegalText(group.label);
+
+      // Ensure room for entry header + at least initial lines of content
+      ensureSpace(24);
+
+      const isCorrected = Boolean(row.corrigido);
+      const headerH = 7.4;
+
+      // Entry Header Bar
+      doc.setFillColor(246, 248, 252);
+      doc.setDrawColor(203, 214, 229);
+      doc.setLineWidth(0.28);
+      doc.rect(margin, y, maxWidth, headerH, 'FD');
+
+      // Status Pill Text on Right
+      const statusLabel = isCorrected ? 'CORRIGIDO' : 'PENDENTE';
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.2);
+      const badgeW = doc.getTextWidth(statusLabel) + 5;
+      const badgeX = pageWidth - margin - badgeW - 2;
+      if (isCorrected) {
+        doc.setFillColor(232, 246, 236);
+        doc.setDrawColor(142, 207, 158);
+        doc.setTextColor(22, 118, 33);
+      } else {
+        doc.setFillColor(254, 243, 224);
+        doc.setDrawColor(235, 186, 112);
+        doc.setTextColor(168, 76, 8);
+      }
+      doc.roundedRect(badgeX, y + 1.4, badgeW, 4.6, 1, 1, 'FD');
+      doc.text(statusLabel, badgeX + badgeW / 2, y + 4.7, { align: 'center' });
+
+      // Left Title: #01 · Tipo · Data · Origem
+      const numStr = `#${String(globalIndex).padStart(2, '0')}`;
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(9.2);
-      doc.setTextColor(22, 34, 56);
-      const statusBadge = row.corrigido ? 'Corrigido' : 'Pendente';
-      const title = `${globalIndex}. [${statusBadge}] ${visibleName(row.tipo)} · ${row.data}${
-        row.origem ? ` · ${row.origem}` : ''
-      }`;
-      doc.text(safePdfText(doc.splitTextToSize(title, maxWidth - 4)[0]), margin + 2, ctx.y + 0.2);
-      ctx.y += 6;
+      doc.setTextColor(19, 81, 180);
+      doc.text(numStr, margin + 2.8, y + 5);
 
-      doc.setFont('helvetica', 'normal');
-      doc.setFontSize(9.2);
-      doc.setTextColor(35, 35, 35);
+      const numW = doc.getTextWidth(numStr);
+      const headerParts = [visibleName(row.tipo || 'Anotação'), row.data || ''];
+      if (row.origem) headerParts.push(visibleName(row.origem));
+      const metaHeader = normalizePdfLegalText(headerParts.filter(Boolean).join(' · '));
 
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.8);
+      doc.setTextColor(7, 29, 65);
+      const availHeaderW = badgeX - (margin + 4.8 + numW) - 3;
+      const truncatedMeta =
+        (doc.splitTextToSize(metaHeader, Math.max(25, availHeaderW)) as string[])[0] || '';
+      doc.text(truncatedMeta, margin + 4.8 + numW, y + 5);
+
+      y += headerH + 2.5;
+
+      // Optional metadata line (prova, banca, ciclo de revisão)
+      const subMetaParts: string[] = [];
+      if (row.banca) subMetaParts.push(`Banca: ${visibleName(row.banca)}`);
       if (row.correcao_prova && row.arquivo_prova) {
-        ctx.writeWrapped(`Prova: ${visibleName(row.arquivo_prova)}`, 4.8);
+        subMetaParts.push(`Prova: ${visibleName(row.arquivo_prova)}`);
       }
-      ctx.writeWrapped(`Ponto para revisar: ${row.texto}`, 5);
+      if (row.nivel_revisao && row.nivel_revisao > 0) {
+        subMetaParts.push(`Revisões concluídas: ${row.nivel_revisao}`);
+      }
+      if (row.proxima_revisao && !isCorrected) {
+        subMetaParts.push(`Próxima revisão: ${formatIsoDateBr(row.proxima_revisao)}`);
+      }
+      if (row.corrigido_em && isCorrected) {
+        subMetaParts.push(`Corrigido em: ${row.corrigido_em}`);
+      }
 
-      if (includeQuestion && row.questao) {
-        ctx.y += 1.2;
+      if (subMetaParts.length > 0) {
+        ensureSpace(5);
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(7.8);
+        doc.setTextColor(86, 104, 130);
+        const subLines = doc.splitTextToSize(
+          normalizePdfLegalText(subMetaParts.join('  ·  ')),
+          maxWidth - 4,
+        ) as string[];
+        subLines.forEach((sl) => {
+          ensureSpace(4.2);
+          doc.text(sl, margin + 2, y);
+          y += 3.9;
+        });
+        y += 0.8;
+      }
+
+      // === SECTION A: PONTO PARA REVISAR ===
+      if (row.texto && row.texto.trim()) {
+        ensureSpace(10);
         doc.setFont('helvetica', 'bold');
-        ctx.writeWrapped('Questao vinculada:', 4.8);
-        doc.setFont('helvetica', 'normal');
-        ctx.writeWrapped(row.questao.enunciado, 4.8);
-        if (row.questao.alternativas?.length) {
-          row.questao.alternativas.forEach((alt) => {
-            ctx.writeWrapped(`[${alt.letra}] ${alt.texto}`, 4.6);
+        doc.setFontSize(7.4);
+        doc.setTextColor(19, 81, 180);
+        doc.text('PONTO PARA REVISAR', margin + 3.2, y + 1);
+        y += 4.6;
+
+        renderStructuredLegalContent({
+          text: row.texto,
+          baseX: margin + 3.5,
+          baseWidth: maxWidth - 5.5,
+          fontSize: 9.2,
+          lineHeight: 4.65,
+          leftGuide: { x: margin + 1.2, color: [19, 81, 180], width: 0.7 },
+        });
+        y += 2;
+      }
+
+      // === SECTION B: QUESTÃO VINCULADA ===
+      if (includeQuestion && row.questao) {
+        ensureSpace(12);
+        // Subtle section divider
+        doc.setDrawColor(218, 227, 239);
+        doc.setLineWidth(0.25);
+        doc.line(margin + 1, y, pageWidth - margin - 1, y);
+        y += 4.2;
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.4);
+        doc.setTextColor(7, 29, 65);
+        doc.text('QUESTÃO VINCULADA', margin + 2, y);
+        y += 4.4;
+
+        // Enunciado (also structured & justified so legal citations inside stems are cleanly separated!)
+        if (row.questao.enunciado) {
+          renderStructuredLegalContent({
+            text: row.questao.enunciado,
+            baseX: margin + 2,
+            baseWidth: maxWidth - 4,
+            fontSize: 9.0,
+            lineHeight: 4.55,
           });
+          y += 2;
         }
+
+        // Alternativas with clean hanging indent + Gabarito/Marcada visual highlight
+        if (row.questao.alternativas?.length) {
+          const normGabarito = (row.questao.gabarito || '').trim().toUpperCase();
+          const normResposta = (row.questao.resposta || '').trim().toUpperCase();
+
+          row.questao.alternativas.forEach((alt) => {
+            const letraNorm = (alt.letra || '').trim().toUpperCase();
+            const isCorrectAlt = Boolean(normGabarito && letraNorm === normGabarito);
+            const isWrongSelected = Boolean(
+              normResposta && letraNorm === normResposta && letraNorm !== normGabarito,
+            );
+
+            const bgSpec = isCorrectAlt
+              ? { x: margin + 2, width: maxWidth - 4, color: [236, 248, 239] as [number, number, number] }
+              : isWrongSelected
+                ? { x: margin + 2, width: maxWidth - 4, color: [253, 238, 238] as [number, number, number] }
+                : undefined;
+
+            const leadClr: [number, number, number] = isCorrectAlt
+              ? [22, 118, 33]
+              : isWrongSelected
+                ? [185, 28, 28]
+                : [7, 29, 65];
+
+            const suffixTag = isCorrectAlt
+              ? ' (Gabarito)'
+              : isWrongSelected
+                ? ' (Sua resposta)'
+                : '';
+
+            renderJustifiedRichParagraph({
+              leadBold: `${letraNorm})`,
+              body: `${normalizePdfLegalText(alt.texto)}${suffixTag}`,
+              x: margin + 3.5,
+              width: maxWidth - 7,
+              fontSize: 8.8,
+              lineHeight: 4.4,
+              hangingIndent: 5.8,
+              leadColor: leadClr,
+              textColor: isCorrectAlt ? [16, 74, 28] : isWrongSelected ? [127, 29, 29] : [35, 45, 62],
+              justify: true,
+              lineBg: bgSpec,
+            });
+            y += 1.0;
+          });
+          y += 1.2;
+        }
+
+        // Gabarito Summary Strip
         const answerParts: string[] = [];
-        if (row.questao.resposta) answerParts.push(`Marcada: ${row.questao.resposta}`);
-        if (row.questao.gabarito) answerParts.push(`Gabarito: ${row.questao.gabarito}`);
-        if (answerParts.length) {
+        if (row.questao.resposta) answerParts.push(`Sua resposta: ${row.questao.resposta}`);
+        if (row.questao.gabarito) answerParts.push(`Gabarito oficial: ${row.questao.gabarito}`);
+        if (answerParts.length > 0) {
+          ensureSpace(8);
+          doc.setFillColor(244, 247, 252);
+          doc.setDrawColor(198, 211, 228);
+          doc.setLineWidth(0.25);
+          doc.rect(margin + 2, y - 0.5, maxWidth - 4, 6.2, 'FD');
+
           doc.setFont('helvetica', 'bold');
-          ctx.writeWrapped(answerParts.join('  |  '), 4.8);
-          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.2);
+          doc.setTextColor(7, 29, 65);
+          doc.text(normalizePdfLegalText(answerParts.join('    |    ')), margin + 4.5, y + 3.7);
+          y += 8.2;
         }
-        if (row.questao.comentario) {
-          ctx.writeWrapped(`Comentario: ${row.questao.comentario}`, 4.8);
+
+        // Comentário & Fundamentação Legal (richly separated articles/paragraphs/incisos!)
+        if (row.questao.comentario && row.questao.comentario.trim()) {
+          ensureSpace(10);
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(7.4);
+          doc.setTextColor(22, 118, 33);
+          doc.text('COMENTÁRIO E FUNDAMENTAÇÃO LEGAL', margin + 4.2, y + 0.8);
+          y += 4.5;
+
+          renderStructuredLegalContent({
+            text: row.questao.comentario,
+            baseX: margin + 4.2,
+            baseWidth: maxWidth - 6.8,
+            fontSize: 8.9,
+            lineHeight: 4.55,
+            leftGuide: { x: margin + 2.0, color: [22, 136, 33], width: 0.65 },
+            lineBg: { x: margin + 2.3, width: maxWidth - 4.3, color: [248, 251, 249] },
+          });
+          y += 1.8;
         }
       }
-      ctx.y += 3.5;
-    });
 
-    ctx.y += 2;
+      // Entry Bottom Divider & Spacing
+      ensureSpace(3);
+      doc.setDrawColor(214, 224, 236);
+      doc.setLineWidth(0.22);
+      doc.line(margin, y + 0.8, pageWidth - margin, y + 0.8);
+      y += 5.2;
+    });
   });
 
-  // Footer page numbers
+  // === RUNNING HEADERS (PAGES 2+) & INSTITUTIONAL FOOTERS (ALL PAGES) ===
   const totalPages = doc.getNumberOfPages();
   for (let p = 1; p <= totalPages; p += 1) {
     doc.setPage(p);
+
+    // Running Header on continuation pages
+    if (p > 1) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.4);
+      doc.setTextColor(7, 29, 65);
+      doc.text('estuda.gov.br · Caderno Oficial de Erros e Revisão', margin, 9.5);
+
+      const pageSubj = pageSubjects.get(p) || normalizePdfLegalText(scopeText);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.4);
+      doc.setTextColor(82, 98, 124);
+      const shortSubj = (doc.splitTextToSize(pageSubj, 78) as string[])[0] || '';
+      doc.text(shortSubj, pageWidth - margin, 9.5, { align: 'right' });
+
+      doc.setDrawColor(198, 211, 228);
+      doc.setLineWidth(0.25);
+      doc.line(margin, 11.5, pageWidth - margin, 11.5);
+    }
+
+    // Institutional Footer
+    const footerRuleY = pageHeight - 12.2;
+    doc.setDrawColor(198, 211, 228);
+    doc.setLineWidth(0.25);
+    doc.line(margin, footerRuleY, pageWidth - margin, footerRuleY);
+
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.5);
-    doc.setTextColor(110, 120, 138);
+    doc.setFontSize(7.4);
+    doc.setTextColor(96, 110, 132);
     doc.text(
-      safePdfText(`estuda.gov.br · Caderno Oficial de Erros · Emitido em ${localDateIso()}`),
+      `estuda.gov.br · Ouvidoria & Corregedoria · Emitido em ${emissionDateOnly}`,
       margin,
-      doc.internal.pageSize.getHeight() - 8,
+      pageHeight - 8,
     );
-    doc.text(
-      `Pagina ${p} de ${totalPages}`,
-      pageWidth - margin,
-      doc.internal.pageSize.getHeight() - 8,
-      { align: 'right' },
-    );
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(7, 29, 65);
+    doc.text(`Página ${p} de ${totalPages}`, pageWidth - margin, pageHeight - 8, {
+      align: 'right',
+    });
   }
 
   const name = isAllSubjects
@@ -1165,6 +1725,12 @@ export function exportPerformanceReportPdf(params: {
 export interface StudentCertificateParams {
   holderName: string;
   rankTitle: string;
+  rankLevel?: number;
+  maxRankLevel?: number;
+  totalXp?: number;
+  unlockedMedalsCount?: number;
+  totalMedalsCount?: number;
+  pinnedMedals?: Array<{ title: string; tierLabel: string; awardDate?: string }>;
   protocolNumber: string;
   isRegular: boolean;
   totalQuestionsBank: number;
@@ -1262,7 +1828,24 @@ export function exportStudentClearanceCertificatePdf(params: StudentCertificateP
   doc.setFontSize(10);
   doc.setTextColor(25, 35, 50);
   ctx.writeWrapped(`Titular do Dossie: ${params.holderName}`, 5.5);
-  ctx.writeWrapped(`Patente / Grau Ministerial: ${params.rankTitle}`, 5.5);
+  const rankLine =
+    params.rankLevel && params.maxRankLevel
+      ? `Cargo na Carreira: Nivel ${params.rankLevel}/${params.maxRankLevel} - ${params.rankTitle}${
+          typeof params.totalXp === 'number'
+            ? ` (${params.totalXp.toLocaleString('pt-BR')} XP)`
+            : ''
+        }`
+      : `Patente / Grau Ministerial: ${params.rankTitle}`;
+  ctx.writeWrapped(rankLine, 5.5);
+  if (params.pinnedMedals && params.pinnedMedals.length > 0) {
+    const medalsSummary = params.pinnedMedals
+      .map(
+        (m) =>
+          `${m.title} (${m.tierLabel}${m.awardDate ? ` - ${m.awardDate}` : ''})`,
+      )
+      .join(' | ');
+    ctx.writeWrapped(`Vitrine de Honra: ${medalsSummary}`, 5.2);
+  }
   ctx.y += 4;
 
   // Official Attestation Paragraph
@@ -1283,6 +1866,15 @@ export function exportStudentClearanceCertificatePdf(params: StudentCertificateP
 
   // Structured Metrics Table
   const rows: Array<[string, string]> = [
+    ...(typeof params.unlockedMedalsCount === 'number' &&
+    typeof params.totalMedalsCount === 'number'
+      ? ([
+          [
+            'Medalhas de Merito conquistadas',
+            `${params.unlockedMedalsCount} / ${params.totalMedalsCount}`,
+          ],
+        ] as Array<[string, string]>)
+      : []),
     ['Questoes disponiveis no acervo', params.totalQuestionsBank.toLocaleString('pt-BR')],
     ['Simulados fechados concluidos', params.completedSimulations.toLocaleString('pt-BR')],
     ['Metas de cronograma concluidas', params.completedGoalsCount.toLocaleString('pt-BR')],

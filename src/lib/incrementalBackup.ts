@@ -742,6 +742,45 @@ export function applyIncrementalDeltaToDatabase(
               resolvedFolder = deltaFolder;
             }
           }
+          const baseCareer = baseDb.preferences?.career_meta;
+          const deltaCareer = d.preferences.career_meta;
+          let resolvedCareer = deltaCareer ?? baseCareer;
+          if (baseCareer && deltaCareer) {
+            const mergedUnlockedAt: Record<string, string> = {
+              ...(baseCareer.unlocked_at || {}),
+            };
+            Object.entries(deltaCareer.unlocked_at || {}).forEach(([k, v]) => {
+              if (!v) return;
+              if (!mergedUnlockedAt[k] || v < mergedUnlockedAt[k]) {
+                mergedUnlockedAt[k] = v;
+              }
+            });
+            const mergedWeekly: Record<string, string> = {
+              ...(baseCareer.completed_weekly_missions || {}),
+              ...(deltaCareer.completed_weekly_missions || {}),
+            };
+            const mergedNotifiedMedals = Array.from(
+              new Set([
+                ...(baseCareer.last_notified_medals || []),
+                ...(deltaCareer.last_notified_medals || []),
+              ]),
+            );
+            resolvedCareer = {
+              ...baseCareer,
+              ...deltaCareer,
+              pinned_medals:
+                deltaCareer.pinned_medals !== undefined
+                  ? deltaCareer.pinned_medals
+                  : baseCareer.pinned_medals,
+              unlocked_at: mergedUnlockedAt,
+              completed_weekly_missions: mergedWeekly,
+              last_notified_level: Math.max(
+                baseCareer.last_notified_level || 0,
+                deltaCareer.last_notified_level || 0,
+              ),
+              last_notified_medals: mergedNotifiedMedals,
+            };
+          }
           return {
             ...baseDb.preferences,
             ...d.preferences,
@@ -750,6 +789,7 @@ export function applyIncrementalDeltaToDatabase(
               ...(d.preferences.modules || {}),
             },
             ...(resolvedFolder ? { default_drive_folder: resolvedFolder } : {}),
+            ...(resolvedCareer ? { career_meta: resolvedCareer } : {}),
           };
         })()
       : baseDb.preferences,

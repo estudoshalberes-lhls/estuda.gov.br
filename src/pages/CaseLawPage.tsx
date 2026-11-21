@@ -1,9 +1,10 @@
 import React, { useMemo, useState } from 'react';
-import { Pencil, Plus, Search, Trash2 } from 'lucide-react';
+import { Pencil, Plus, Printer, Search, Trash2 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { normalizeSearch } from '../lib/parsers';
 import { CaseLawItem } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { CaseLawOfficialPrintSheet } from '../components/print/CaseLawOfficialPrintSheet';
 
 const CATEGORIES = ['Súmula', 'Jurisprudência'] as const;
 
@@ -12,7 +13,7 @@ function normalizeCaseLawCategory(cat?: string): 'Súmula' | 'Jurisprudência' {
 }
 
 export const CaseLawPage: React.FC = () => {
-  const { db, moduleVisibility, saveCaseLaw, deleteCaseLaw, toast } = useStudy();
+  const { db, googleUser, moduleVisibility, saveCaseLaw, deleteCaseLaw, toast } = useStudy();
   const hideSearch = moduleVisibility('Súmulas e Jurisprudência').hide_search;
 
   const [editingId, setEditingId] = useState<string | undefined>(undefined);
@@ -87,13 +88,34 @@ export const CaseLawPage: React.FC = () => {
     });
   }, [db.caseLaw, filterCat, filterCourt, search]);
 
+  const holderName = googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal';
+  const filterSummary = [
+    filterCourt !== 'Todos' ? `Tribunal: ${filterCourt}` : 'Todos os tribunais',
+    filterCat !== 'Todas' ? filterCat : 'Súmulas e Jurisprudência',
+    search.trim() ? `Busca: "${search.trim()}"` : '',
+  ]
+    .filter(Boolean)
+    .join(' · ');
+
   return (
-    <div>
-      <PageHeader
-        eyebrow="CORTE SUPERIOR · JURISPRUDÊNCIA"
-        title="Súmulas, teses e jurisprudência"
-        description="Catálogo consolidado de súmulas vinculantes, teses de repercussão e entendimentos relevantes dos tribunais superiores."
-      />
+    <>
+      <div data-print-hide="true" className="print:hidden">
+        <PageHeader
+          eyebrow="CORTE SUPERIOR · JURISPRUDÊNCIA"
+          title="Súmulas, teses e jurisprudência"
+          description="Catálogo consolidado de súmulas vinculantes, teses de repercussão e entendimentos relevantes dos tribunais superiores."
+          actions={
+            <button
+              type="button"
+              disabled={filtered.length === 0}
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Imprimir Folha Oficial (A4)
+            </button>
+          }
+        />
 
       <Panel
         title={editingId ? 'Editar referência' : 'Cadastrar súmula ou jurisprudência'}
@@ -286,6 +308,13 @@ export const CaseLawPage: React.FC = () => {
           <EmptyState message="Nenhuma súmula ou jurisprudência cadastrada para esta busca." />
         )}
       </div>
-    </div>
+      </div>
+
+      <CaseLawOfficialPrintSheet
+        items={filtered}
+        filterSummary={filterSummary}
+        holderName={holderName}
+      />
+    </>
   );
 };

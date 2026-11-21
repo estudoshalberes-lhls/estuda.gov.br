@@ -1,11 +1,12 @@
 import React, { useMemo, useState } from 'react';
-import { Plus, Sparkles, Trash2, X } from 'lucide-react';
+import { Plus, Printer, Sparkles, Trash2, X } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
+import { CriticalPointsOfficialPrintSheet } from '../components/print/CriticalPointsOfficialPrintSheet';
 
 export const CriticalPointsPage: React.FC = () => {
-  const { db, disciplines, addCriticalPoint, deleteCriticalPoint } = useStudy();
+  const { db, disciplines, googleUser, addCriticalPoint, deleteCriticalPoint } = useStudy();
 
   const [data, setData] = useState(String(new Date().getFullYear()));
   const [materia, setMateria] = useState(disciplines[0] || 'Direito Constitucional');
@@ -51,13 +52,30 @@ export const CriticalPointsPage: React.FC = () => {
     });
   }, [db.criticalPoints, paretoGroupBy, selectedFilterKey]);
 
+  const holderName = googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal';
+  const printFilterLabel = selectedFilterKey
+    ? `${paretoGroupBy === 'materia' ? 'Disciplina' : 'Ano/Vigência'}: ${selectedFilterKey}`
+    : 'Todos os pontos críticos cadastrados';
+
   return (
-    <div>
-      <PageHeader
-        eyebrow="ALERTA MINISTERIAL · PONTOS CRÍTICOS"
-        title="Novidades legislativas e mudanças de entendimento"
-        description="Protocole alterações recentes de leis, emendas constitucionais e viradas jurisprudenciais com alta probabilidade de cobrança."
-      />
+    <>
+      <div data-print-hide="true" className="print:hidden">
+        <PageHeader
+          eyebrow="ALERTA MINISTERIAL · PONTOS CRÍTICOS"
+          title="Novidades legislativas e mudanças de entendimento"
+          description="Protocole alterações recentes de leis, emendas constitucionais e viradas jurisprudenciais com alta probabilidade de cobrança."
+          actions={
+            <button
+              type="button"
+              disabled={filteredCriticalPoints.length === 0}
+              onClick={() => window.print()}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              Imprimir Folha Oficial (A4)
+            </button>
+          }
+        />
 
       <Panel title="Registrar ponto crítico" className="mb-4">
         <form onSubmit={handleSubmit} className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
@@ -228,6 +246,14 @@ export const CriticalPointsPage: React.FC = () => {
           <EmptyState message="Nenhuma atualização legislativa cadastrada." />
         )}
       </div>
-    </div>
+      </div>
+
+      <CriticalPointsOfficialPrintSheet
+        items={filteredCriticalPoints}
+        filterLabel={printFilterLabel}
+        groupBy={paretoGroupBy}
+        holderName={holderName}
+      />
+    </>
   );
 };

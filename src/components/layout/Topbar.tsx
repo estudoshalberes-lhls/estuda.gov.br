@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Check,
   CloudOff,
+  CloudUpload,
   Home,
   Link2,
   Menu,
@@ -10,7 +11,6 @@ import {
   SlidersHorizontal,
   Timer,
   X,
-  Zap,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
 import { useStudyTimer } from '../../lib/timerTickStore';
@@ -156,9 +156,18 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
     clearTimerLink,
     commitTimerToSchedule,
     driveConnected,
+    gasConnected,
     isRenewingDriveToken,
     isSyncingDrive,
     hasPendingCloudChanges,
+    pendingLocalChangesCount,
+    totalPendingSyncCount,
+    gasOperationQueue,
+    driveUploadOutboxItems,
+    lastCloudSyncAt,
+    saveCloudBackup,
+    triggerActiveSyncPushNow,
+    processGasQueueNow,
     drivePermissionNeedsPicker,
     authorizeDriveFolderViaPicker,
     toast,
@@ -178,8 +187,12 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
 
   // Quick access 3 customizable modules state
   const [quickConfigOpen, setQuickConfigOpen] = useState(false);
-  const [activeSlotIdx, setActiveSlotIdx] = useState<0 | 1 | 2>(0);
   const quickPopoverRef = useRef<HTMLDivElement | null>(null);
+
+  // Unsynced pending changes popover
+  const [pendingSyncOpen, setPendingSyncOpen] = useState(false);
+  const [manualSyncing, setManualSyncing] = useState(false);
+  const pendingPopoverRef = useRef<HTMLDivElement | null>(null);
 
   const quickModules = useMemo<[ModuleName, ModuleName, ModuleName]>(() => {
     const saved = db.preferences?.quick_access_modules;
@@ -211,12 +224,35 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
       if (quickPopoverRef.current && !quickPopoverRef.current.contains(e.target as Node)) {
         setQuickConfigOpen(false);
       }
+      if (pendingPopoverRef.current && !pendingPopoverRef.current.contains(e.target as Node)) {
+        setPendingSyncOpen(false);
+      }
     };
-    if (linkMenuOpen || quickConfigOpen) {
+    if (linkMenuOpen || quickConfigOpen || pendingSyncOpen) {
       document.addEventListener('mousedown', handleOutside);
     }
     return () => document.removeEventListener('mousedown', handleOutside);
-  }, [linkMenuOpen, quickConfigOpen]);
+  }, [linkMenuOpen, quickConfigOpen, pendingSyncOpen]);
+
+  const handleSyncPendingNow = async () => {
+    if (manualSyncing) return;
+    setManualSyncing(true);
+    try {
+      if (gasConnected) {
+        if (gasOperationQueue.length > 0) {
+          await processGasQueueNow({ forceAll: true });
+        }
+        await triggerActiveSyncPushNow();
+      } else if (driveConnected) {
+        await saveCloudBackup();
+      } else {
+        setPendingSyncOpen(false);
+        setActivePage('Backup e Restauração');
+      }
+    } finally {
+      setManualSyncing(false);
+    }
+  };
 
   const dayTopics = db.schedule[pickerDay] || [];
 
@@ -602,20 +638,110 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
             <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
             <span className="hidden sm:inline">Sincronizando…</span>
           </span>
-        ) : hasPendingCloudChanges ? (
-          <button
-            type="button"
-            onClick={() => setActivePage('Backup e Restauração')}
-            aria-label="Alterações aguardando envio para nuvem"
-            title={
-              driveConnected
-                ? 'Sincronizando alterações locais com o Google Drive…'
-                : 'Alterações salvas localmente aguardando conexão com o Google Drive'
-            }
-            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${isSyncingDrive ? 'animate-spin' : ''}`} />
-          </button>
+        ) : hasPendingCloudChanges || totalPendingSyncCount > 0 ? (
+          <div ref={pendingPopoverRef} className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setPendingSyncOpen((v) => !v)}
+              aria-label={`${totalPendingSyncCount} alteração(ões) local(is) aguardando envio para a nuvem`}
+              title={
+                driveConnected || gasConnected
+                  ? `${totalPendingSyncCount} alteração(ões) local(is) aguardando envio para a nuvem`
+                  : `${totalPendingSyncCount} alteração(ões) salva(s) apenas localmente (conecte a nuvem para sincronizar)`
+              }
+              className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2.5 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap cursor-pointer"
+            >
+              {isSyncingDrive || manualSyncing ? (
+                <RefreshCw className="w-3.5 h-3.5 text-[var(--accent)] animate-spin shrink-0" />
+              ) : (
+                <CloudUpload className="w-3.5 h-3.5 text-[var(--warning)] shrink-0" />
+              )}
+              <span className="font-mono-num text-[11.5px] font-bold tabular-nums">
+                {totalPendingSyncCount}
+              </span>
+              <span className="hidden lg:inline text-[11px] font-semibold text-[var(--muted)]">
+                {totalPendingSyncCount === 1 ? 'pendente' : 'pendentes'}
+              </span>
+            </button>
+
+            {pendingSyncOpen && (
+              <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+                <div className="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-[var(--line)]">
+                  <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
+                    Pendências de Sincronização
+                  </strong>
+                  <button
+                    type="button"
+                    onClick={() => setPendingSyncOpen(false)}
+                    className="grid place-items-center w-6 h-6 rounded-lg text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-soft)]"
+                    aria-label="Fechar"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+
+                <div className="flex flex-col gap-1.5 text-[11.5px] text-[var(--muted)] mb-3 tabular-nums">
+                  <div className="flex items-center justify-between">
+                    <span>Alterações locais pendentes</span>
+                    <strong className="font-mono-num text-[var(--text)]">
+                      {Math.max(hasPendingCloudChanges ? 1 : 0, pendingLocalChangesCount)}
+                    </strong>
+                  </div>
+                  {gasOperationQueue.length > 0 && (
+                    <div className="flex items-center justify-between">
+                      <span>Operações na fila da nuvem</span>
+                      <strong className="font-mono-num text-[var(--text)]">
+                        {gasOperationQueue.length}
+                      </strong>
+                    </div>
+                  )}
+                  {driveUploadOutboxItems.length > 0 && (
+                    <div className="flex items-center justify-between">
+                      <span>Arquivos aguardando envio</span>
+                      <strong className="font-mono-num text-[var(--text)]">
+                        {driveUploadOutboxItems.length}
+                      </strong>
+                    </div>
+                  )}
+                  <div className="pt-1.5 mt-1 border-t border-[var(--line)]/60 flex items-center justify-between text-[11px]">
+                    <span>Última sincronização</span>
+                    <span className="font-mono-num text-[var(--text)]">
+                      {lastCloudSyncAt
+                        ? new Date(lastCloudSyncAt).toLocaleTimeString('pt-BR', {
+                            hour: '2-digit',
+                            minute: '2-digit',
+                          })
+                        : 'Ainda não sincronizado'}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between gap-2 pt-2 border-t border-[var(--line)]">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPendingSyncOpen(false);
+                      setActivePage('Backup e Restauração');
+                    }}
+                    className="h-7 px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                  >
+                    Ver Backup
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isSyncingDrive || manualSyncing}
+                    onClick={() => void handleSyncPendingNow()}
+                    className="inline-flex items-center gap-1 h-7 px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap"
+                  >
+                    <RefreshCw
+                      className={`w-3 h-3 ${isSyncingDrive || manualSyncing ? 'animate-spin' : ''}`}
+                    />
+                    {driveConnected || gasConnected ? 'Sincronizar agora' : 'Conectar nuvem'}
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         ) : null}
 
         <GasConnectionTopbarWidget />

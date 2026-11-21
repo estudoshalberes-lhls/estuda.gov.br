@@ -22,6 +22,7 @@ import { useStudy } from '../context/StudyContext';
 import { triggerBlobDownload } from '../lib/fileStorage';
 import { cleanSafeName, normalizeSearch, visibleName } from '../lib/parsers';
 import { PageHeader } from '../components/ui/PageHeader';
+import { FlexibleQuestionImporter } from '../components/utilities/FlexibleQuestionImporter';
 
 type UtilCategory = 'Todos' | 'Questões' | 'Lei Seca' | 'Cronograma';
 
@@ -91,7 +92,6 @@ export const UtilitiesPage: React.FC = () => {
     requestConfirm,
     setActivePage,
     importScheduleTxt,
-    importQuestionsTxt,
     addManualQuestion,
     convertLawPdf,
     uploadLawFile,
@@ -129,26 +129,6 @@ export const UtilitiesPage: React.FC = () => {
   const [schedFile, setSchedFile] = useState<File | null>(null);
   const [schedLoading, setSchedLoading] = useState(false);
   const schedRef = useRef<HTMLInputElement | null>(null);
-
-  // 2. Questions TXT import
-  const [qFiles, setQFiles] = useState<File[]>([]);
-  const [qSelectValue, setQSelectValue] = useState<string>(() =>
-    availableDisciplines[0] || '__NEW__',
-  );
-  const [qCustomSubject, setQCustomSubject] = useState('');
-  const [qAsSim, setQAsSim] = useState(false);
-  const [qLoading, setQLoading] = useState(false);
-  const qRef = useRef<HTMLInputElement | null>(null);
-
-  useEffect(() => {
-    if (
-      qSelectValue === '__NEW__' &&
-      !qCustomSubject.trim() &&
-      availableDisciplines.length > 0
-    ) {
-      setQSelectValue(availableDisciplines[0]);
-    }
-  }, [availableDisciplines, qCustomSubject, qSelectValue]);
 
   // 3. Manual Question
   const [mSubject, setMSubject] = useState(
@@ -242,68 +222,6 @@ export const UtilitiesPage: React.FC = () => {
     }
   };
 
-  const resolvedQSubject = useMemo(() => {
-    if (qSelectValue === '__FILENAME__') return '';
-    if (qSelectValue === '__NEW__') return visibleName(qCustomSubject);
-    return visibleName(qSelectValue);
-  }, [qCustomSubject, qSelectValue]);
-
-  const handleImportQuestions = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!qFiles.length) {
-      toast('Selecione ao menos um arquivo .txt com questões.', true);
-      return;
-    }
-    if (qSelectValue === '__NEW__' && !resolvedQSubject) {
-      toast('Informe o nome da disciplina ou selecione uma disciplina existente.', true);
-      return;
-    }
-    setQLoading(true);
-    let totalCount = 0;
-    let lastMateria = resolvedQSubject;
-    let succeededFiles = 0;
-    const failed: File[] = [];
-    let firstError = '';
-
-    try {
-      for (const file of qFiles) {
-        try {
-          const res = await importQuestionsTxt(file, resolvedQSubject, qAsSim);
-          totalCount += res.count;
-          lastMateria = res.materia;
-          succeededFiles += 1;
-        } catch (err) {
-          failed.push(file);
-          if (!firstError) firstError = (err as Error).message;
-        }
-      }
-
-      if (failed.length === 0) {
-        toast(
-          qAsSim
-            ? `${succeededFiles} simulado(s) enviado(s) criado(s) com ${totalCount} questão(ões) em ${lastMateria}.`
-            : `${totalCount} questão(ões) adicionada(s) diretamente à disciplina "${lastMateria}".`,
-        );
-        setQFiles([]);
-        if (qSelectValue === '__NEW__' && lastMateria) {
-          setQSelectValue(lastMateria);
-          setQCustomSubject('');
-        }
-        if (qRef.current) qRef.current.value = '';
-      } else if (succeededFiles > 0) {
-        toast(
-          `${totalCount} questão(ões) importada(s) em "${lastMateria}", mas ${failed.length} arquivo(s) falhou: ${firstError}`,
-          true,
-        );
-        setQFiles(failed);
-      } else {
-        toast(firstError || 'Não foi possível importar os arquivos selecionados.', true);
-      }
-    } finally {
-      setQLoading(false);
-    }
-  };
-
   const handleAddManualQuestion = (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -324,7 +242,6 @@ export const UtilitiesPage: React.FC = () => {
   };
 
   const [copiedModel, setCopiedModel] = useState(false);
-  const [copiedQuestionModel, setCopiedQuestionModel] = useState(false);
   const [copiedScheduleModel, setCopiedScheduleModel] = useState(false);
 
   const sampleTxtLawTemplate = `# FORMATO 1: Texto corrido com grau ao final (MUITO ALTA, ALTA, MÉDIA ou BAIXA)
@@ -338,36 +255,6 @@ Art. 3º É assegurada a prioridade de tramitação nos casos previstos em lei. 
 
 # FORMATO 2: Com divisores (|||) -> Dispositivo ||| Grau ||| Texto ||| Dica (opcional)
 Art. 4º ||| Muito Alto ||| Impossibilitar o acesso ou uso de transportes públicos urbanos. ||| Ponto frequente em provas de concursos`;
-
-  const sampleQuestionsTemplate = `# FORMATO 1 (Padrão): Blocos Numerados (Certo/Errado ou Múltipla Escolha)
-Questão 1
-A prática do racismo constitui crime inafiançável e imprescritível, sujeito à pena de reclusão, nos termos da lei.
-Gabarito: Certo
-Comentário: CF/88, Art. 5º, XLII - O racismo é crime inafiançável e imprescritível.
-
-Questão 2
-Em relação aos direitos e garantias fundamentais, assinale a opção correta:
-[A] Ninguém será privado de direitos por motivo de crença religiosa em qualquer hipótese.
-[B] A casa é asilo inviolável do indivíduo, salvo em caso de flagrante delito ou desastre.
-[C] É livre a manifestação do pensamento, sendo permitido o anonimato.
-[D] Homens e mulheres têm direitos e obrigações desiguais perante a lei.
-Gabarito: B
-Comentário: CF/88, Art. 5º, XI.
-
-# ----------------------------------------------------------------------
-# FORMATOS ALTERNATIVOS (use em um arquivo separado, sem o "#" inicial)
-#
-# FORMATO 2: Linha Única com Divisor Pipe (|)
-# Formato: Enunciado | Gabarito (C/E ou A..E) | Comentário (opcional)
-# A soberania popular será exercida pelo voto direto e secreto. | C | CF/88, Art. 14.
-# O prazo do concurso será de: [A] 1 ano [B] 2 anos [C] 3 anos [D] 4 anos | B | CF/88, Art. 37, III.
-#
-# FORMATO 3: Prova com Gabarito ao Final
-# 1. Determinado servidor público praticou ato de improbidade administrativa.
-# 2. A respeito da responsabilidade civil do Estado brasileiro.
-# GABARITO:
-# 1-C
-# 2-E`;
 
   const sampleScheduleTemplate = `# Formato padrão: Dia | Matéria | Tempo [| Observações]
 # Formato alternativo com data: Dia | DD/MM/AAAA | Matéria | Tempo | Observações
@@ -391,23 +278,6 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
       setCopiedModel(true);
       toast('Modelo de texto copiado para a área de transferência!');
       setTimeout(() => setCopiedModel(false), 2500);
-    } catch {
-      toast('Não foi possível copiar o texto.', true);
-    }
-  };
-
-  const handleDownloadQuestionSample = () => {
-    const blob = new Blob([sampleQuestionsTemplate], { type: 'text/plain;charset=utf-8' });
-    triggerBlobDownload(blob, 'modelo_exemplo_questoes.txt');
-    toast('Modelo de arquivo .txt de questões baixado com sucesso!');
-  };
-
-  const handleCopyQuestionSample = async () => {
-    try {
-      await navigator.clipboard.writeText(sampleQuestionsTemplate);
-      setCopiedQuestionModel(true);
-      toast('Modelo de questões copiado para a área de transferência!');
-      setTimeout(() => setCopiedQuestionModel(false), 2500);
     } catch {
       toast('Não foi possível copiar o texto.', true);
     }
@@ -775,139 +645,13 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
             </CompactUtilCard>
 
             <CompactUtilCard
-              title="Importar questões (.txt)"
-              subtitle="Adicione questões a uma disciplina específica sem criar matérias extras pelo nome do .txt."
+              title="Importar ou colar questões e simulados (com pré-visualização)"
+              subtitle="Cole questões diretamente ou envie arquivos .txt/.md e revise/corrija qualquer item fora do padrão antes de confirmar."
               icon={<FileSpreadsheet className="w-4 h-4" />}
-              badge=".TXT"
+              badge="Colar / .TXT"
+              className="lg:col-span-2"
             >
-              <form onSubmit={handleImportQuestions} className="flex flex-col gap-2">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className={COMPACT_LABEL}>Arquivo(s) .txt / .md</label>
-                    <input
-                      ref={qRef}
-                      type="file"
-                      multiple
-                      accept=".txt,.md"
-                      onChange={(e) => setQFiles(Array.from(e.target.files || []))}
-                      className={COMPACT_INPUT}
-                    />
-                  </div>
-                  <div>
-                    <label className={COMPACT_LABEL}>Disciplina de destino</label>
-                    <select
-                      aria-label="Disciplina de destino das questões"
-                      value={
-                        qSelectValue === '__NEW__' ||
-                        qSelectValue === '__FILENAME__' ||
-                        availableDisciplines.includes(qSelectValue)
-                          ? qSelectValue
-                          : '__NEW__'
-                      }
-                      onChange={(e) => {
-                        const val = e.target.value;
-                        setQSelectValue(val);
-                        if (val !== '__NEW__') {
-                          setQCustomSubject('');
-                        }
-                      }}
-                      className={COMPACT_INPUT}
-                    >
-                      {availableDisciplines.length > 0 && (
-                        <optgroup label="Disciplinas existentes / fixadas">
-                          {availableDisciplines.map((d) => (
-                            <option key={d} value={d}>
-                              {d}
-                            </option>
-                          ))}
-                        </optgroup>
-                      )}
-                      <optgroup label="Outras opções">
-                        <option value="__NEW__">+ Nova disciplina personalizada…</option>
-                        <option value="__FILENAME__">Usar nome de cada arquivo (.txt)</option>
-                      </optgroup>
-                    </select>
-                  </div>
-                </div>
-
-                {qSelectValue === '__NEW__' && (
-                  <div>
-                    <label className={COMPACT_LABEL}>Nome da nova disciplina</label>
-                    <input
-                      type="text"
-                      value={qCustomSubject}
-                      onChange={(e) => setQCustomSubject(e.target.value)}
-                      placeholder="Ex.: Direito Previdenciário"
-                      className={COMPACT_INPUT}
-                    />
-                  </div>
-                )}
-
-                <div className="text-[10.5px] text-[var(--muted)] leading-snug">
-                  {qSelectValue === '__FILENAME__' ? (
-                    <span>
-                      Cada arquivo criará/usará a disciplina com o próprio nome do <code>.txt</code>.
-                    </span>
-                  ) : resolvedQSubject ? (
-                    <span>
-                      Todas as questões{qFiles.length > 1 ? ` dos ${qFiles.length} arquivos` : ''} irão direto para{' '}
-                      <strong className="text-[var(--text)]">{resolvedQSubject}</strong>, sem criar disciplina extra pelo nome do arquivo.
-                    </span>
-                  ) : (
-                    <span>Digite o nome da disciplina que receberá as questões importadas.</span>
-                  )}
-                </div>
-
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <label className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text)] cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={qAsSim}
-                      onChange={(e) => setQAsSim(e.target.checked)}
-                      className="accent-[var(--accent)] w-3.5 h-3.5"
-                    />
-                    Salvar como Simulado Enviado
-                  </label>
-                  <button type="submit" disabled={qLoading} className={BTN_PRIMARY}>
-                    <FileSpreadsheet className="w-3.5 h-3.5" />
-                    {qLoading
-                      ? 'Importando…'
-                      : qFiles.length > 1
-                        ? `Importar (${qFiles.length} arquivos)`
-                        : 'Importar questões'}
-                  </button>
-                </div>
-              </form>
-
-              <div className="mt-auto pt-2.5 border-t border-[var(--line)]/60">
-                <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                  <span className="text-[11px] font-bold text-[var(--text)] flex items-center gap-1">
-                    <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
-                    Modelo / Exemplo de Formato (.txt):
-                  </span>
-                  <div className="flex items-center gap-1.5">
-                    <button
-                      type="button"
-                      onClick={() => void handleCopyQuestionSample()}
-                      className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
-                    >
-                      {copiedQuestionModel ? <Check className="w-3 h-3 text-[var(--good)]" /> : <Copy className="w-3 h-3" />}
-                      {copiedQuestionModel ? 'Copiado!' : 'Copiar'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={handleDownloadQuestionSample}
-                      className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
-                    >
-                      <Download className="w-3 h-3" />
-                      Baixar .txt
-                    </button>
-                  </div>
-                </div>
-                <div className="h-[116px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 font-mono text-[10.5px] leading-snug text-[var(--muted)] whitespace-pre-wrap select-all">
-                  {sampleQuestionsTemplate}
-                </div>
-              </div>
+              <FlexibleQuestionImporter defaultInputMode="paste" showTemplateSample={true} />
             </CompactUtilCard>
           </>
         )}

@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import {
   AlertTriangle,
+  AlignLeft,
   ArrowLeft,
   ArrowRight,
   BarChart3,
@@ -11,9 +12,12 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  ClipboardCheck,
+  ClipboardPaste,
   Clock,
   Download,
   ExternalLink,
+  Eye,
   Layers,
   Pencil,
   Play,
@@ -23,6 +27,7 @@ import {
   Search,
   Tag,
   Trash2,
+  Undo2,
   X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
@@ -32,14 +37,58 @@ import {
   normalizeSearch,
   visibleName,
 } from '../lib/parsers';
+import {
+  formatCorrectionTextStructured,
+  insertFormattedPaste,
+} from '../lib/legalTextFormatter';
 import { exportErrorNotebookPdf } from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
-import { ErrorNotebookEntry, ModuleName } from '../types/study';
+import { CompletedSimulation, ErrorNotebookEntry, ModuleName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 import { ErrorNotebookOfficialPrintSheet } from '../components/errors/ErrorNotebookOfficialPrintSheet';
 
 const UNASSIGNED_SUBJECT_FILTER = '__UNASSIGNED__';
+const SIMULADOS_FILTER = '__SIMULADOS__';
+const SIMULADOS_STATS_KEY = 'Simulados';
+
+function isClosedSimulationEntry(entry: ErrorNotebookEntry): boolean {
+  return (
+    Boolean(entry.simulado_id || entry.simulado_titulo) ||
+    entry.id.startsWith('sim-err-') ||
+    normalizeSearch(entry.origem || '') === 'simulado fechado' ||
+    normalizeSearch(entry.tipo || '') === 'erro em simulado fechado'
+  );
+}
+
+function resolveSimulationExamMeta(
+  entry: ErrorNotebookEntry,
+  completedSimulations: CompletedSimulation[],
+): { key: string; label: string } {
+  if (entry.simulado_id) {
+    const matched = completedSimulations.find((s) => s.id === entry.simulado_id);
+    const label = visibleName(
+      entry.simulado_titulo || matched?.titulo || entry.arquivo_prova || 'Simulado Fechado',
+    );
+    return { key: entry.simulado_id, label: label || 'Simulado Fechado' };
+  }
+  if (entry.id.startsWith('sim-err-')) {
+    const matched = completedSimulations.find((s) => entry.id.startsWith(`sim-err-${s.id}-`));
+    if (matched) {
+      return {
+        key: matched.id,
+        label: visibleName(entry.simulado_titulo || matched.titulo || matched.arquivo || 'Simulado Fechado'),
+      };
+    }
+  }
+  const fallbackLabel = visibleName(
+    entry.simulado_titulo || entry.arquivo_prova || entry.materia || 'Simulado Fechado',
+  );
+  return {
+    key: `title:${normalizeSearch(fallbackLabel || 'simulado-fechado')}`,
+    label: fallbackLabel || 'Simulado Fechado',
+  };
+}
 
 const NOTE_TYPES = [
   'Erro Frequente',
@@ -82,7 +131,9 @@ const SubjectStatListRow = React.memo(
   ({ index, style, ariaAttributes, rows, filterSubject, onToggleSubject }: RowComponentProps<SubjectStatListRowProps>) => {
     const row = rows[index];
     if (!row) return null;
-    const isSelected = normalizeSearch(filterSubject) === normalizeSearch(row.subject);
+    const isSelected =
+      (row.subject === SIMULADOS_STATS_KEY && filterSubject === SIMULADOS_FILTER) ||
+      normalizeSearch(filterSubject) === normalizeSearch(row.subject);
     const barPercent = row.errorRatePct !== null ? row.errorRatePct : row.notebookSharePct;
     const barColor =
       barPercent >= 50
@@ -150,6 +201,7 @@ function formatBrDateStr(iso?: string): string {
 
 interface ErrorNotebookRowProps {
   entries: ErrorNotebookEntry[];
+  completedSimulations: CompletedSimulation[];
   registeredSubjects: string[];
   registeredSubjectNorms: Set<string>;
   selectedEntryIds: Set<string>;
@@ -173,6 +225,7 @@ const ErrorNotebookEntryRow = React.memo(
     style,
     ariaAttributes,
     entries,
+    completedSimulations,
     registeredSubjects,
     registeredSubjectNorms,
     selectedEntryIds,
@@ -190,10 +243,24 @@ const ErrorNotebookEntryRow = React.memo(
     setActivePage,
   }: RowComponentProps<ErrorNotebookRowProps>) => {
     const entry = entries[index];
+    const isEditing = Boolean(entry && editingEntry?.id === entry.id);
+    const [rawTextBeforeFormat, setRawTextBeforeFormat] = useState<string | null>(null);
+    const [justAutoFormatted, setJustAutoFormatted] = useState(false);
+
+    useEffect(() => {
+      if (!isEditing) {
+        setRawTextBeforeFormat(null);
+        setJustAutoFormatted(false);
+      }
+    }, [isEditing, entry?.id]);
+
     if (!entry) return null;
-    const isEditing = editingEntry?.id === entry.id;
     const isCorrected = Boolean(entry.corrigido);
     const isSelected = selectedEntryIds.has(entry.id);
+    const isSimEntry = isClosedSimulationEntry(entry);
+    const simExamMeta = isSimEntry
+      ? resolveSimulationExamMeta(entry, completedSimulations)
+      : null;
     const entryMateriaNorm = normalizeSearch(visibleName(entry.materia));
     const isRegisteredMatch = Boolean(entryMateriaNorm && registeredSubjectNorms.has(entryMateriaNorm));
     const selectedSubjectVal =
@@ -204,6 +271,52 @@ const ErrorNotebookEntryRow = React.memo(
           (s) => normalizeSearch(s) === normalizeSearch(editingEntry.materia),
         ) || editingEntry.materia
       : '';
+
+    const handlePasteCorrection = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!editingEntry) return;
+      const pasted = e.clipboardData.getData('text/plain');
+      if (!pasted || !pasted.trim()) return;
+      e.preventDefault();
+      const target = e.currentTarget;
+      const start = target.selectionStart ?? editingEntry.texto.length;
+      const end = target.selectionEnd ?? editingEntry.texto.length;
+      const rawUnformatted =
+        editingEntry.texto.slice(0, start) + pasted + editingEntry.texto.slice(end);
+      const { nextValue, nextCursorPos, changed } = insertFormattedPaste(
+        editingEntry.texto,
+        start,
+        end,
+        pasted,
+      );
+      setRawTextBeforeFormat(changed ? rawUnformatted : null);
+      setJustAutoFormatted(changed);
+      setEditingEntry({ ...editingEntry, texto: nextValue });
+      requestAnimationFrame(() => {
+        if (target && document.activeElement === target) {
+          target.setSelectionRange(nextCursorPos, nextCursorPos);
+        }
+      });
+    };
+
+    const handleManualFormatCorrection = () => {
+      if (!editingEntry || !editingEntry.texto.trim()) return;
+      const formatted = formatCorrectionTextStructured(editingEntry.texto);
+      if (formatted === editingEntry.texto) {
+        setJustAutoFormatted(true);
+        return;
+      }
+      setRawTextBeforeFormat(editingEntry.texto);
+      setJustAutoFormatted(true);
+      setEditingEntry({ ...editingEntry, texto: formatted });
+    };
+
+    const handleCopyQuestionComment = () => {
+      if (!editingEntry || !entry.questao?.comentario?.trim()) return;
+      const formatted = formatCorrectionTextStructured(entry.questao.comentario);
+      setRawTextBeforeFormat(editingEntry.texto);
+      setJustAutoFormatted(true);
+      setEditingEntry({ ...editingEntry, texto: formatted });
+    };
 
     return (
       <div style={style} {...ariaAttributes} className="pb-3">
@@ -255,7 +368,9 @@ const ErrorNotebookEntryRow = React.memo(
                 >
                   {!isRegisteredMatch && selectedSubjectVal && (
                     <option value={selectedSubjectVal}>
-                      {visibleName(selectedSubjectVal)} (não cadastrada)
+                      {isSimEntry
+                        ? 'Selecionar matéria cadastrada...'
+                        : `${visibleName(selectedSubjectVal)} (não cadastrada)`}
                     </option>
                   )}
                   {registeredSubjects.map((subj) => (
@@ -269,9 +384,23 @@ const ErrorNotebookEntryRow = React.memo(
                     Associar
                   </span>
                 )}
+                {isSimEntry && isRegisteredMatch && (
+                  <span className="inline-flex items-center gap-0.5 text-[10.5px] font-bold text-[var(--good)]">
+                    <Check className="w-3 h-3" />
+                    Associada
+                  </span>
+                )}
               </div>
 
-              {entry.origem && (
+              {simExamMeta && (
+                <>
+                  <span className="text-[var(--line-strong)]">·</span>
+                  <span className="text-[11px] font-semibold text-[var(--muted)]">
+                    Simulado: <strong className="text-[var(--text)]">{simExamMeta.label}</strong>
+                  </span>
+                </>
+              )}
+              {!simExamMeta && entry.origem && (
                 <>
                   <span className="text-[var(--line-strong)]">·</span>
                   <span className="text-[11px] font-semibold text-[var(--muted)]">
@@ -358,17 +487,19 @@ const ErrorNotebookEntryRow = React.memo(
                     `error_notebook_edit_${entry.id}`,
                   );
                   setEditingEntry(
-                    savedDraft || {
-                      id: entry.id,
-                      materia: selectedSubjectVal,
-                      tipo: entry.tipo,
-                      texto: entry.texto,
-                      hasQuestion: Boolean(entry.questao),
-                      enunciado: entry.questao?.enunciado ?? '',
-                      gabarito: entry.questao?.gabarito ?? '',
-                      resposta: entry.questao?.resposta ?? '',
-                      comentario: entry.questao?.comentario ?? '',
-                    },
+                    savedDraft
+                      ? { ...savedDraft, materia: selectedSubjectVal }
+                      : {
+                          id: entry.id,
+                          materia: selectedSubjectVal,
+                          tipo: entry.tipo,
+                          texto: entry.texto,
+                          hasQuestion: Boolean(entry.questao),
+                          enunciado: entry.questao?.enunciado ?? '',
+                          gabarito: entry.questao?.gabarito ?? '',
+                          resposta: entry.questao?.resposta ?? '',
+                          comentario: entry.questao?.comentario ?? '',
+                        },
                   );
                 }}
                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
@@ -416,15 +547,67 @@ const ErrorNotebookEntryRow = React.memo(
                 className="ce-input"
               />
               <div className="sm:col-span-2">
-                <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                  Anotação / Correção
-                </label>
+                <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <label className="block text-[11px] font-bold text-[var(--muted)]">
+                      Anotação / Correção
+                    </label>
+                    {justAutoFormatted && (
+                      <span className="text-[10.5px] font-bold text-[var(--good)]">
+                        Texto organizado automaticamente
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {rawTextBeforeFormat !== null && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingEntry({ ...editingEntry, texto: rawTextBeforeFormat });
+                          setRawTextBeforeFormat(null);
+                          setJustAutoFormatted(false);
+                        }}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                        title="Restaurar o texto original exatamente como estava antes do ajuste"
+                      >
+                        <Undo2 className="w-3 h-3" />
+                        Desfazer ajuste
+                      </button>
+                    )}
+                    {entry.questao?.comentario?.trim() && (
+                      <button
+                        type="button"
+                        onClick={handleCopyQuestionComment}
+                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                        title="Copiar o comentário da questão já estruturado para a correção"
+                      >
+                        <ClipboardPaste className="w-3 h-3" />
+                        Copiar comentário
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={handleManualFormatCorrection}
+                      disabled={!editingEntry.texto.trim()}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[10.5px] font-bold text-[var(--accent)] hover:border-[var(--accent)] disabled:opacity-45 cursor-pointer"
+                      title="Separar artigos, parágrafos, incisos, alíneas e parágrafos automaticamente"
+                    >
+                      <AlignLeft className="w-3 h-3" />
+                      Organizar texto
+                    </button>
+                  </div>
+                </div>
                 <textarea
                   value={editingEntry.texto}
-                  onChange={(e) => setEditingEntry({ ...editingEntry, texto: e.target.value })}
+                  onChange={(e) => {
+                    setEditingEntry({ ...editingEntry, texto: e.target.value });
+                    if (justAutoFormatted) setJustAutoFormatted(false);
+                  }}
+                  onPaste={handlePasteCorrection}
                   onBlur={() => flushEditingDraft(true)}
-                  rows={3}
-                  className="ce-textarea"
+                  rows={6}
+                  placeholder="Cole a correção, comentário ou fundamentação legal aqui — artigos, incisos e parágrafos serão estruturados automaticamente..."
+                  className="ce-textarea leading-relaxed"
                 />
               </div>
               {entry.questao && (
@@ -575,6 +758,45 @@ export const ErrorNotebookPage: React.FC = () => {
   );
   const [newType, setNewType] = useState(savedNewDraft?.tipo || NOTE_TYPES[0]);
   const [newText, setNewText] = useState(savedNewDraft?.texto || '');
+  const [newTextRawBeforeFormat, setNewTextRawBeforeFormat] = useState<string | null>(null);
+  const [newTextAutoFormatted, setNewTextAutoFormatted] = useState(false);
+  const [showPrintPreview, setShowPrintPreview] = useState(false);
+
+  const handlePasteNewText = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const pasted = e.clipboardData.getData('text/plain');
+    if (!pasted || !pasted.trim()) return;
+    e.preventDefault();
+    const target = e.currentTarget;
+    const start = target.selectionStart ?? newText.length;
+    const end = target.selectionEnd ?? newText.length;
+    const rawUnformatted = newText.slice(0, start) + pasted + newText.slice(end);
+    const { nextValue, nextCursorPos, changed } = insertFormattedPaste(
+      newText,
+      start,
+      end,
+      pasted,
+    );
+    setNewTextRawBeforeFormat(changed ? rawUnformatted : null);
+    setNewTextAutoFormatted(changed);
+    setNewText(nextValue);
+    requestAnimationFrame(() => {
+      if (target && document.activeElement === target) {
+        target.setSelectionRange(nextCursorPos, nextCursorPos);
+      }
+    });
+  };
+
+  const handleManualFormatNewText = () => {
+    if (!newText.trim()) return;
+    const formatted = formatCorrectionTextStructured(newText);
+    if (formatted === newText) {
+      setNewTextAutoFormatted(true);
+      return;
+    }
+    setNewTextRawBeforeFormat(newText);
+    setNewTextAutoFormatted(true);
+    setNewText(formatted);
+  };
 
   useEffect(() => {
     if (!newText.trim()) {
@@ -594,6 +816,8 @@ export const ErrorNotebookPage: React.FC = () => {
   const [bulkTargetSubject, setBulkTargetSubject] = useState(fixedSubjects[0] || '');
 
   const [filterSubject, setFilterSubject] = useState('Todas as Matérias');
+  const [selectedSimulationKey, setSelectedSimulationKey] = useState<string>('all');
+  const [simOnlyUnassigned, setSimOnlyUnassigned] = useState<boolean>(false);
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
   const [filterStatus, setFilterStatus] = useState<'pending' | 'corrected' | 'all'>('pending');
   const [search, setSearch] = useState('');
@@ -610,9 +834,11 @@ export const ErrorNotebookPage: React.FC = () => {
   const [pageBreakBySubject, setPageBreakBySubject] = useState(true);
 
   const [printOverride, setPrintOverride] = useState<{
-    mode: 'all' | 'multi' | 'single';
+    mode: 'all' | 'multi' | 'single' | 'simulation';
     singleSubject: string;
     multiSubjects: string[];
+    simuladoKey?: string;
+    simuladoLabel?: string;
     statusFilter: 'pending' | 'corrected' | 'all';
   } | null>(null);
   const [printTriggerTick, setPrintTriggerTick] = useState(0);
@@ -671,6 +897,67 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [bulkTargetSubject, registeredSubjectNorms, registeredSubjects]);
 
+  // Unified directory of closed simulations (grouped inside single "Simulados" selector)
+  const simulationDirectory = useMemo(() => {
+    const map = new Map<
+      string,
+      {
+        key: string;
+        label: string;
+        total: number;
+        pending: number;
+        corrected: number;
+        unassigned: number;
+      }
+    >();
+
+    let totalEntries = 0;
+    let totalPending = 0;
+    let totalUnassigned = 0;
+
+    allErrorEntries.forEach((e) => {
+      if (!isClosedSimulationEntry(e)) return;
+      totalEntries += 1;
+      const isCorr = Boolean(e.corrigido);
+      if (!isCorr) totalPending += 1;
+      const matNorm = normalizeSearch(visibleName(e.materia));
+      const isUnassigned = !matNorm || !registeredSubjectNorms.has(matNorm);
+      if (isUnassigned) totalUnassigned += 1;
+
+      const meta = resolveSimulationExamMeta(e, db.completedSimulations);
+      const cur = map.get(meta.key) || {
+        key: meta.key,
+        label: meta.label,
+        total: 0,
+        pending: 0,
+        corrected: 0,
+        unassigned: 0,
+      };
+      cur.total += 1;
+      if (isCorr) cur.corrected += 1;
+      else cur.pending += 1;
+      if (isUnassigned) cur.unassigned += 1;
+      map.set(meta.key, cur);
+    });
+
+    const exams = [...map.values()].sort((a, b) => {
+      if (b.pending !== a.pending) return b.pending - a.pending;
+      return a.label.localeCompare(b.label, 'pt-BR');
+    });
+
+    return { exams, totalEntries, totalPending, totalUnassigned };
+  }, [allErrorEntries, db.completedSimulations, registeredSubjectNorms]);
+
+  // Reset selectedSimulationKey if that exam no longer exists
+  useEffect(() => {
+    if (
+      selectedSimulationKey !== 'all' &&
+      !simulationDirectory.exams.some((ex) => ex.key === selectedSimulationKey)
+    ) {
+      setSelectedSimulationKey('all');
+    }
+  }, [selectedSimulationKey, simulationDirectory.exams]);
+
   const subjectOptions = useMemo(() => {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -682,12 +969,24 @@ export const ErrorNotebookPage: React.FC = () => {
       list.push(clean);
     };
     registeredSubjects.forEach(push);
-    allErrorEntries.forEach((e) => push(e.materia));
-    if (filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER) {
+    // Only include non-simulation subjects (closed simulation raw titles stay inside "Simulados")
+    allErrorEntries.forEach((e) => {
+      if (isClosedSimulationEntry(e)) {
+        const norm = normalizeSearch(visibleName(e.materia));
+        if (norm && registeredSubjectNorms.has(norm)) push(e.materia);
+      } else {
+        push(e.materia);
+      }
+    });
+    if (
+      filterSubject !== 'Todas as Matérias' &&
+      filterSubject !== UNASSIGNED_SUBJECT_FILTER &&
+      filterSubject !== SIMULADOS_FILTER
+    ) {
       push(filterSubject);
     }
     return list.sort((a, b) => a.localeCompare(b, 'pt-BR'));
-  }, [allErrorEntries, filterSubject, registeredSubjects]);
+  }, [allErrorEntries, filterSubject, registeredSubjectNorms, registeredSubjects]);
 
   useEffect(() => {
     if (!exportSingleSubject && subjectOptions.length > 0) {
@@ -695,7 +994,7 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [exportSingleSubject, subjectOptions]);
 
-  // Counts per subject (exact normalized match) + unassigned counts
+  // Counts per subject (exact normalized match) + non-simulation unassigned counts
   const subjectDirectoryMetrics = useMemo(() => {
     const byNorm = new Map<string, { pending: number; corrected: number; total: number }>();
     let unassignedPending = 0;
@@ -711,7 +1010,7 @@ export const ErrorNotebookPage: React.FC = () => {
         else cur.pending += 1;
         byNorm.set(norm, cur);
       }
-      if (!norm || !registeredSubjectNorms.has(norm)) {
+      if (!isClosedSimulationEntry(e) && (!norm || !registeredSubjectNorms.has(norm))) {
         unassignedTotal += 1;
         if (!isCorr) unassignedPending += 1;
       }
@@ -723,15 +1022,18 @@ export const ErrorNotebookPage: React.FC = () => {
   const resolveStatsSubject = useMemo(() => {
     const byNorm = new Map<string, string>();
     registeredSubjects.forEach((s) => byNorm.set(normalizeSearch(s), s));
-    return (raw?: string): string => {
+    return (raw?: string, isFromSimulation = false): string => {
       const clean = visibleName(raw || '');
-      if (!clean) return 'Geral';
+      if (!clean) return isFromSimulation ? SIMULADOS_STATS_KEY : 'Geral';
       const exact = byNorm.get(normalizeSearch(clean));
       if (exact) return exact;
       const inferred = inferFixedSubjectFromTopic({ materia: clean }, registeredSubjects);
       if (inferred) {
-        return byNorm.get(normalizeSearch(inferred)) || inferred;
+        const matchedRegistered = byNorm.get(normalizeSearch(inferred));
+        if (matchedRegistered) return matchedRegistered;
       }
+      // Never spawn a separate subject row for each closed simulation exam name
+      if (isFromSimulation) return SIMULADOS_STATS_KEY;
       return clean;
     };
   }, [registeredSubjects]);
@@ -748,8 +1050,8 @@ export const ErrorNotebookPage: React.FC = () => {
     }
 
     const map = new Map<string, SubjectStatAcc>();
-    const ensureRow = (rawSubject?: string): SubjectStatAcc => {
-      const key = resolveStatsSubject(rawSubject);
+    const ensureRow = (rawSubject?: string, isFromSimulation = false): SubjectStatAcc => {
+      const key = resolveStatsSubject(rawSubject, isFromSimulation);
       const norm = normalizeSearch(key);
       const existing = [...map.values()].find((r) => normalizeSearch(r.subject) === norm);
       if (existing) return existing;
@@ -767,7 +1069,7 @@ export const ErrorNotebookPage: React.FC = () => {
     };
 
     allErrorEntries.forEach((entry) => {
-      const row = ensureRow(entry.materia);
+      const row = ensureRow(entry.materia, isClosedSimulationEntry(entry));
       row.notebookTotal += 1;
       const isErrorItem = Boolean(entry.questao || entry.correcao_prova || entry.tipo.includes('Erro'));
       if (isErrorItem) row.notebookErrors += 1;
@@ -776,7 +1078,7 @@ export const ErrorNotebookPage: React.FC = () => {
     });
 
     db.history.forEach((h) => {
-      const row = ensureRow(h.subject);
+      const row = ensureRow(h.subject, false);
       row.answeredQuestions += 1;
       if (!h.correct) row.wrongQuestions += 1;
     });
@@ -784,7 +1086,7 @@ export const ErrorNotebookPage: React.FC = () => {
     db.completedSimulations.forEach((sim) => {
       (sim.questoes || []).forEach((q) => {
         if (!q.resposta) return;
-        const row = ensureRow(q.materia || sim.materia);
+        const row = ensureRow(q.materia || sim.materia, true);
         row.answeredQuestions += 1;
         if (!q.correta) row.wrongQuestions += 1;
       });
@@ -896,12 +1198,25 @@ export const ErrorNotebookPage: React.FC = () => {
     const term = normalizeSearch(search);
     const filterNorm = normalizeSearch(filterSubject);
     return allErrorEntries.filter((e) => {
-      if (filterSubject === UNASSIGNED_SUBJECT_FILTER) {
+      if (filterSubject === SIMULADOS_FILTER) {
+        if (!isClosedSimulationEntry(e)) return false;
+        if (selectedSimulationKey !== 'all') {
+          const meta = resolveSimulationExamMeta(e, db.completedSimulations);
+          if (meta.key !== selectedSimulationKey) return false;
+        }
+        if (simOnlyUnassigned) {
+          const entryNorm = normalizeSearch(visibleName(e.materia));
+          if (entryNorm && registeredSubjectNorms.has(entryNorm)) return false;
+        }
+      } else if (filterSubject === UNASSIGNED_SUBJECT_FILTER) {
+        if (isClosedSimulationEntry(e)) return false;
         const entryNorm = normalizeSearch(visibleName(e.materia));
         if (entryNorm && registeredSubjectNorms.has(entryNorm)) return false;
       } else if (filterSubject !== 'Todas as Matérias') {
         const entryNorm = normalizeSearch(visibleName(e.materia));
-        const resolvedNorm = normalizeSearch(resolveStatsSubject(e.materia));
+        const resolvedNorm = normalizeSearch(
+          resolveStatsSubject(e.materia, isClosedSimulationEntry(e)),
+        );
         if (entryNorm !== filterNorm && resolvedNorm !== filterNorm) return false;
       }
       const isErrorItem = Boolean(e.questao || e.correcao_prova || e.tipo.includes('Erro'));
@@ -915,7 +1230,7 @@ export const ErrorNotebookPage: React.FC = () => {
 
       if (term) {
         const hay = normalizeSearch(
-          `${e.materia} ${e.tipo} ${e.texto} ${e.questao?.enunciado || ''} ${
+          `${e.materia} ${e.simulado_titulo || ''} ${e.tipo} ${e.texto} ${e.questao?.enunciado || ''} ${
             e.arquivo_prova || ''
           }`,
         );
@@ -925,12 +1240,15 @@ export const ErrorNotebookPage: React.FC = () => {
     });
   }, [
     allErrorEntries,
+    db.completedSimulations,
     filterMode,
     filterStatus,
     filterSubject,
     registeredSubjectNorms,
     resolveStatsSubject,
     search,
+    selectedSimulationKey,
+    simOnlyUnassigned,
   ]);
 
   // Selection helpers for bulk association of pending questions
@@ -1006,6 +1324,16 @@ export const ErrorNotebookPage: React.FC = () => {
     );
   };
 
+  // Safe subject update: clears stale edit drafts and syncs open editor so autosave never reverts materia
+  const handleSafeUpdateEntrySubject = useCallback(
+    (id: string, subject: string) => {
+      clearFieldDraft(`error_notebook_edit_${id}`);
+      setEditingEntry((prev) => (prev && prev.id === id ? { ...prev, materia: subject } : prev));
+      updateErrorEntrySubject(id, subject);
+    },
+    [updateErrorEntrySubject],
+  );
+
   const handleBulkAssociatePending = () => {
     if (!selectedEntryIds.length) {
       toast('Selecione ao menos uma questão pendente para associar.', true);
@@ -1015,6 +1343,11 @@ export const ErrorNotebookPage: React.FC = () => {
       toast('Cadastre ou selecione uma matéria de destino primeiro.', true);
       return;
     }
+    const idSet = new Set(selectedEntryIds);
+    selectedEntryIds.forEach((id) => clearFieldDraft(`error_notebook_edit_${id}`));
+    setEditingEntry((prev) =>
+      prev && idSet.has(prev.id) ? { ...prev, materia: bulkTargetSubject } : prev,
+    );
     bulkUpdateErrorEntriesSubject(selectedEntryIds, bulkTargetSubject);
     setSelectedEntryIds([]);
   };
@@ -1022,11 +1355,40 @@ export const ErrorNotebookPage: React.FC = () => {
   // Resolve entries & labels for Print Sheet and PDF Export
   const computeBundleForConfig = useCallback(
     (cfg: {
-      mode: 'all' | 'multi' | 'single';
+      mode: 'all' | 'multi' | 'single' | 'simulation';
       singleSubject: string;
       multiSubjects: string[];
+      simuladoKey?: string;
+      simuladoLabel?: string;
       statusFilter: 'pending' | 'corrected' | 'all';
     }) => {
+      if (cfg.mode === 'simulation') {
+        const entries = allErrorEntries.filter((row) => {
+          if (!isClosedSimulationEntry(row)) return false;
+          const isCorr = Boolean(row.corrigido);
+          if (cfg.statusFilter === 'pending' && isCorr) return false;
+          if (cfg.statusFilter === 'corrected' && !isCorr) return false;
+          if (cfg.simuladoKey && cfg.simuladoKey !== 'all') {
+            const meta = resolveSimulationExamMeta(row, db.completedSimulations);
+            if (meta.key !== cfg.simuladoKey) return false;
+          }
+          return true;
+        });
+        const distinctSubjectsCount = new Set(
+          entries.map((e) => normalizeSearch(visibleName(e.materia || 'Geral'))),
+        ).size;
+        const scopeLabel =
+          cfg.simuladoKey && cfg.simuladoKey !== 'all'
+            ? `Simulado: ${cfg.simuladoLabel || 'Prova selecionada'}`
+            : 'Todos os Simulados (em conjunto)';
+        return {
+          entries,
+          distinctSubjectsCount,
+          scopeLabel,
+          targetSubjects: 'Todas as Matérias' as string | string[],
+        };
+      }
+
       const targetSubjects: string | string[] =
         cfg.mode === 'all'
           ? 'Todas as Matérias'
@@ -1074,7 +1436,7 @@ export const ErrorNotebookPage: React.FC = () => {
         targetSubjects,
       };
     },
-    [allErrorEntries],
+    [allErrorEntries, db.completedSimulations],
   );
 
   const exportPreview = useMemo(
@@ -1133,6 +1495,45 @@ export const ErrorNotebookPage: React.FC = () => {
     setPrintTriggerTick((t) => t + 1);
   };
 
+  const handlePrintSimulationDirect = () => {
+    const selectedExam = simulationDirectory.exams.find((ex) => ex.key === selectedSimulationKey);
+    const preferredStatus = filterStatus;
+    const checkPreferred = computeBundleForConfig({
+      mode: 'simulation',
+      singleSubject: '',
+      multiSubjects: [],
+      simuladoKey: selectedSimulationKey,
+      simuladoLabel: selectedExam?.label,
+      statusFilter: preferredStatus,
+    });
+    const fallbackAll =
+      checkPreferred.entries.length > 0
+        ? checkPreferred
+        : computeBundleForConfig({
+            mode: 'simulation',
+            singleSubject: '',
+            multiSubjects: [],
+            simuladoKey: selectedSimulationKey,
+            simuladoLabel: selectedExam?.label,
+            statusFilter: 'all',
+          });
+
+    if (fallbackAll.entries.length === 0) {
+      toast('Não há registros de simulado para imprimir.', true);
+      return;
+    }
+
+    setPrintOverride({
+      mode: 'simulation',
+      singleSubject: '',
+      multiSubjects: [],
+      simuladoKey: selectedSimulationKey,
+      simuladoLabel: selectedExam?.label,
+      statusFilter: checkPreferred.entries.length > 0 ? preferredStatus : 'all',
+    });
+    setPrintTriggerTick((t) => t + 1);
+  };
+
   const handlePrintSingleSubjectDirect = (subj: string) => {
     const preferredStatus = filterStatus;
     const checkPreferred = computeBundleForConfig({
@@ -1179,6 +1580,8 @@ export const ErrorNotebookPage: React.FC = () => {
     addAnnotation(newSubject, newType, newText);
     clearFieldDraft('error_notebook_new_annotation');
     setNewText('');
+    setNewTextRawBeforeFormat(null);
+    setNewTextAutoFormatted(false);
   };
 
   const handleExportPdf = () => {
@@ -1195,6 +1598,8 @@ export const ErrorNotebookPage: React.FC = () => {
           statusFilter: exportStatus,
           pageBreakBySubject,
           scopeLabel: exportPreview.scopeLabel,
+          holderName:
+            googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
         },
       );
       toast('PDF do Caderno de Erros gerado com sucesso.');
@@ -1305,6 +1710,12 @@ export const ErrorNotebookPage: React.FC = () => {
   const activeFlashcard = filteredEntries[safeFlashcardIdx];
 
   const handleToggleStatsSubject = useCallback((subject: string) => {
+    if (normalizeSearch(subject) === normalizeSearch(SIMULADOS_STATS_KEY)) {
+      setFilterSubject((prev) =>
+        prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
+      );
+      return;
+    }
     setFilterSubject((prev) =>
       normalizeSearch(prev) === normalizeSearch(subject) ? 'Todas as Matérias' : subject,
     );
@@ -1336,12 +1747,13 @@ export const ErrorNotebookPage: React.FC = () => {
 
   const entriesDynamicHeight = useDynamicRowHeight({
     defaultRowHeight: 220,
-    key: `err-entries-${filterSubject}-${filterMode}-${filterStatus}-${search}`,
+    key: `err-entries-${filterSubject}-${selectedSimulationKey}-${simOnlyUnassigned}-${filterMode}-${filterStatus}-${search}`,
   });
 
   const entryRowProps = useMemo<ErrorNotebookRowProps>(
     () => ({
       entries: filteredEntries,
+      completedSimulations: db.completedSimulations,
       registeredSubjects,
       registeredSubjectNorms,
       selectedEntryIds: selectedEntryIdSet,
@@ -1351,7 +1763,7 @@ export const ErrorNotebookPage: React.FC = () => {
       setEditingEntry,
       flushEditingDraft,
       handleSaveEdit,
-      updateErrorEntrySubject,
+      updateErrorEntrySubject: handleSafeUpdateEntrySubject,
       markAnnotationCorrected,
       advanceErrorReview,
       reopenAnnotation,
@@ -1360,6 +1772,7 @@ export const ErrorNotebookPage: React.FC = () => {
     }),
     [
       filteredEntries,
+      db.completedSimulations,
       registeredSubjects,
       registeredSubjectNorms,
       selectedEntryIdSet,
@@ -1368,7 +1781,7 @@ export const ErrorNotebookPage: React.FC = () => {
       editingEntry,
       flushEditingDraft,
       handleSaveEdit,
-      updateErrorEntrySubject,
+      handleSafeUpdateEntrySubject,
       markAnnotationCorrected,
       advanceErrorReview,
       reopenAnnotation,
@@ -1433,6 +1846,31 @@ export const ErrorNotebookPage: React.FC = () => {
             </span>
           </button>
 
+          {simulationDirectory.totalEntries > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                setFilterSubject((prev) =>
+                  prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
+                )
+              }
+              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                filterSubject === SIMULADOS_FILTER
+                  ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                  : 'border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:border-[var(--accent)]'
+              }`}
+              title="Todas as provas fechadas agrupadas em um único seletor para escolher qual prova corrigir"
+            >
+              <ClipboardCheck className="w-3.5 h-3.5" />
+              Simulados
+              <span className="font-mono-num text-[11px] opacity-90">
+                {simulationDirectory.exams.length}{' '}
+                {simulationDirectory.exams.length === 1 ? 'prova' : 'provas'} ·{' '}
+                {simulationDirectory.totalPending} pend.
+              </span>
+            </button>
+          )}
+
           {subjectDirectoryMetrics.unassignedTotal > 0 && (
             <button
               type="button"
@@ -1458,6 +1896,62 @@ export const ErrorNotebookPage: React.FC = () => {
             </button>
           )}
         </div>
+
+        {/* Seletor interno de provas fechadas dentro de Simulados */}
+        {filterSubject === SIMULADOS_FILTER && simulationDirectory.exams.length > 0 && (
+          <div className="mb-3 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)]/50 p-3 flex flex-col gap-2.5">
+            <div className="flex flex-wrap items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
+                <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[var(--text)] whitespace-nowrap">
+                  <ClipboardCheck className="w-4 h-4 text-[var(--accent)]" />
+                  Prova de Simulado para corrigir:
+                </span>
+                <select
+                  aria-label="Escolher prova fechada dentro de Simulados"
+                  value={selectedSimulationKey}
+                  onChange={(e) => setSelectedSimulationKey(e.target.value)}
+                  className="ce-select !w-auto min-w-[260px] max-w-full flex-1 font-bold"
+                >
+                  <option value="all">
+                    Todos os simulados ({simulationDirectory.exams.length} prova(s) ·{' '}
+                    {simulationDirectory.totalPending} pend. · {simulationDirectory.totalEntries}{' '}
+                    total)
+                  </option>
+                  {simulationDirectory.exams.map((ex) => (
+                    <option key={ex.key} value={ex.key}>
+                      {ex.label} ({ex.pending} pend. · {ex.total} total)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <button
+                type="button"
+                onClick={handlePrintSimulationDirect}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap shrink-0 cursor-pointer"
+                title="Imprimir em folha A4 os erros do simulado selecionado"
+              >
+                <Printer className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Imprimir simulado (A4)
+              </button>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--muted)]">
+              <span>
+                Ao associar a matéria de uma questão abaixo, ela permanece visível nesta prova com a nova matéria salva para facilitar sua correção.
+              </span>
+              <label className="inline-flex items-center gap-1.5 font-semibold text-[var(--text)] cursor-pointer select-none whitespace-nowrap">
+                <input
+                  type="checkbox"
+                  checked={simOnlyUnassigned}
+                  onChange={(e) => setSimOnlyUnassigned(e.target.checked)}
+                  className="accent-[var(--accent)] w-3.5 h-3.5 cursor-pointer"
+                />
+                Mostrar apenas ainda sem matéria cadastrada
+              </label>
+            </div>
+          </div>
+        )}
 
         {registeredSubjects.length === 0 ? (
           <div className="text-[12.5px] text-[var(--muted)] py-1">
@@ -1575,15 +2069,54 @@ export const ErrorNotebookPage: React.FC = () => {
               </select>
             </div>
             <div className="sm:col-span-2">
-              <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                Ponto para revisar
-              </label>
+              <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className="block text-[11px] font-bold text-[var(--muted)]">
+                    Ponto para revisar
+                  </label>
+                  {newTextAutoFormatted && (
+                    <span className="text-[10.5px] font-bold text-[var(--good)]">
+                      Texto organizado automaticamente
+                    </span>
+                  )}
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {newTextRawBeforeFormat !== null && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setNewText(newTextRawBeforeFormat);
+                        setNewTextRawBeforeFormat(null);
+                        setNewTextAutoFormatted(false);
+                      }}
+                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                    >
+                      <Undo2 className="w-3 h-3" />
+                      Desfazer ajuste
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={handleManualFormatNewText}
+                    disabled={!newText.trim()}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[10.5px] font-bold text-[var(--accent)] hover:border-[var(--accent)] disabled:opacity-45 cursor-pointer"
+                    title="Separar artigos, parágrafos, incisos e tópicos automaticamente"
+                  >
+                    <AlignLeft className="w-3 h-3" />
+                    Organizar texto
+                  </button>
+                </div>
+              </div>
               <textarea
                 value={newText}
-                onChange={(e) => setNewText(e.target.value)}
-                rows={3}
-                placeholder="Descreva a pegadinha, exceção legal ou prazo que precisa fixar..."
-                className="ce-textarea"
+                onChange={(e) => {
+                  setNewText(e.target.value);
+                  if (newTextAutoFormatted) setNewTextAutoFormatted(false);
+                }}
+                onPaste={handlePasteNewText}
+                rows={5}
+                placeholder="Cole ou descreva a pegadinha, artigo de lei, exceção ou prazo que precisa fixar (o texto colado é organizado automaticamente)..."
+                className="ce-textarea leading-relaxed"
               />
             </div>
             <div className="sm:col-span-2 flex justify-end">
@@ -1768,6 +2301,23 @@ export const ErrorNotebookPage: React.FC = () => {
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
+                  onClick={() => {
+                    if (exportMode === 'multi' && exportMultiSubjects.length === 0) {
+                      toast('Marque ao menos uma matéria para pré-visualizar o caderno.', true);
+                      return;
+                    }
+                    setPrintOverride(null);
+                    setShowPrintPreview(true);
+                  }}
+                  disabled={exportPreview.entries.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                  title="Visualizar o documento oficial A4 com brasão e rodapé numerado antes de imprimir"
+                >
+                  <Eye className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Pré-visualizar A4
+                </button>
+                <button
+                  type="button"
                   onClick={handlePrintFromPanel}
                   disabled={exportPreview.entries.length === 0}
                   className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
@@ -1799,13 +2349,19 @@ export const ErrorNotebookPage: React.FC = () => {
         selectedKey={
           paretoMode === 'by_type'
             ? search || null
-            : filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER
-              ? filterSubject
-              : null
+            : filterSubject === SIMULADOS_FILTER
+              ? SIMULADOS_STATS_KEY
+              : filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER
+                ? filterSubject
+                : null
         }
         onSelectKey={(key) => {
           if (paretoMode === 'by_type') {
             setSearch((prev) => (normalizeSearch(prev) === normalizeSearch(key) ? '' : key));
+          } else if (normalizeSearch(key) === normalizeSearch(SIMULADOS_STATS_KEY)) {
+            setFilterSubject((prev) =>
+              prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
+            );
           } else {
             setFilterSubject((prev) =>
               normalizeSearch(prev) === normalizeSearch(key) ? 'Todas as Matérias' : key,
@@ -2089,6 +2645,13 @@ export const ErrorNotebookPage: React.FC = () => {
           className="ce-select w-auto min-w-[200px]"
         >
           <option value="Todas as Matérias">Todas as Matérias</option>
+          {simulationDirectory.totalEntries > 0 && (
+            <option value={SIMULADOS_FILTER}>
+              Simulados ({simulationDirectory.exams.length}{' '}
+              {simulationDirectory.exams.length === 1 ? 'prova' : 'provas'} ·{' '}
+              {simulationDirectory.totalEntries})
+            </option>
+          )}
           {subjectDirectoryMetrics.unassignedTotal > 0 && (
             <option value={UNASSIGNED_SUBJECT_FILTER}>
               Sem matéria cadastrada ({subjectDirectoryMetrics.unassignedTotal})
@@ -2100,6 +2663,24 @@ export const ErrorNotebookPage: React.FC = () => {
             </option>
           ))}
         </select>
+
+        {filterSubject === SIMULADOS_FILTER && simulationDirectory.exams.length > 0 && (
+          <select
+            aria-label="Escolher prova fechada dentro de Simulados"
+            value={selectedSimulationKey}
+            onChange={(e) => setSelectedSimulationKey(e.target.value)}
+            className="ce-select w-auto min-w-[220px] max-w-[360px] !border-[var(--accent)]"
+          >
+            <option value="all">
+              Todas as provas ({simulationDirectory.exams.length})
+            </option>
+            {simulationDirectory.exams.map((ex) => (
+              <option key={ex.key} value={ex.key}>
+                {ex.label} ({ex.pending} pend.)
+              </option>
+            ))}
+          </select>
+        )}
 
         <select
           aria-label="Filtrar por tipo de registro"
@@ -2139,7 +2720,11 @@ export const ErrorNotebookPage: React.FC = () => {
           <button
             type="button"
             onClick={() =>
-              startErrorNotebookQuiz(filterSubject, filterStatus === 'pending')
+              startErrorNotebookQuiz(
+                filterSubject,
+                filterStatus === 'pending',
+                filterSubject === SIMULADOS_FILTER ? selectedSimulationKey : undefined,
+              )
             }
             disabled={linkedQuestionsCount === 0}
             className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-45 whitespace-nowrap"
@@ -2354,6 +2939,63 @@ export const ErrorNotebookPage: React.FC = () => {
         )}
       </div>
       </div>
+
+      {showPrintPreview && (
+        <div
+          data-print-hide="true"
+          className="fixed inset-0 z-50 bg-[#071D41]/75 backdrop-blur-[2px] flex flex-col"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Pré-visualização de Impressão Oficial A4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 bg-[#071D41] text-white border-b border-white/15 shrink-0">
+            <div className="min-w-0">
+              <div className="text-[11px] font-bold uppercase tracking-[0.1em] text-[#FFCD07]">
+                Modelo Oficial A4 · Padrão Governo Federal
+              </div>
+              <div className="text-[12.5px] text-white/85 truncate">
+                Cabeçalho com Brasão (placeholder), texto jurídico estruturado e rodapé numerado automático na impressão
+              </div>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => handlePrintFromPanel()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#1351B4] border border-white/25 text-white text-[12px] font-bold hover:bg-[#1b63d6] cursor-pointer"
+              >
+                <Printer className="w-3.5 h-3.5" />
+                Imprimir agora (A4)
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowPrintPreview(false)}
+                className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-white/25 bg-white/10 text-white text-[12px] font-bold hover:bg-white/20 cursor-pointer"
+              >
+                <X className="w-3.5 h-3.5" />
+                Fechar
+              </button>
+            </div>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 sm:p-6">
+            <div className="max-w-[210mm] mx-auto bg-white shadow-2xl border border-[#CBD5E1] p-6 sm:p-[13mm]">
+              <ErrorNotebookOfficialPrintSheet
+                entries={activePrintBundle.entries}
+                selectedSubjectsLabel={activePrintBundle.scopeLabel}
+                statusFilter={activePrintConfig.statusFilter}
+                includeQuestion={includeQuestion}
+                pageBreakBySubject={
+                  activePrintConfig.mode === 'single' ? false : pageBreakBySubject
+                }
+                holderName={
+                  googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal'
+                }
+                previewMode
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       <ErrorNotebookOfficialPrintSheet
         entries={activePrintBundle.entries}

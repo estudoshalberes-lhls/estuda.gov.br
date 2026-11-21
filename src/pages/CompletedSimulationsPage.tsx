@@ -1,14 +1,18 @@
 import React, { useMemo, useState } from 'react';
-import { ChevronDown, FileDown, Stamp } from 'lucide-react';
+import { ChevronDown, FileDown, Printer, Stamp } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { extractOptions, formatClock, questionStatement, visibleName } from '../lib/parsers';
 import { exportSimulationPreliminaryResultPdf } from '../lib/pdfExport';
+import { analyzeSimulationTiming } from '../lib/simulationTimeAnalytics';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { SimulationReportOfficialPrintSheet } from '../components/print/SimulationReportOfficialPrintSheet';
 
 export const CompletedSimulationsPage: React.FC = () => {
   const { db, googleUser, toast } = useStudy();
   const [filterId, setFilterId] = useState<string>('all');
   const [cutoffPercent, setCutoffPercent] = useState<number>(70);
+  const [printingSimId, setPrintingSimId] = useState<string | null>(null);
+  const [printIncludeStatements, setPrintIncludeStatements] = useState<boolean>(true);
 
   const filterOptions = useMemo(() => {
     const map = new Map<string, string>();
@@ -37,14 +41,51 @@ export const CompletedSimulationsPage: React.FC = () => {
 
   const candidateName = googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal';
 
+  const activePrintSimulation = useMemo(() => {
+    if (printingSimId) {
+      return db.completedSimulations.find((s) => s.id === printingSimId) || filtered[0] || null;
+    }
+    return filtered[0] || null;
+  }, [db.completedSimulations, filtered, printingSimId]);
+
+  const handlePrintOfficialSheet = (simId: string) => {
+    setPrintingSimId(simId);
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        window.print();
+      }, 60);
+    });
+  };
+
   return (
-    <div>
-      <PageHeader
-        eyebrow="BOLETIM DE OCORRÊNCIAS · SIMULADOS"
-        title="Histórico e Edital de Resultado Preliminar"
-        description="Acompanhe seu rendimento perante a banca, ajuste a nota de corte do concurso e emita o Edital de Resultado Preliminar estilo Diário Oficial."
-        actions={
-          <div className="flex flex-wrap items-center gap-2">
+    <>
+      <div data-print-hide="true" className="print:hidden">
+        <PageHeader
+          eyebrow="BOLETIM DE OCORRÊNCIAS · SIMULADOS"
+          title="Histórico e Edital de Resultado Preliminar"
+          description="Acompanhe seu rendimento, analise o tempo gasto por disciplina e emita o Boletim Oficial em folha A4 ou PDF."
+          actions={
+            <div className="flex flex-wrap items-center gap-2">
+              {filtered.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => handlePrintOfficialSheet(filtered[0].id)}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+                  title="Imprimir Boletim Oficial em folha A4 (último simulado filtrado)"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Imprimir Boletim (A4)
+                </button>
+              )}
+              <label className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-[var(--muted)] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={printIncludeStatements}
+                  onChange={(e) => setPrintIncludeStatements(e.target.checked)}
+                  className="accent-[var(--accent)] w-3.5 h-3.5"
+                />
+                Enunciados no A4
+              </label>
             <label className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] px-2.5 py-1.5 text-[11.5px] font-bold text-[var(--muted)]">
               <span>Corte (%):</span>
               <input
@@ -162,6 +203,7 @@ export const CompletedSimulationsPage: React.FC = () => {
                 .map((q) => q.numero);
               const approved = sim.aproveitamento >= cutoffPercent;
               const editalNum = `DOU-${String((sim.total || 10) * 19 + sim.acertos * 13 + 2026).padStart(5, '0')}/2026`;
+              const simTiming = analyzeSimulationTiming(sim);
 
               const handleDownloadDouPdf = () => {
                 try {
@@ -260,16 +302,100 @@ export const CompletedSimulationsPage: React.FC = () => {
                             .
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={handleDownloadDouPdf}
-                          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shrink-0 cursor-pointer"
-                        >
-                          <FileDown className="w-3.5 h-3.5" />
-                          Emitir Resultado DOU (PDF)
-                        </button>
+                        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handlePrintOfficialSheet(sim.id)}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[11.5px] font-bold hover:border-[var(--accent)] whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <Printer className="w-3.5 h-3.5 text-[var(--accent)]" />
+                            Imprimir Folha Oficial (A4)
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleDownloadDouPdf}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shrink-0 cursor-pointer"
+                          >
+                            <FileDown className="w-3.5 h-3.5" />
+                            Emitir Resultado DOU (PDF)
+                          </button>
+                        </div>
                       </div>
                     </div>
+
+                    {/* Análise de Tempo por Disciplina */}
+                    {simTiming.hasPerQuestionTiming && (
+                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
+                        <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2">
+                          <strong className="text-[12px] font-bold text-[var(--text)]">
+                            Gestão de Tempo por Disciplina
+                          </strong>
+                          <span className="text-[11px] font-mono-num text-[var(--muted)]">
+                            Média: {formatClock(simTiming.avgSecondsPerQuestion)}/questão
+                            {simTiming.slowestSubject
+                              ? ` · Mais demorada: ${simTiming.slowestSubject.materia} (${formatClock(simTiming.slowestSubject.avgSeconds)}/q)`
+                              : ''}
+                          </span>
+                        </div>
+                        <div className="overflow-x-auto">
+                          <table className="w-full border-collapse text-[11.5px]">
+                            <thead>
+                              <tr className="border-b border-[var(--line)] text-[10.5px] font-bold text-[var(--muted)]">
+                                <th className="text-left py-1.5 pr-2">Disciplina</th>
+                                <th className="text-right py-1.5 px-2">Qtd.</th>
+                                <th className="text-right py-1.5 px-2">Acertos</th>
+                                <th className="text-right py-1.5 px-2">Tempo Total</th>
+                                <th className="text-right py-1.5 px-2">Média / Q</th>
+                                <th className="text-right py-1.5 pl-2">% Tempo</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {simTiming.bySubject.map((row) => (
+                                <tr
+                                  key={row.materia}
+                                  className="border-b border-[var(--line)]/50 last:border-b-0"
+                                >
+                                  <td className="py-1.5 pr-2 font-semibold text-[var(--text)]">
+                                    {row.materia}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right font-mono-num text-[var(--muted)]">
+                                    {row.count}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right font-mono-num text-[var(--good)]">
+                                    {row.correct}/{row.count}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-right font-mono-num text-[var(--text)]">
+                                    {formatClock(row.totalSeconds)}
+                                  </td>
+                                  <td
+                                    className={`py-1.5 px-2 text-right font-mono-num font-bold ${
+                                      row.aboveAvg ? 'text-[var(--warning)]' : 'text-[var(--text)]'
+                                    }`}
+                                  >
+                                    {formatClock(row.avgSeconds)}
+                                  </td>
+                                  <td className="py-1.5 pl-2 text-right font-mono-num text-[var(--muted)]">
+                                    {row.sharePercent}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        {simTiming.slowestQuestions.length > 0 && (
+                          <div className="mt-2 pt-1.5 border-t border-[var(--line)]/60 text-[11px] text-[var(--muted)] tabular-nums">
+                            <strong className="text-[var(--text)]">Questões mais demoradas:</strong>{' '}
+                            {simTiming.slowestQuestions
+                              .slice(0, 4)
+                              .map(
+                                (item) =>
+                                  `Q${item.numero} (${formatClock(item.tempo_segundos)} · ${item.materia})`,
+                              )
+                              .join(' · ')}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {sim.questoes.map((q) => {
                       const opts = extractOptions(q);
@@ -281,6 +407,9 @@ export const CompletedSimulationsPage: React.FC = () => {
                           <div className="flex items-center justify-between gap-2 text-[12px] mb-1">
                             <strong className="text-[var(--text)] tabular-nums">
                               Questão {q.numero} · {visibleName(q.materia)}
+                              {typeof q.tempo_segundos === 'number' && q.tempo_segundos > 0
+                                ? ` · ${formatClock(q.tempo_segundos)}`
+                                : ''}
                             </strong>
                             <span
                               className={`font-bold ${
@@ -319,7 +448,15 @@ export const CompletedSimulationsPage: React.FC = () => {
       ) : (
         <EmptyState message="Nenhum simulado finalizado ainda. Complete uma prova em Prova Lacrada (Simulado)." />
       )}
-    </div>
+      </div>
+
+      <SimulationReportOfficialPrintSheet
+        simulation={activePrintSimulation}
+        cutoffPercent={cutoffPercent}
+        candidateName={candidateName}
+        includeStatements={printIncludeStatements}
+      />
+    </>
   );
 };
 

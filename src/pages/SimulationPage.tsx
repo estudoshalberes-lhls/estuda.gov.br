@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
-import { ClipboardCheck, Play, Trash2 } from 'lucide-react';
+import { ClipboardCheck, ClipboardPaste, Play, Trash2 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { shuffled, uid } from '../lib/parsers';
 import { Question, SubmittedSimulation } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { QuizRunner } from '../components/quiz/QuizRunner';
+import { FlexibleQuestionImporter } from '../components/utilities/FlexibleQuestionImporter';
 
 export const SimulationPage: React.FC = () => {
   const {
@@ -21,6 +22,7 @@ export const SimulationPage: React.FC = () => {
   } = useStudy();
 
   const [tab, setTab] = useState<'build' | 'submitted'>('build');
+  const [showQuickImport, setShowQuickImport] = useState<boolean>(false);
   const [timeLimitMinutes, setTimeLimitMinutes] = useState<number>(0);
   const [selectedBanca, setSelectedBanca] = useState<string>('CESPE / Cebraspe');
   const [submittedSearch, setSubmittedSearch] = useState<string>('');
@@ -59,6 +61,7 @@ export const SimulationPage: React.FC = () => {
       return;
     }
     const questions = shuffleAll ? shuffled(selected) : selected;
+    const now = Date.now();
     ensureTimerRunning();
     setQuiz({
       id: uid(16),
@@ -71,7 +74,9 @@ export const SimulationPage: React.FC = () => {
       answers: Array(questions.length),
       studySeconds: 0,
       timerBaseline: getCurrentTimerSeconds(),
-      startedAt: Date.now(),
+      startedAt: now,
+      questionTimesSeconds: Array(questions.length).fill(0),
+      questionEnteredAt: now,
       timeLimitSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : undefined,
     });
   };
@@ -82,6 +87,7 @@ export const SimulationPage: React.FC = () => {
       toast('Este simulado ainda não possui questões.', true);
       return;
     }
+    const now = Date.now();
     ensureTimerRunning();
     setQuiz({
       id: uid(16),
@@ -95,7 +101,9 @@ export const SimulationPage: React.FC = () => {
       answers: Array(ordered.length),
       studySeconds: 0,
       timerBaseline: getCurrentTimerSeconds(),
-      startedAt: Date.now(),
+      startedAt: now,
+      questionTimesSeconds: Array(ordered.length).fill(0),
+      questionEnteredAt: now,
       timeLimitSeconds: timeLimitMinutes > 0 ? timeLimitMinutes * 60 : undefined,
     });
   };
@@ -252,9 +260,21 @@ export const SimulationPage: React.FC = () => {
           ) : (
             <Panel
               title="Provas e simulados importados"
-              subtitle="Simulados enviados via Utilidades com ordem fiel da prova original."
+              subtitle="Simulados enviados via Utilidades ou colados diretamente com pré-visualização antes de salvar."
               action={
                 <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowQuickImport((v) => !v)}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[11.5px] font-bold transition-colors whitespace-nowrap ${
+                      showQuickImport
+                        ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                    }`}
+                  >
+                    <ClipboardPaste className="w-3.5 h-3.5" />
+                    {showQuickImport ? 'Ocultar importador' : 'Colar / Importar simulado'}
+                  </button>
                   <select
                     aria-label="Banca examinadora"
                     value={selectedBanca}
@@ -282,6 +302,17 @@ export const SimulationPage: React.FC = () => {
                 </div>
               }
             >
+              {showQuickImport && (
+                <div className="mb-4 pb-4 border-b border-[var(--line)]">
+                  <FlexibleQuestionImporter
+                    defaultAsSimulation={true}
+                    defaultInputMode="paste"
+                    showTemplateSample={false}
+                    onImported={() => setShowQuickImport(false)}
+                  />
+                </div>
+              )}
+
               {db.submittedSimulations.length ? (
                 <div className="flex flex-col gap-3">
                   <div className="mb-1">

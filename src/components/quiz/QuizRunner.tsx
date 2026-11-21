@@ -21,6 +21,7 @@ import {
   questionStatement,
   visibleName,
 } from '../../lib/parsers';
+import { analyzeSimulationTiming } from '../../lib/simulationTimeAnalytics';
 import { Panel } from '../ui/PageHeader';
 import { WhiteboardCanvas } from './WhiteboardCanvas';
 
@@ -55,8 +56,15 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
 
   const [showReviewBoard, setShowReviewBoard] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<'all' | 'answered' | 'blank'>('all');
+  const [liveNowMs, setLiveNowMs] = useState<number>(() => Date.now());
 
   const isCompleted = Boolean(quiz && (quiz.completed || quiz.index >= quiz.questions.length));
+
+  useEffect(() => {
+    if (!simulation || !quiz || isCompleted) return;
+    const id = window.setInterval(() => setLiveNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [simulation, quiz, isCompleted]);
 
   useEffect(() => {
     if (!quiz || isCompleted) {
@@ -116,6 +124,8 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
       0,
     );
     const accuracy = totalCount ? Math.round((correctCount / totalCount) * 100) : 0;
+    const timingAnalysis =
+      simulation && savedResult ? analyzeSimulationTiming(savedResult) : null;
 
     return (
       <Panel className="mt-4">
@@ -374,6 +384,88 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
           </button>
         </div>
 
+        {simulation && timingAnalysis && timingAnalysis.hasPerQuestionTiming && (
+          <div className="mt-5 pt-4 border-t border-[var(--line)]">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 mb-2.5">
+              <div>
+                <h4 className="m-0 font-display text-[14px] font-bold text-[var(--text)]">
+                  Tempo por disciplina e questões mais demoradas
+                </h4>
+                <p className="m-0 mt-0.5 text-[11.5px] text-[var(--muted)] tabular-nums">
+                  Média da prova: {formatClock(timingAnalysis.avgSecondsPerQuestion)}/questão
+                  {timingAnalysis.slowestSubject
+                    ? ` · Disciplina mais demorada: ${timingAnalysis.slowestSubject.materia} (${formatClock(timingAnalysis.slowestSubject.avgSeconds)}/questão)`
+                    : ''}
+                </p>
+              </div>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-[var(--line)]">
+              <table className="w-full border-collapse text-[12px]">
+                <thead>
+                  <tr className="bg-[var(--panel-soft)] border-b border-[var(--line)] text-[11px] font-bold text-[var(--muted)]">
+                    <th className="text-left px-3 py-2">Disciplina</th>
+                    <th className="text-right px-2.5 py-2">Questões</th>
+                    <th className="text-right px-2.5 py-2">Acertos</th>
+                    <th className="text-right px-2.5 py-2">Tempo total</th>
+                    <th className="text-right px-2.5 py-2">Média / Q</th>
+                    <th className="text-right px-3 py-2">% da prova</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {timingAnalysis.bySubject.map((row) => (
+                    <tr
+                      key={row.materia}
+                      className="border-b border-[var(--line)]/60 last:border-b-0"
+                    >
+                      <td className="px-3 py-2 font-semibold text-[var(--text)]">
+                        {row.materia}
+                      </td>
+                      <td className="px-2.5 py-2 text-right font-mono-num text-[var(--muted)]">
+                        {row.count}
+                      </td>
+                      <td className="px-2.5 py-2 text-right font-mono-num text-[var(--good)]">
+                        {row.correct}/{row.count}
+                      </td>
+                      <td className="px-2.5 py-2 text-right font-mono-num text-[var(--text)]">
+                        {formatClock(row.totalSeconds)}
+                      </td>
+                      <td
+                        className={`px-2.5 py-2 text-right font-mono-num font-bold ${
+                          row.aboveAvg ? 'text-[var(--warning)]' : 'text-[var(--text)]'
+                        }`}
+                      >
+                        {formatClock(row.avgSeconds)}
+                        {row.aboveAvg ? ' (acima)' : ''}
+                      </td>
+                      <td className="px-3 py-2 text-right font-mono-num text-[var(--muted)]">
+                        {row.sharePercent}%
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {timingAnalysis.slowestQuestions.length > 0 && (
+              <div className="mt-2.5 text-[11.5px] text-[var(--muted)] tabular-nums">
+                <strong className="text-[var(--text)]">Mais demoradas:</strong>{' '}
+                {timingAnalysis.slowestQuestions.slice(0, 4).map((item, i) => (
+                  <React.Fragment key={item.numero}>
+                    {i > 0 && ' · '}
+                    <span className="font-mono-num font-semibold text-[var(--text)]">
+                      Q{item.numero} ({formatClock(item.tempo_segundos)})
+                    </span>{' '}
+                    <span>
+                      — {item.materia} ({item.correta ? 'acerto' : item.resposta ? 'erro' : 'branco'})
+                    </span>
+                  </React.Fragment>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {simulation && savedResult?.questoes?.length ? (
           <div className="mt-5 pt-4 border-t border-[var(--line)]">
             <h4 className="m-0 mb-3 font-display text-[14px] font-bold text-[var(--text)]">
@@ -390,6 +482,9 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
                       <span className="text-[12px] font-bold text-[var(--text)] tabular-nums">
                         Questão {q.numero} · {visibleName(q.materia)}
+                        {typeof q.tempo_segundos === 'number' && q.tempo_segundos > 0
+                          ? ` · Tempo: ${formatClock(q.tempo_segundos)}`
+                          : ''}
                       </span>
                       <div className="flex items-center gap-2">
                         {!q.correta && Boolean(q.resposta) && (
@@ -622,6 +717,25 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                       <span className="text-[11px] font-semibold text-[var(--muted)]">
                         · {visibleName(q.materia)}
                       </span>
+                      {(() => {
+                        const baseSec = Number(quiz.questionTimesSeconds?.[idx] || 0);
+                        const liveAdd =
+                          idx === quiz.index
+                            ? Math.max(
+                                0,
+                                Math.floor(
+                                  (liveNowMs - (quiz.questionEnteredAt || quiz.startedAt || liveNowMs)) /
+                                    1000,
+                                ),
+                              )
+                            : 0;
+                        const qSec = baseSec + liveAdd;
+                        return qSec > 0 ? (
+                          <span className="text-[11px] font-mono-num text-[var(--muted)]">
+                            · {formatClock(qSec)}
+                          </span>
+                        ) : null;
+                      })()}
                     </div>
 
                     <div className="flex items-center gap-2">
@@ -788,6 +902,27 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
             >
               Restante: {formatClock(remainingSeconds)}
               {remainingSeconds <= 900 && remainingSeconds > 0 ? ' (!)' : ''}
+            </span>
+          )}
+          {simulation && (
+            <span
+              className="font-mono-num text-[11.5px] font-semibold text-[var(--muted)]"
+              title="Tempo acumulado automaticamente nesta questão"
+            >
+              Questão:{' '}
+              <strong className="text-[var(--text)]">
+                {formatClock(
+                  Number(quiz.questionTimesSeconds?.[quiz.index] || 0) +
+                    Math.max(
+                      0,
+                      Math.floor(
+                        (liveNowMs - (quiz.questionEnteredAt || quiz.startedAt || liveNowMs)) /
+                          1000,
+                      ),
+                    ),
+                )}
+              </strong>
+              {' · '}
             </span>
           )}
           <span className="font-mono-num">

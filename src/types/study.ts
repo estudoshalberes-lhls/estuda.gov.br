@@ -72,6 +72,7 @@ export interface SimulationQuestionResult extends Question {
   numero: number;
   resposta: string;
   correta: boolean;
+  tempo_segundos?: number;
 }
 
 export interface CompletedSimulation {
@@ -150,6 +151,9 @@ export interface ErrorNotebookEntry {
   tipo_arquivo?: 'provas' | 'provas-com-gabarito';
   banca?: string;
   arquivo_prova?: string;
+  simulado_id?: string;
+  simulado_titulo?: string;
+  simulado_questao_numero?: number;
   proxima_revisao?: string; // YYYY-MM-DD
   nivel_revisao?: number;
   revisado_em?: string; // YYYY-MM-DD
@@ -398,6 +402,14 @@ export interface DefaultDriveFolderPreference {
   updatedAt?: string;
 }
 
+export interface CareerMeta {
+  pinned_medals?: string[];
+  unlocked_at?: Record<string, string>;
+  completed_weekly_missions?: Record<string, string>;
+  last_notified_level?: number;
+  last_notified_medals?: string[];
+}
+
 export interface AppPreferences {
   tema: ThemeId;
   modules_top: boolean;
@@ -407,6 +419,7 @@ export interface AppPreferences {
   modules: Record<string, ModuleVisibility>;
   quick_access_modules?: ModuleName[];
   default_drive_folder?: DefaultDriveFolderPreference;
+  career_meta?: CareerMeta;
 }
 
 export interface QuizAnswer {
@@ -431,6 +444,8 @@ export interface QuizSession {
   startedAt?: number;
   elapsedSeconds?: number;
   timeLimitSeconds?: number;
+  questionTimesSeconds?: number[];
+  questionEnteredAt?: number;
   banca?: string;
   completed?: boolean;
   savedResult?: CompletedSimulation;

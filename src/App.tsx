@@ -11,6 +11,7 @@ import { DriveSyncConflictDialog } from './components/backup/DriveSyncConflictDi
 import { ToastRegion } from './components/ui/ToastRegion';
 import { BackToTopButton } from './components/ui/BackToTopButton';
 import { OfflineIndicator } from './components/ui/OfflineIndicator';
+import { CareerAchievementWatcher } from './components/performance/CareerAchievementWatcher';
 import { ModuleName } from './types/study';
 
 const HomePage = lazy(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
@@ -197,6 +198,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 
       <MobileTimerFloat />
       <BackToTopButton />
+      <CareerAchievementWatcher />
     </div>
   );
 };

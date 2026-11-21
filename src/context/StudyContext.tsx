@@ -800,7 +800,11 @@ interface StudyContextValue {
   reopenAnnotation: (id: string) => void;
   toggleAnnotationCorrected: (id: string) => void;
   advanceErrorReview: (id: string) => void;
-  startErrorNotebookQuiz: (subjectFilter?: string, onlyPending?: boolean) => void;
+  startErrorNotebookQuiz: (
+    subjectFilter?: string,
+    onlyPending?: boolean,
+    simuladoKey?: string,
+  ) => void;
 
   // Case Law
   saveCaseLaw: (
@@ -1004,6 +1008,15 @@ interface StudyContextValue {
     subjectInput: string,
     asSimulation: boolean,
   ) => Promise<{ count: number; materia: string; simulado: boolean }>;
+  importParsedQuestions: (
+    questions: Question[],
+    options: {
+      subject: string;
+      asSimulation: boolean;
+      title?: string;
+      sourceFileName?: string;
+    },
+  ) => Promise<{ count: number; materia: string; simulado: boolean }>;
   addManualQuestion: (payload: {
     materia: string;
     enunciado: string;
@@ -1046,6 +1059,8 @@ interface StudyContextValue {
   lastCacheVerifiedAt: string | null;
   isSyncingDrive: boolean;
   hasPendingCloudChanges: boolean;
+  pendingLocalChangesCount: number;
+  totalPendingSyncCount: number;
   drivePermissionNeedsPicker: { folderId: string; folderName: string; count: number } | null;
   authorizeDriveFolderViaPicker: () => Promise<boolean>;
   restoreProgress: RestoreProgress | null;
@@ -1398,15 +1413,93 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       ? (obj.database as Partial<StudyDatabase>)
       : (obj as Partial<StudyDatabase>);
 
-  const loadedAnnotations = [...toArraySafe(dataObj.annotations, seed.annotations || [])];
-  const existingIds = new Set(loadedAnnotations.map((a) => a.id));
+  const completedSimsRaw = toArraySafe(dataObj.completedSimulations, seed.completedSimulations || []);
+  const simById = new Map<string, CompletedSimulation>();
+  completedSimsRaw.forEach((sim) => {
+    if (sim?.id) simById.set(sim.id, sim);
+  });
 
-  // Reconcile completed simulations errors into annotations (Pendentes de Correção)
-  toArraySafe(dataObj.completedSimulations).forEach((sim) => {
+  const matchSimForAnnotation = (
+    ann: ErrorNotebookEntry,
+  ): { sim?: CompletedSimulation; qNum?: number } => {
+    if (ann.simulado_id && simById.has(ann.simulado_id)) {
+      return { sim: simById.get(ann.simulado_id), qNum: ann.simulado_questao_numero };
+    }
+    if (typeof ann.id === 'string' && ann.id.startsWith('sim-err-')) {
+      for (const sim of completedSimsRaw) {
+        if (!sim?.id) continue;
+        const prefix = `sim-err-${sim.id}-`;
+        if (ann.id.startsWith(prefix)) {
+          const rest = ann.id.slice(prefix.length);
+          const parsedNum = Number(rest.split('-')[0]);
+          return {
+            sim,
+            qNum: Number.isFinite(parsedNum) && parsedNum > 0 ? parsedNum : ann.simulado_questao_numero,
+          };
+        }
+      }
+    }
+    return { qNum: ann.simulado_questao_numero };
+  };
+
+  const loadedAnnotations = toArraySafe(dataObj.annotations, seed.annotations || []).map((ann) => {
+    if (!ann) return ann;
+    const isSimErr =
+      Boolean(ann.simulado_id || ann.simulado_titulo) ||
+      (typeof ann.id === 'string' && ann.id.startsWith('sim-err-')) ||
+      ann.origem === 'Simulado Fechado' ||
+      ann.tipo === 'Erro em Simulado Fechado';
+    if (!isSimErr) return ann;
+    const matched = matchSimForAnnotation(ann);
+    const resolvedSimId = ann.simulado_id || matched.sim?.id;
+    const resolvedSimTitle =
+      ann.simulado_titulo ||
+      matched.sim?.titulo ||
+      (ann.arquivo_prova ? visibleName(ann.arquivo_prova) : undefined);
+    const resolvedQNum = ann.simulado_questao_numero ?? matched.qNum;
+    if (
+      resolvedSimId === ann.simulado_id &&
+      resolvedSimTitle === ann.simulado_titulo &&
+      resolvedQNum === ann.simulado_questao_numero
+    ) {
+      return ann;
+    }
+    return {
+      ...ann,
+      ...(resolvedSimId ? { simulado_id: resolvedSimId } : {}),
+      ...(resolvedSimTitle ? { simulado_titulo: resolvedSimTitle } : {}),
+      ...(resolvedQNum !== undefined ? { simulado_questao_numero: resolvedQNum } : {}),
+    };
+  });
+
+  const existingIds = new Set(loadedAnnotations.map((a) => a.id));
+  const existingSimQuestionKeys = new Set<string>();
+  loadedAnnotations.forEach((a) => {
+    if (a.simulado_id && a.simulado_questao_numero !== undefined) {
+      existingSimQuestionKeys.add(`${a.simulado_id}::${a.simulado_questao_numero}`);
+    }
+    if (typeof a.id === 'string' && a.id.startsWith('sim-err-')) {
+      for (const sim of completedSimsRaw) {
+        if (!sim?.id) continue;
+        const prefix = `sim-err-${sim.id}-`;
+        if (a.id.startsWith(prefix)) {
+          const parsedNum = Number(a.id.slice(prefix.length).split('-')[0]);
+          if (Number.isFinite(parsedNum) && parsedNum > 0) {
+            existingSimQuestionKeys.add(`${sim.id}::${parsedNum}`);
+          }
+          break;
+        }
+      }
+    }
+  });
+
+  // Reconcile completed simulations errors into annotations (Pendentes de Correção) without duplicating legacy/reassigned entries
+  completedSimsRaw.forEach((sim) => {
     toArraySafe(sim?.questoes).forEach((q) => {
       if (!q.correta && Boolean(q.resposta)) {
         const simErrId = `sim-err-${sim.id}-${q.numero}`;
-        if (!existingIds.has(simErrId)) {
+        const simQKey = `${sim.id}::${q.numero}`;
+        if (!existingIds.has(simErrId) && !existingSimQuestionKeys.has(simQKey)) {
           const split = splitExamQuestion(q.enunciado);
           const alternatives = Array.isArray(q.alternativas) && q.alternativas.length ? q.alternativas : split.alternatives;
           loadedAnnotations.push({
@@ -1419,6 +1512,9 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
               `Questão ${q.numero} errada no simulado fechado (marcou ${q.resposta}, gabarito ${q.gabarito}). Revisar conteúdo.`,
             corrigido: false,
             origem: 'Simulado Fechado',
+            simulado_id: sim.id,
+            simulado_titulo: sim.titulo,
+            simulado_questao_numero: q.numero,
             questao: {
               enunciado: Array.isArray(q.alternativas) && q.alternativas.length ? q.enunciado : split.statement,
               alternativas: alternatives,
@@ -1428,6 +1524,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
             },
           });
           existingIds.add(simErrId);
+          existingSimQuestionKeys.add(simQKey);
         }
       }
     });
@@ -3715,6 +3812,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [hasPendingCloudChanges, setHasPendingCloudChanges] = useState<boolean>(
     () => initialScope !== 'offline_guest' && hasPersistedPendingSync(loadSyncMeta(initialScope)),
   );
+  const [pendingLocalChangesCount, setPendingLocalChangesCount] = useState<number>(() => {
+    try {
+      const raw = localStorage.getItem(`estuda_pending_changes_count_${initialScope}`);
+      const parsed = Number(raw);
+      if (Number.isFinite(parsed) && parsed > 0) return Math.floor(parsed);
+    } catch {
+      // ignore
+    }
+    return initialScope !== 'offline_guest' && hasPersistedPendingSync(loadSyncMeta(initialScope))
+      ? 1
+      : 0;
+  });
+
+  useEffect(() => {
+    if (!hasPendingCloudChanges) {
+      setPendingLocalChangesCount(0);
+      try {
+        localStorage.setItem(`estuda_pending_changes_count_${activeScopeRef.current}`, '0');
+      } catch {
+        // ignore
+      }
+    }
+  }, [hasPendingCloudChanges]);
   const [drivePermissionNeedsPicker, setDrivePermissionNeedsPicker] = useState<{
     folderId: string;
     folderName: string;
@@ -4402,6 +4522,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (hasCustomOfflineData) {
         pendingCloudSyncRef.current = true;
         setHasPendingCloudChanges((prev) => (prev ? prev : true));
+        setPendingLocalChangesCount((prev) => {
+          const next = prev + 1;
+          try {
+            localStorage.setItem(`estuda_pending_changes_count_${scope}`, String(next));
+          } catch {
+            // ignore
+          }
+          return next;
+        });
       }
     }, 280);
 
@@ -10785,12 +10914,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const results = session.questions.map((q, idx) => {
         const selected = session.answers[idx]?.resposta || '';
         const correctAns = normalizeAnswer(q.gabarito);
+        const qSeconds = Math.max(0, Math.round(session.questionTimesSeconds?.[idx] || 0));
         return {
           ...q,
           numero: idx + 1,
           resposta: selected,
           gabarito: correctAns,
           correta: selected === correctAns,
+          tempo_segundos: qSeconds,
         };
       });
       const correctCount = results.filter((r) => r.correta).length;
@@ -10874,19 +11005,47 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     });
   }, []);
 
-  const previousQuizQuestion = useCallback(() => {
-    setQuiz((prev) => {
-      if (!prev || prev.index <= 0) return prev;
-      return { ...prev, index: prev.index - 1 };
-    });
+  const flushQuestionElapsed = useCallback((session: QuizSession, nowMs: number): number[] => {
+    const times = Array.from({ length: session.questions.length }, (_, i) =>
+      Math.max(0, Number(session.questionTimesSeconds?.[i] || 0)),
+    );
+    if (session.index >= 0 && session.index < session.questions.length) {
+      const enteredAt = session.questionEnteredAt || session.startedAt || nowMs;
+      const deltaSec = Math.max(0, Math.round((nowMs - enteredAt) / 1000));
+      times[session.index] = (times[session.index] || 0) + deltaSec;
+    }
+    return times;
   }, []);
 
-  const goToQuizQuestion = useCallback((index: number) => {
+  const previousQuizQuestion = useCallback(() => {
+    const now = Date.now();
     setQuiz((prev) => {
-      if (!prev || index < 0 || index >= prev.questions.length) return prev;
-      return { ...prev, index };
+      if (!prev || prev.index <= 0) return prev;
+      return {
+        ...prev,
+        questionTimesSeconds: flushQuestionElapsed(prev, now),
+        questionEnteredAt: now,
+        index: prev.index - 1,
+      };
     });
-  }, []);
+  }, [flushQuestionElapsed]);
+
+  const goToQuizQuestion = useCallback(
+    (index: number) => {
+      const now = Date.now();
+      setQuiz((prev) => {
+        if (!prev || index < 0 || index >= prev.questions.length) return prev;
+        if (index === prev.index) return prev;
+        return {
+          ...prev,
+          questionTimesSeconds: flushQuestionElapsed(prev, now),
+          questionEnteredAt: now,
+          index,
+        };
+      });
+    },
+    [flushQuestionElapsed],
+  );
 
   const finishQuizSession = useCallback(() => {
     const currentQuiz = quizRef.current;
@@ -10894,6 +11053,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const updatedAnswers = [...currentQuiz.answers];
     const newErrorAnnotations: ErrorNotebookEntry[] = [];
     const todayBr = localDateBrazilian();
+
+    const now = Date.now();
+    const finalQuestionTimes = flushQuestionElapsed(currentQuiz, now);
+    const currentTimerSec = computeCurrentTimerSeconds(timerState, now);
+    const extraDelta = timerState.startedAt ? Math.max(0, currentTimerSec - currentQuiz.timerBaseline) : 0;
+    const totalStudySeconds = currentQuiz.studySeconds + extraDelta;
+    const elapsedSeconds = currentQuiz.startedAt ? Math.max(0, Math.floor((now - currentQuiz.startedAt) / 1000)) : 0;
 
     if (currentQuiz.kind === 'simulation' || currentQuiz.submittedSimulationId) {
       currentQuiz.questions.forEach((q, idx) => {
@@ -10907,41 +11073,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             gabarito: correctAns,
             pending: false,
           };
-          if (!isCorrect) {
-            const split = splitExamQuestion(q.enunciado);
-            const alternatives = q.alternativas?.length ? q.alternativas : split.alternatives;
-            newErrorAnnotations.push({
-              id: `sim-err-${currentQuiz.id}-${idx + 1}-${uid(6)}`,
-              data: todayBr,
-              materia: q.materia,
-              tipo: 'Erro em Simulado Fechado',
-              texto:
-                q.comentario?.trim() ||
-                `Questão ${idx + 1} errada no simulado fechado (marcou ${ans.resposta}, gabarito ${correctAns}). Revisar conteúdo.`,
-              corrigido: false, // Pendente de Correção
-              origem: 'Simulado Fechado',
-              questao: {
-                enunciado: q.alternativas?.length ? q.enunciado : split.statement,
-                alternativas: alternatives,
-                resposta: ans.resposta,
-                gabarito: correctAns,
-                comentario: q.comentario || '',
-              },
-            });
-          }
         }
       });
     }
 
-    const now = Date.now();
-    const currentTimerSec = computeCurrentTimerSeconds(timerState, now);
-    const extraDelta = timerState.startedAt ? Math.max(0, currentTimerSec - currentQuiz.timerBaseline) : 0;
-    const totalStudySeconds = currentQuiz.studySeconds + extraDelta;
-    const elapsedSeconds = currentQuiz.startedAt ? Math.max(0, Math.floor((now - currentQuiz.startedAt) / 1000)) : 0;
-
     const snapshot: QuizSession = {
       ...currentQuiz,
       answers: updatedAnswers,
+      questionTimesSeconds: finalQuestionTimes,
+      questionEnteredAt: now,
       index: currentQuiz.questions.length,
       completed: true,
       studySeconds: totalStudySeconds,
@@ -10959,12 +11099,50 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       snapshot.savedResult = record;
     }
 
+    const resolvedSimId = record?.id || snapshot.savedResult?.id || currentQuiz.id;
+    const resolvedSimTitle =
+      record?.titulo || snapshot.savedResult?.titulo || currentQuiz.titulo || 'Simulado Fechado';
+
+    if (currentQuiz.kind === 'simulation' || currentQuiz.submittedSimulationId) {
+      currentQuiz.questions.forEach((q, idx) => {
+        const ans = updatedAnswers[idx];
+        if (ans?.resposta && !ans.correta) {
+          const correctAns = ans.gabarito || normalizeAnswer(q.gabarito);
+          const split = splitExamQuestion(q.enunciado);
+          const alternatives = q.alternativas?.length ? q.alternativas : split.alternatives;
+          newErrorAnnotations.push({
+            id: `sim-err-${resolvedSimId}-${idx + 1}`,
+            data: todayBr,
+            materia: q.materia,
+            tipo: 'Erro em Simulado Fechado',
+            texto:
+              q.comentario?.trim() ||
+              `Questão ${idx + 1} errada no simulado fechado (marcou ${ans.resposta}, gabarito ${correctAns}). Revisar conteúdo.`,
+            corrigido: false, // Pendente de Correção
+            origem: 'Simulado Fechado',
+            simulado_id: resolvedSimId,
+            simulado_titulo: resolvedSimTitle,
+            simulado_questao_numero: idx + 1,
+            questao: {
+              enunciado: q.alternativas?.length ? q.enunciado : split.statement,
+              alternativas: alternatives,
+              resposta: ans.resposta,
+              gabarito: correctAns,
+              comentario: q.comentario || '',
+            },
+          });
+        }
+      });
+    }
+
     setDb((oldDb) => {
       const nextCompleted = record
         ? [record, ...oldDb.completedSimulations.filter((s) => s.id !== record.id)]
         : oldDb.completedSimulations;
-      const nextAnnotations = newErrorAnnotations.length
-        ? [...newErrorAnnotations, ...oldDb.annotations]
+      const existingIds = new Set(oldDb.annotations.map((a) => a.id));
+      const dedupedNewErrors = newErrorAnnotations.filter((e) => !existingIds.has(e.id));
+      const nextAnnotations = dedupedNewErrors.length
+        ? [...dedupedNewErrors, ...oldDb.annotations]
         : oldDb.annotations;
       return {
         ...oldDb,
@@ -10984,6 +11162,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     allocateQuizStudyTimeToDb,
     buildCompletedSimulationRecord,
     computeCurrentTimerSeconds,
+    flushQuestionElapsed,
     timerState,
     toast,
   ]);
@@ -10995,14 +11174,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       finishQuizSession();
       return;
     }
+    const now = Date.now();
     setQuiz((prev) => {
       if (!prev) return prev;
       return {
         ...prev,
+        questionTimesSeconds: flushQuestionElapsed(prev, now),
+        questionEnteredAt: now,
         index: prev.index + 1,
       };
     });
-  }, [finishQuizSession, quiz]);
+  }, [finishQuizSession, flushQuestionElapsed, quiz]);
 
   const cancelQuizSession = useCallback(() => {
     setQuiz(null);
@@ -11028,7 +11210,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           const split = splitExamQuestion(q.enunciado);
           const alternatives = q.alternativas?.length ? q.alternativas : split.alternatives;
           errorItems.push({
-            id: `sim-err-${session.id}-${idx + 1}-${uid(6)}`,
+            id: `sim-err-${record.id}-${idx + 1}`,
             data: todayBr,
             materia: q.materia,
             tipo: 'Erro em Simulado Fechado',
@@ -11037,6 +11219,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               `Questão ${idx + 1} errada no simulado fechado (marcou ${ans.resposta}, gabarito ${correctAns}). Revisar conteúdo.`,
             corrigido: false,
             origem: 'Simulado Fechado',
+            simulado_id: record.id,
+            simulado_titulo: record.titulo,
+            simulado_questao_numero: idx + 1,
             questao: {
               enunciado: q.alternativas?.length ? q.enunciado : split.statement,
               alternativas: alternatives,
@@ -11049,8 +11234,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
 
       setDb((oldDb) => {
+        const existingIds = new Set(oldDb.annotations.map((a) => a.id));
         const existingAnnotationTexts = new Set(oldDb.annotations.map((a) => a.questao?.enunciado || a.texto));
-        const filteredNewErrors = errorItems.filter((e) => !existingAnnotationTexts.has(e.questao?.enunciado || e.texto));
+        const filteredNewErrors = errorItems.filter(
+          (e) => !existingIds.has(e.id) && !existingAnnotationTexts.has(e.questao?.enunciado || e.texto),
+        );
         return {
           ...oldDb,
           completedSimulations: [record, ...oldDb.completedSimulations.filter((s) => s.id !== record.id)],
@@ -11230,19 +11418,56 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               return item;
             }
             localMutated = true;
+            const isSimErr =
+              Boolean(item.simulado_id || item.simulado_titulo) ||
+              item.id.startsWith('sim-err-') ||
+              item.origem === 'Simulado Fechado' ||
+              item.tipo === 'Erro em Simulado Fechado';
+            const preservedSimTitle =
+              isSimErr && !item.simulado_titulo
+                ? prev.completedSimulations.find((s) => item.id.startsWith(`sim-err-${s.id}-`))?.titulo ||
+                  item.arquivo_prova ||
+                  item.materia
+                : item.simulado_titulo;
             return {
               ...item,
               materia: cleanMateria,
               tipo: cleanTipo,
               texto: cleanTexto,
+              ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
               ...(updatedQuestao ? { questao: updatedQuestao } : {}),
             };
           });
           if (!localMutated) return prev;
           changed = true;
+          const targetEntry = nextAnnotations.find((a) => a.id === id);
+          const nextCompletedSimulations = targetEntry
+            ? prev.completedSimulations.map((sim) => {
+                const matchesSim =
+                  targetEntry.simulado_id === sim.id ||
+                  targetEntry.id.startsWith(`sim-err-${sim.id}-`);
+                if (!matchesSim) return sim;
+                let simTouched = false;
+                const prefix = `sim-err-${sim.id}-`;
+                const parsedNum =
+                  targetEntry.simulado_questao_numero ??
+                  (targetEntry.id.startsWith(prefix)
+                    ? Number(targetEntry.id.slice(prefix.length).split('-')[0])
+                    : NaN);
+                const nextQuestoes = sim.questoes.map((q) => {
+                  if (q.numero === parsedNum && q.materia !== cleanMateria) {
+                    simTouched = true;
+                    return { ...q, materia: cleanMateria };
+                  }
+                  return q;
+                });
+                return simTouched ? { ...sim, questoes: nextQuestoes } : sim;
+              })
+            : prev.completedSimulations;
           return {
             ...prev,
             annotations: nextAnnotations,
+            completedSimulations: nextCompletedSimulations,
           };
         });
       }
@@ -11269,12 +11494,65 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           })),
         }));
       } else {
-        setDb((prev) => ({
-          ...prev,
-          annotations: prev.annotations.map((item) =>
-            item.id === id ? { ...item, materia: cleanMateria } : item,
-          ),
-        }));
+        setDb((prev) => {
+          let updatedTarget: ErrorNotebookEntry | null = null;
+          const nextAnnotations = prev.annotations.map((item) => {
+            if (item.id !== id) return item;
+            const isSimErr =
+              Boolean(item.simulado_id || item.simulado_titulo) ||
+              item.id.startsWith('sim-err-') ||
+              item.origem === 'Simulado Fechado' ||
+              item.tipo === 'Erro em Simulado Fechado';
+            const matchedSim = isSimErr
+              ? prev.completedSimulations.find(
+                  (s) => s.id === item.simulado_id || item.id.startsWith(`sim-err-${s.id}-`),
+                )
+              : undefined;
+            const preservedSimTitle =
+              isSimErr && !item.simulado_titulo
+                ? matchedSim?.titulo || item.arquivo_prova || item.materia
+                : item.simulado_titulo;
+            const preservedSimId = isSimErr ? item.simulado_id || matchedSim?.id : item.simulado_id;
+            const nextItem: ErrorNotebookEntry = {
+              ...item,
+              materia: cleanMateria,
+              ...(preservedSimId ? { simulado_id: preservedSimId } : {}),
+              ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
+            };
+            updatedTarget = nextItem;
+            return nextItem;
+          });
+
+          const target = updatedTarget as ErrorNotebookEntry | null;
+          const nextCompletedSimulations = target
+            ? prev.completedSimulations.map((sim) => {
+                const matchesSim =
+                  target.simulado_id === sim.id || target.id.startsWith(`sim-err-${sim.id}-`);
+                if (!matchesSim) return sim;
+                const prefix = `sim-err-${sim.id}-`;
+                const parsedNum =
+                  target.simulado_questao_numero ??
+                  (target.id.startsWith(prefix)
+                    ? Number(target.id.slice(prefix.length).split('-')[0])
+                    : NaN);
+                let simTouched = false;
+                const nextQuestoes = sim.questoes.map((q) => {
+                  if (q.numero === parsedNum && q.materia !== cleanMateria) {
+                    simTouched = true;
+                    return { ...q, materia: cleanMateria };
+                  }
+                  return q;
+                });
+                return simTouched ? { ...sim, questoes: nextQuestoes } : sim;
+              })
+            : prev.completedSimulations;
+
+          return {
+            ...prev,
+            annotations: nextAnnotations,
+            completedSimulations: nextCompletedSimulations,
+          };
+        });
       }
       toast(`Matéria atribuída: ${cleanMateria}.`);
     },
@@ -11290,26 +11568,80 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const hasProofIds = Array.from(idSet).some((id) => id.startsWith('correcao-prova:'));
       const hasAnnotationIds = Array.from(idSet).some((id) => !id.startsWith('correcao-prova:'));
 
-      setDb((prev) => ({
-        ...prev,
-        proofFiles: hasProofIds
-          ? prev.proofFiles.map((pf) => {
-              let touched = false;
-              const nextCorrecoes = pf.correcoes.map((corr) => {
-                const entryId = `correcao-prova:${pf.kind}:${pf.bank}:${pf.name}:${corr.id}`;
-                if (!idSet.has(entryId)) return corr;
-                touched = true;
-                return { ...corr, materia: cleanMateria, atualizado_em: now };
-              });
-              return touched ? { ...pf, correcoes: nextCorrecoes } : pf;
+      setDb((prev) => {
+        const updatedSimTargets: ErrorNotebookEntry[] = [];
+        const nextAnnotations = hasAnnotationIds
+          ? prev.annotations.map((item) => {
+              if (!idSet.has(item.id)) return item;
+              const isSimErr =
+                Boolean(item.simulado_id || item.simulado_titulo) ||
+                item.id.startsWith('sim-err-') ||
+                item.origem === 'Simulado Fechado' ||
+                item.tipo === 'Erro em Simulado Fechado';
+              const matchedSim = isSimErr
+                ? prev.completedSimulations.find(
+                    (s) => s.id === item.simulado_id || item.id.startsWith(`sim-err-${s.id}-`),
+                  )
+                : undefined;
+              const preservedSimTitle =
+                isSimErr && !item.simulado_titulo
+                  ? matchedSim?.titulo || item.arquivo_prova || item.materia
+                  : item.simulado_titulo;
+              const preservedSimId = isSimErr ? item.simulado_id || matchedSim?.id : item.simulado_id;
+              const nextItem: ErrorNotebookEntry = {
+                ...item,
+                materia: cleanMateria,
+                ...(preservedSimId ? { simulado_id: preservedSimId } : {}),
+                ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
+              };
+              if (isSimErr) updatedSimTargets.push(nextItem);
+              return nextItem;
             })
-          : prev.proofFiles,
-        annotations: hasAnnotationIds
-          ? prev.annotations.map((item) =>
-              idSet.has(item.id) ? { ...item, materia: cleanMateria } : item,
-            )
-          : prev.annotations,
-      }));
+          : prev.annotations;
+
+        const nextCompletedSimulations = updatedSimTargets.length
+          ? prev.completedSimulations.map((sim) => {
+              const prefix = `sim-err-${sim.id}-`;
+              const matchingNums = new Set<number>();
+              updatedSimTargets.forEach((t) => {
+                if (t.simulado_id === sim.id || t.id.startsWith(prefix)) {
+                  const num =
+                    t.simulado_questao_numero ??
+                    (t.id.startsWith(prefix) ? Number(t.id.slice(prefix.length).split('-')[0]) : NaN);
+                  if (Number.isFinite(num) && num > 0) matchingNums.add(num);
+                }
+              });
+              if (!matchingNums.size) return sim;
+              let simTouched = false;
+              const nextQuestoes = sim.questoes.map((q) => {
+                if (matchingNums.has(q.numero) && q.materia !== cleanMateria) {
+                  simTouched = true;
+                  return { ...q, materia: cleanMateria };
+                }
+                return q;
+              });
+              return simTouched ? { ...sim, questoes: nextQuestoes } : sim;
+            })
+          : prev.completedSimulations;
+
+        return {
+          ...prev,
+          proofFiles: hasProofIds
+            ? prev.proofFiles.map((pf) => {
+                let touched = false;
+                const nextCorrecoes = pf.correcoes.map((corr) => {
+                  const entryId = `correcao-prova:${pf.kind}:${pf.bank}:${pf.name}:${corr.id}`;
+                  if (!idSet.has(entryId)) return corr;
+                  touched = true;
+                  return { ...corr, materia: cleanMateria, atualizado_em: now };
+                });
+                return touched ? { ...pf, correcoes: nextCorrecoes } : pf;
+              })
+            : prev.proofFiles,
+          annotations: nextAnnotations,
+          completedSimulations: nextCompletedSimulations,
+        };
+      });
       toast(`${idSet.size} registro(s) associado(s) à matéria ${cleanMateria}.`);
     },
     [toast],
@@ -11521,13 +11853,30 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 
   const startErrorNotebookQuiz = useCallback(
-    (subjectFilter = 'Todas as Matérias', onlyPending = true) => {
+    (subjectFilter = 'Todas as Matérias', onlyPending = true, simuladoKey?: string) => {
       const filterNorm = normalizeSearch(subjectFilter);
       const registeredNorms = new Set(fixedSubjects.map((s) => normalizeSearch(visibleName(s))));
       const entries = allErrorEntries.filter((entry) => {
         if (!entry.questao?.enunciado) return false;
         if (onlyPending && entry.corrigido) return false;
-        if (subjectFilter === '__UNASSIGNED__') {
+        if (subjectFilter === '__SIMULADOS__') {
+          const isSim =
+            Boolean(entry.simulado_id || entry.simulado_titulo) ||
+            entry.id.startsWith('sim-err-') ||
+            entry.origem === 'Simulado Fechado' ||
+            entry.tipo === 'Erro em Simulado Fechado';
+          if (!isSim) return false;
+          if (simuladoKey && simuladoKey !== 'all') {
+            const matchedSim = db.completedSimulations.find(
+              (s) => s.id === entry.simulado_id || entry.id.startsWith(`sim-err-${s.id}-`),
+            );
+            const entrySimKey =
+              entry.simulado_id ||
+              matchedSim?.id ||
+              `title:${normalizeSearch(visibleName(entry.simulado_titulo || entry.arquivo_prova || entry.materia || 'Simulado Fechado'))}`;
+            if (entrySimKey !== simuladoKey) return false;
+          }
+        } else if (subjectFilter === '__UNASSIGNED__') {
           const entryNorm = normalizeSearch(visibleName(entry.materia));
           if (entryNorm && registeredNorms.has(entryNorm)) return false;
         } else if (subjectFilter !== 'Todas as Matérias') {
@@ -11562,7 +11911,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         id: uid(16),
         kind: 'training',
         titulo: 'Revisão do Caderno de Erros',
-        materia: subjectFilter === '__UNASSIGNED__' ? 'Sem matéria cadastrada' : subjectFilter,
+        materia:
+          subjectFilter === '__SIMULADOS__'
+            ? 'Simulados'
+            : subjectFilter === '__UNASSIGNED__'
+              ? 'Sem matéria cadastrada'
+              : subjectFilter,
         questions,
         index: 0,
         answers: Array(questions.length),
@@ -11572,7 +11926,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setActivePage('Treino Diário');
       toast(`Iniciando bateria com ${questions.length} questão(ões) do Caderno de Erros!`);
     },
-    [allErrorEntries, ensureTimerRunning, fixedSubjects, getCurrentTimerSeconds, toast],
+    [allErrorEntries, db.completedSimulations, ensureTimerRunning, fixedSubjects, getCurrentTimerSeconds, toast],
   );
 
   // Case Law
@@ -15030,6 +15384,110 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [autoSyncFileToDrive, resolveCanonicalDiscipline],
   );
 
+  const importParsedQuestions = useCallback(
+    async (
+      rawQuestions: Question[],
+      options: {
+        subject: string;
+        asSimulation: boolean;
+        title?: string;
+        sourceFileName?: string;
+      },
+    ): Promise<{ count: number; materia: string; simulado: boolean }> => {
+      const defaultSubject =
+        resolveCanonicalDiscipline(
+          options.subject,
+          dbRef.current.questions,
+          dbRef.current.fixedSubjects,
+        ) ||
+        visibleName(options.subject) ||
+        'Geral';
+
+      const sanitized: Question[] = [];
+      for (let i = 0; i < rawQuestions.length; i++) {
+        const q = rawQuestions[i];
+        const statement = (q.enunciado || '').trim();
+        const answer = normalizeAnswer(q.gabarito || '');
+        if (!statement || !['A', 'B', 'C', 'D', 'E'].includes(answer)) continue;
+        const cleanAlts = (q.alternativas || [])
+          .map((a) => ({
+            letra: String(a.letra || '').trim().toUpperCase(),
+            texto: String(a.texto || '').trim(),
+          }))
+          .filter((a) => /^[A-E]$/.test(a.letra) && a.texto.length > 0);
+        const qSubject =
+          resolveCanonicalDiscipline(
+            q.materia || defaultSubject,
+            dbRef.current.questions,
+            dbRef.current.fixedSubjects,
+          ) || defaultSubject;
+        sanitized.push({
+          id: q.id || uid(20),
+          numero: sanitized.length + 1,
+          materia: qSubject,
+          enunciado: statement,
+          alternativas: cleanAlts,
+          gabarito: answer,
+          comentario: (q.comentario || '').trim(),
+          tipo: cleanAlts.length >= 2 ? 'ME' : q.tipo === 'ME' ? 'ME' : 'CE',
+        });
+      }
+
+      if (!sanitized.length) {
+        throw new Error(
+          'Nenhuma questão válida para importar. Verifique se cada questão possui enunciado e gabarito (C/E ou A–E).',
+        );
+      }
+
+      const serializedLines = sanitized
+        .map((q, idx) => {
+          const alts = q.alternativas.length
+            ? `\n${q.alternativas.map((a) => `[${a.letra}] ${a.texto}`).join('\n')}`
+            : '';
+          const comment = q.comentario ? `\nComentário: ${q.comentario}` : '';
+          return `Questão ${idx + 1}\n${q.enunciado}${alts}\nGabarito: ${q.gabarito}${comment}`;
+        })
+        .join('\n\n');
+
+      const simTitle =
+        visibleName(options.title || '') ||
+        (options.sourceFileName ? displayBaseName(options.sourceFileName) : '') ||
+        `${defaultSubject} (${localDateBrazilian()})`;
+      const safeFileName =
+        options.sourceFileName ||
+        `${cleanSafeName(simTitle, 'questoes_importadas')}.txt`;
+      const generatedFile = new File([serializedLines], safeFileName, {
+        type: 'text/plain;charset=utf-8',
+      });
+
+      if (options.asSimulation) {
+        const sim: SubmittedSimulation = {
+          id: uid(32),
+          titulo: simTitle,
+          materia: defaultSubject,
+          arquivo: safeFileName,
+          data: localDateTimeBrazilian(),
+          criado_em: new Date().toISOString().slice(0, 19),
+          questoes: sanitized.map((q, idx) => ({ ...q, numero: idx + 1 })),
+        };
+        setDb((prev) => ({
+          ...prev,
+          submittedSimulations: [sim, ...prev.submittedSimulations],
+        }));
+        await autoSyncFileToDrive(generatedFile, safeFileName, 'Provas e Gabaritos');
+        return { count: sanitized.length, materia: defaultSubject, simulado: true };
+      }
+
+      setDb((prev) => ({
+        ...prev,
+        questions: [...prev.questions, ...sanitized],
+      }));
+      await autoSyncFileToDrive(generatedFile, safeFileName, 'Questões');
+      return { count: sanitized.length, materia: defaultSubject, simulado: false };
+    },
+    [autoSyncFileToDrive, resolveCanonicalDiscipline],
+  );
+
   const addManualQuestion = useCallback(
     (payload: {
       materia: string;
@@ -15617,6 +16075,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         addCriticalPoint,
         deleteCriticalPoint,
         importQuestionsTxt,
+        importParsedQuestions,
         addManualQuestion,
         convertLawPdf,
         convertExamPdf,
@@ -15639,6 +16098,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         lastCacheVerifiedAt,
         isSyncingDrive,
         hasPendingCloudChanges,
+        pendingLocalChangesCount,
+        totalPendingSyncCount:
+          Math.max(hasPendingCloudChanges ? 1 : 0, pendingLocalChangesCount) +
+          gasOperationQueue.length +
+          driveUploadOutboxItems.length,
         drivePermissionNeedsPicker,
         authorizeDriveFolderViaPicker,
         restoreProgress,

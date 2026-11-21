@@ -47,6 +47,8 @@ import {
   WeeklyStudyHoursD3Chart,
 } from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
 import { CareerAchievementsBanner } from '../components/performance/CareerAchievementsBanner';
+import { CareerOfficialPrintSheet } from '../components/print/CareerOfficialPrintSheet';
+import { MAX_PINNED_MEDALS, computeCareerSummary } from '../lib/careerGamification';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
@@ -235,8 +237,53 @@ const SubjectPerformanceListRow = React.memo(
 ) as (props: RowComponentProps<SubjectPerformanceListRowProps>) => React.ReactElement | null;
 
 export const PerformancePage: React.FC = () => {
-  const { db, fixedSubjects, setActivePage, deleteStudyTimeRecord, requestConfirm, googleUser, toast } =
-    useStudy();
+  const {
+    db,
+    fixedSubjects,
+    setActivePage,
+    deleteStudyTimeRecord,
+    requestConfirm,
+    updatePreferences,
+    googleUser,
+    toast,
+  } = useStudy();
+
+  const careerSummary = useMemo(() => computeCareerSummary(db), [db]);
+  const pinnedMedalIds = db.preferences?.career_meta?.pinned_medals || [];
+  const holderName =
+    googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal';
+
+  const handleTogglePinMedal = useCallback(
+    (medalId: string) => {
+      const meta = db.preferences?.career_meta || {};
+      const current = Array.isArray(meta.pinned_medals) ? meta.pinned_medals : [];
+      if (current.includes(medalId)) {
+        updatePreferences({
+          career_meta: {
+            ...meta,
+            pinned_medals: current.filter((id) => id !== medalId),
+          },
+        });
+        toast('Medalha removida da Vitrine de Honra.');
+        return;
+      }
+      if (current.length >= MAX_PINNED_MEDALS) {
+        toast(
+          `Limite de ${MAX_PINNED_MEDALS} medalhas na Vitrine de Honra. Desafixe uma antes de adicionar outra.`,
+          true,
+        );
+        return;
+      }
+      updatePreferences({
+        career_meta: {
+          ...meta,
+          pinned_medals: [...current, medalId],
+        },
+      });
+      toast('Medalha fixada na Vitrine de Honra (visível na tela inicial e na Certidão PDF).');
+    },
+    [db.preferences?.career_meta, toast, updatePreferences],
+  );
 
   const [subjectFilter, setSubjectFilter] = useState('Todas');
   const [historySearch, setHistorySearch] = useState('');
@@ -917,7 +964,8 @@ export const PerformancePage: React.FC = () => {
   );
 
   return (
-    <div>
+    <>
+    <div data-print-hide="true" className="print:hidden">
       <PageHeader
         eyebrow="PORTAL DA TRANSPARÊNCIA · DESEMPENHO"
         title="Evolução e horas de estudo por Matéria Fixa"
@@ -1042,7 +1090,13 @@ export const PerformancePage: React.FC = () => {
       />
 
       {/* Níveis de Carreira e Medalhas de Mérito */}
-      <CareerAchievementsBanner db={db} />
+      <CareerAchievementsBanner
+        db={db}
+        onNavigate={setActivePage}
+        onPrintOfficial={() => window.print()}
+        pinnedMedalIds={pinnedMedalIds}
+        onTogglePinMedal={handleTogglePinMedal}
+      />
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
         <article className="ce-panel p-4">
@@ -1698,6 +1752,9 @@ export const PerformancePage: React.FC = () => {
         )}
       </Panel>
     </div>
+
+    <CareerOfficialPrintSheet summary={careerSummary} holderName={holderName} />
+    </>
   );
 };
 
