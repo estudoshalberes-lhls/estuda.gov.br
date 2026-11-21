@@ -23,6 +23,7 @@ import {
 } from '../../lib/parsers';
 import { analyzeSimulationTiming } from '../../lib/simulationTimeAnalytics';
 import { Panel } from '../ui/PageHeader';
+import { StructuredLegalText } from '../ui/StructuredLegalText';
 import { WhiteboardCanvas } from './WhiteboardCanvas';
 
 interface QuizRunnerProps {
@@ -502,14 +503,21 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                         </span>
                       </div>
                     </div>
-                    <p className="m-0 text-[13px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                      {questionStatement(q)}
-                    </p>
+                    <StructuredLegalText
+                      text={questionStatement(q)}
+                      className="text-[13px] text-[var(--text)]"
+                    />
                     {reviewOpts.length > 0 && (
-                      <div className="mt-2 flex flex-col gap-1 pl-2 border-l border-[var(--line-strong)]">
+                      <div className="mt-2 flex flex-col gap-1 pl-2.5 border-l border-[var(--line-strong)]">
                         {reviewOpts.map((opt) => (
-                          <div key={opt.key} className="text-[12px] text-[var(--muted)]">
-                            <strong className="text-[var(--text)]">{opt.key}.</strong> {opt.text}
+                          <div
+                            key={opt.key}
+                            className="flex items-start gap-1.5 text-[12px] leading-relaxed text-[var(--muted)]"
+                          >
+                            <strong className="font-mono-num text-[var(--text)] shrink-0">
+                              {opt.key})
+                            </strong>
+                            <span className="flex-1 text-justify">{opt.text}</span>
                           </div>
                         ))}
                       </div>
@@ -526,7 +534,14 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                     </div>
                     {q.comentario && (
                       <div className="ce-notice mt-2.5 text-[12px]">
-                        <strong className="text-[var(--text)]">Comentário:</strong> {q.comentario}
+                        <div className="font-bold text-[var(--text)] mb-1">
+                          Comentário e Fundamentação:
+                        </div>
+                        <StructuredLegalText
+                          text={q.comentario}
+                          compact
+                          className="text-[12px] text-[var(--muted)]"
+                        />
                       </div>
                     )}
                   </div>
@@ -968,9 +983,10 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
       >
         <div className="min-w-0">
           <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-4">
-            <p className="m-0 text-[14.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-              {statement}
-            </p>
+            <StructuredLegalText
+              text={statement}
+              className="text-[14.5px] text-[var(--text)]"
+            />
           </div>
 
           <div className="mt-3.5">
@@ -1033,7 +1049,7 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                       <span className="font-mono-num font-extrabold text-[var(--accent)] shrink-0 mt-0.5">
                         [{opt.key}]
                       </span>
-                      <span className="flex-1 min-w-0">{opt.text}</span>
+                      <span className="flex-1 min-w-0 text-justify leading-relaxed">{opt.text}</span>
                     </button>
                   );
                 })}
@@ -1090,9 +1106,11 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
                 )}
               </div>
               {question.comentario && (
-                <p className="m-0 text-[12.5px] leading-relaxed text-[var(--muted)]">
-                  {question.comentario}
-                </p>
+                <StructuredLegalText
+                  text={question.comentario}
+                  compact
+                  className="text-[12.5px] text-[var(--muted)]"
+                />
               )}
             </div>
           )}

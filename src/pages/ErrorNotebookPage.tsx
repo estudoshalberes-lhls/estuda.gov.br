@@ -45,6 +45,7 @@ import { exportErrorNotebookPdf } from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { CompletedSimulation, ErrorNotebookEntry, ModuleName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
 import { ErrorNotebookOfficialPrintSheet } from '../components/errors/ErrorNotebookOfficialPrintSheet';
 
@@ -246,11 +247,15 @@ const ErrorNotebookEntryRow = React.memo(
     const isEditing = Boolean(entry && editingEntry?.id === entry.id);
     const [rawTextBeforeFormat, setRawTextBeforeFormat] = useState<string | null>(null);
     const [justAutoFormatted, setJustAutoFormatted] = useState(false);
+    const [rawEnunciadoBeforeFormat, setRawEnunciadoBeforeFormat] = useState<string | null>(null);
+    const [enunciadoAutoFormatted, setEnunciadoAutoFormatted] = useState(false);
 
     useEffect(() => {
       if (!isEditing) {
         setRawTextBeforeFormat(null);
         setJustAutoFormatted(false);
+        setRawEnunciadoBeforeFormat(null);
+        setEnunciadoAutoFormatted(false);
       }
     }, [isEditing, entry?.id]);
 
@@ -316,6 +321,45 @@ const ErrorNotebookEntryRow = React.memo(
       setRawTextBeforeFormat(editingEntry.texto);
       setJustAutoFormatted(true);
       setEditingEntry({ ...editingEntry, texto: formatted });
+    };
+
+    const handlePasteEnunciado = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+      if (!editingEntry) return;
+      const pasted = e.clipboardData.getData('text/plain');
+      if (!pasted || !pasted.trim()) return;
+      e.preventDefault();
+      const target = e.currentTarget;
+      const current = editingEntry.enunciado ?? '';
+      const start = target.selectionStart ?? current.length;
+      const end = target.selectionEnd ?? current.length;
+      const rawUnformatted = current.slice(0, start) + pasted + current.slice(end);
+      const { nextValue, nextCursorPos, changed } = insertFormattedPaste(
+        current,
+        start,
+        end,
+        pasted,
+      );
+      setRawEnunciadoBeforeFormat(changed ? rawUnformatted : null);
+      setEnunciadoAutoFormatted(changed);
+      setEditingEntry({ ...editingEntry, enunciado: nextValue });
+      requestAnimationFrame(() => {
+        if (target && document.activeElement === target) {
+          target.setSelectionRange(nextCursorPos, nextCursorPos);
+        }
+      });
+    };
+
+    const handleManualFormatEnunciado = () => {
+      if (!editingEntry || !(editingEntry.enunciado ?? '').trim()) return;
+      const current = editingEntry.enunciado ?? '';
+      const formatted = formatCorrectionTextStructured(current);
+      if (formatted === current) {
+        setEnunciadoAutoFormatted(true);
+        return;
+      }
+      setRawEnunciadoBeforeFormat(current);
+      setEnunciadoAutoFormatted(true);
+      setEditingEntry({ ...editingEntry, enunciado: formatted });
     };
 
     return (
@@ -613,17 +657,56 @@ const ErrorNotebookEntryRow = React.memo(
               {entry.questao && (
                 <>
                   <div className="sm:col-span-2">
-                    <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                      Enunciado / Questão vinculada
-                    </label>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <label className="block text-[11px] font-bold text-[var(--muted)]">
+                          Enunciado / Questão vinculada
+                        </label>
+                        {enunciadoAutoFormatted && (
+                          <span className="text-[10.5px] font-bold text-[var(--good)]">
+                            Texto organizado automaticamente
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        {rawEnunciadoBeforeFormat !== null && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingEntry({
+                                ...editingEntry,
+                                enunciado: rawEnunciadoBeforeFormat,
+                              });
+                              setRawEnunciadoBeforeFormat(null);
+                              setEnunciadoAutoFormatted(false);
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                          >
+                            <Undo2 className="w-3 h-3" />
+                            Desfazer ajuste
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={handleManualFormatEnunciado}
+                          disabled={!(editingEntry.enunciado ?? '').trim()}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[10.5px] font-bold text-[var(--accent)] hover:border-[var(--accent)] disabled:opacity-45 cursor-pointer"
+                        >
+                          <AlignLeft className="w-3 h-3" />
+                          Organizar texto
+                        </button>
+                      </div>
+                    </div>
                     <textarea
                       value={editingEntry.enunciado ?? ''}
-                      onChange={(e) =>
-                        setEditingEntry({ ...editingEntry, enunciado: e.target.value })
-                      }
+                      onChange={(e) => {
+                        setEditingEntry({ ...editingEntry, enunciado: e.target.value });
+                        if (enunciadoAutoFormatted) setEnunciadoAutoFormatted(false);
+                      }}
+                      onPaste={handlePasteEnunciado}
                       onBlur={() => flushEditingDraft(true)}
-                      rows={2}
-                      className="ce-textarea"
+                      rows={4}
+                      className="ce-textarea leading-relaxed"
                     />
                   </div>
                   <div>
@@ -679,9 +762,10 @@ const ErrorNotebookEntryRow = React.memo(
               </div>
             </div>
           ) : (
-            <p className="m-0 text-[13.5px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-              {entry.texto}
-            </p>
+            <StructuredLegalText
+              text={entry.texto}
+              className="text-[13.5px] text-[var(--text)]"
+            />
           )}
 
           {entry.questao && (
@@ -690,14 +774,24 @@ const ErrorNotebookEntryRow = React.memo(
                 Ver questão vinculada
                 {entry.arquivo_prova ? ` (${visibleName(entry.arquivo_prova)})` : ''}
               </summary>
-              <div className="mt-2 pt-2 border-t border-[var(--line)] text-[12.5px] leading-relaxed text-[var(--text)]">
-                <p className="m-0 whitespace-pre-wrap">{entry.questao.enunciado}</p>
+              <div className="mt-2 pt-2 border-t border-[var(--line)] text-[12.5px] text-[var(--text)]">
+                <StructuredLegalText
+                  text={entry.questao.enunciado}
+                  compact
+                  className="text-[12.5px] text-[var(--text)]"
+                />
                 {entry.questao.alternativas?.length > 0 && (
                   <div className="mt-2 flex flex-col gap-1 text-[var(--muted)]">
                     {entry.questao.alternativas.map((alt) => (
-                      <span key={alt.letra}>
-                        <strong className="text-[var(--text)]">[{alt.letra}]</strong> {alt.texto}
-                      </span>
+                      <div
+                        key={alt.letra}
+                        className="flex items-start gap-1.5 leading-relaxed"
+                      >
+                        <strong className="font-mono-num text-[var(--text)] shrink-0">
+                          [{alt.letra}]
+                        </strong>
+                        <span className="flex-1 text-justify">{alt.texto}</span>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -2790,14 +2884,21 @@ export const ErrorNotebookPage: React.FC = () => {
           <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-4">
             {activeFlashcard.questao?.enunciado ? (
               <>
-                <p className="m-0 text-[14px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                  {activeFlashcard.questao.enunciado}
-                </p>
+                <StructuredLegalText
+                  text={activeFlashcard.questao.enunciado}
+                  className="text-[14px] text-[var(--text)]"
+                />
                 {activeFlashcard.questao.alternativas?.length > 0 && (
-                  <div className="mt-3 flex flex-col gap-1 text-[12.5px] text-[var(--muted)]">
+                  <div className="mt-3 flex flex-col gap-1.5 text-[12.5px] text-[var(--muted)]">
                     {activeFlashcard.questao.alternativas.map((alt) => (
-                      <div key={alt.letra}>
-                        <strong className="text-[var(--text)]">[{alt.letra}]</strong> {alt.texto}
+                      <div
+                        key={alt.letra}
+                        className="flex items-start gap-1.5 leading-relaxed"
+                      >
+                        <strong className="font-mono-num text-[var(--text)] shrink-0">
+                          [{alt.letra}]
+                        </strong>
+                        <span className="flex-1 text-justify">{alt.texto}</span>
                       </div>
                     ))}
                   </div>
@@ -2817,9 +2918,10 @@ export const ErrorNotebookPage: React.FC = () => {
                     {activeFlashcard.questao.resposta ? ` (Você marcou: ${activeFlashcard.questao.resposta})` : ''}
                   </div>
                 )}
-                <p className="m-0 text-[13px] leading-relaxed text-[var(--text)] whitespace-pre-wrap">
-                  {activeFlashcard.texto}
-                </p>
+                <StructuredLegalText
+                  text={activeFlashcard.texto}
+                  className="text-[13px] text-[var(--text)]"
+                />
                 <div className="mt-3 flex flex-wrap items-center gap-2">
                   <button
                     type="button"

@@ -5,6 +5,7 @@ import { extractOptions, formatClock, questionStatement, visibleName } from '../
 import { exportSimulationPreliminaryResultPdf } from '../lib/pdfExport';
 import { analyzeSimulationTiming } from '../lib/simulationTimeAnalytics';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 import { SimulationReportOfficialPrintSheet } from '../components/print/SimulationReportOfficialPrintSheet';
 
 export const CompletedSimulationsPage: React.FC = () => {
@@ -419,16 +420,23 @@ export const CompletedSimulationsPage: React.FC = () => {
                               {q.correta ? 'Acertou' : 'Errou'}
                             </span>
                           </div>
-                          <p className="m-0 text-[12.5px] leading-relaxed text-[var(--text)]">
-                            {questionStatement(q)}
-                          </p>
+                          <StructuredLegalText
+                            text={questionStatement(q)}
+                            compact
+                            className="text-[12.5px] text-[var(--text)]"
+                          />
                           {opts.length > 0 && (
-                            <div className="mt-1.5 flex flex-col gap-0.5 text-[11.5px] text-[var(--muted)]">
+                            <div className="mt-1.5 flex flex-col gap-1 text-[11.5px] text-[var(--muted)]">
                               {opts.map((opt) => (
-                                <span key={opt.key}>
-                                  <strong className="text-[var(--text)]">{opt.key}.</strong>{' '}
-                                  {opt.text}
-                                </span>
+                                <div
+                                  key={opt.key}
+                                  className="flex items-start gap-1.5 leading-relaxed"
+                                >
+                                  <strong className="font-mono-num text-[var(--text)] shrink-0">
+                                    {opt.key})
+                                  </strong>
+                                  <span className="flex-1 text-justify">{opt.text}</span>
+                                </div>
                               ))}
                             </div>
                           )}

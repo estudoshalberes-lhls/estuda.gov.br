@@ -792,19 +792,162 @@ details summary::-webkit-details-marker {
   }
 }
 
-.gov-error-notebook-print {
+@page gov-questions-sheet {
+  size: A4 portrait;
+  margin: 18mm 14mm 19mm 14mm;
+
+  @top-left {
+    content: "REPÚBLICA FEDERATIVA DO BRASIL · ESTUDA.GOV.BR";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #3d4f6b;
+    border-bottom: 0.5pt solid #b6c6dc;
+    padding-bottom: 2.5mm;
+    margin-bottom: 3mm;
+    vertical-align: bottom;
+  }
+
+  @top-right {
+    content: "CADERNO OFICIAL DE QUESTÕES · BANCO DE PROVAS";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #071d41;
+    border-bottom: 0.5pt solid #b6c6dc;
+    padding-bottom: 2.5mm;
+    margin-bottom: 3mm;
+    vertical-align: bottom;
+  }
+
+  @bottom-left {
+    content: "PORTAL ÚNICO DO ESTUDANTE · CADERNO OFICIAL DE QUESTÕES (A4)";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #4b5e7a;
+    border-top: 0.6pt solid #071d41;
+    padding-top: 2.5mm;
+    margin-top: 3mm;
+    vertical-align: top;
+  }
+
+  @bottom-right {
+    content: "Página " counter(page) " de " counter(pages);
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 7.5pt;
+    font-weight: 700;
+    color: #071d41;
+    border-top: 0.6pt solid #071d41;
+    padding-top: 2.5mm;
+    margin-top: 3mm;
+    vertical-align: top;
+  }
+}
+
+@page gov-questions-sheet:first {
+  margin-top: 11mm;
+
+  @top-left {
+    content: none;
+    border: none;
+  }
+
+  @top-right {
+    content: none;
+    border: none;
+  }
+}
+
+@page gov-simulation-report {
+  size: A4 portrait;
+  margin: 18mm 14mm 19mm 14mm;
+
+  @top-left {
+    content: "REPÚBLICA FEDERATIVA DO BRASIL · ESTUDA.GOV.BR";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    color: #3d4f6b;
+    border-bottom: 0.5pt solid #b6c6dc;
+    padding-bottom: 2.5mm;
+    margin-bottom: 3mm;
+    vertical-align: bottom;
+  }
+
+  @top-right {
+    content: "BOLETIM OFICIAL DE SIMULADO REALIZADO · QUESTÕES & GABARITO";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    color: #071d41;
+    border-bottom: 0.5pt solid #b6c6dc;
+    padding-bottom: 2.5mm;
+    margin-bottom: 3mm;
+    vertical-align: bottom;
+  }
+
+  @bottom-left {
+    content: "PORTAL ÚNICO DO ESTUDANTE · BOLETIM OFICIAL DE SIMULADO (A4)";
+    font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    font-size: 7pt;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #4b5e7a;
+    border-top: 0.6pt solid #071d41;
+    padding-top: 2.5mm;
+    margin-top: 3mm;
+    vertical-align: top;
+  }
+
+  @bottom-right {
+    content: "Página " counter(page) " de " counter(pages);
+    font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 7.5pt;
+    font-weight: 700;
+    color: #071d41;
+    border-top: 0.6pt solid #071d41;
+    padding-top: 2.5mm;
+    margin-top: 3mm;
+    vertical-align: top;
+  }
+}
+
+@page gov-simulation-report:first {
+  margin-top: 11mm;
+
+  @top-left {
+    content: none;
+    border: none;
+  }
+
+  @top-right {
+    content: none;
+    border: none;
+  }
+}
+
+.gov-error-notebook-print,
+.gov-official-doc-print {
   font-family: "Rawline", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   color: #071d41;
   background: #ffffff;
 }
 
-.gov-error-notebook-print .gov-en-legal-flow {
+.gov-error-notebook-print .gov-en-legal-flow,
+.gov-official-doc-print .gov-en-legal-flow {
   display: flex;
   flex-direction: column;
   gap: 3.5pt;
 }
 
-.gov-error-notebook-print .gov-en-legal-block {
+.gov-error-notebook-print .gov-en-legal-block,
+.gov-official-doc-print .gov-en-legal-block {
   margin: 0;
   text-align: justify;
   text-justify: inter-word;
@@ -814,42 +957,61 @@ details summary::-webkit-details-marker {
   widows: 3;
 }
 
-.gov-error-notebook-print .gov-en-legal-article {
+.gov-error-notebook-print .gov-en-legal-article,
+.gov-official-doc-print .gov-en-legal-article {
   margin-top: 2pt;
   padding-left: 0;
 }
 
-.gov-error-notebook-print .gov-en-legal-sumula {
+.gov-error-notebook-print .gov-en-legal-sumula,
+.gov-official-doc-print .gov-en-legal-sumula {
   margin-top: 2pt;
   padding-left: 0;
 }
 
-.gov-error-notebook-print .gov-en-legal-paragraph {
+.gov-error-notebook-print .gov-en-legal-paragraph,
+.gov-official-doc-print .gov-en-legal-paragraph {
   padding-left: 11pt;
 }
 
-.gov-error-notebook-print .gov-en-legal-inciso {
+.gov-error-notebook-print .gov-en-legal-inciso,
+.gov-official-doc-print .gov-en-legal-inciso {
   padding-left: 22pt;
   text-indent: -11pt;
 }
 
-.gov-error-notebook-print .gov-en-legal-alinea {
+.gov-error-notebook-print .gov-en-legal-alinea,
+.gov-official-doc-print .gov-en-legal-alinea {
   padding-left: 33pt;
   text-indent: -10pt;
 }
 
-.gov-error-notebook-print .gov-en-legal-bullet {
+.gov-error-notebook-print .gov-en-legal-bullet,
+.gov-official-doc-print .gov-en-legal-bullet {
   padding-left: 14pt;
   text-indent: -8pt;
 }
 
-.gov-error-notebook-print .gov-en-legal-prose {
+.gov-error-notebook-print .gov-en-legal-prose,
+.gov-official-doc-print .gov-en-legal-prose {
   padding-left: 0;
 }
 
 @media print {
   .gov-error-notebook-print {
     page: gov-error-notebook;
+  }
+
+  .gov-questions-print {
+    page: gov-questions-sheet;
+  }
+
+  .gov-simulation-report-print {
+    page: gov-simulation-report;
+  }
+
+  .gov-error-notebook-print,
+  .gov-official-doc-print {
     width: 100% !important;
     max-width: none !important;
     margin: 0 !important;
@@ -857,27 +1019,32 @@ details summary::-webkit-details-marker {
     box-shadow: none !important;
   }
 
-  .gov-error-notebook-print .gov-en-subject-header {
+  .gov-error-notebook-print .gov-en-subject-header,
+  .gov-official-doc-print .gov-en-subject-header {
     break-after: avoid;
     page-break-after: avoid;
   }
 
-  .gov-error-notebook-print .gov-en-entry-header {
+  .gov-error-notebook-print .gov-en-entry-header,
+  .gov-official-doc-print .gov-en-entry-header {
     break-after: avoid;
     page-break-after: avoid;
   }
 
-  .gov-error-notebook-print .gov-en-entry-card {
+  .gov-error-notebook-print .gov-en-entry-card,
+  .gov-official-doc-print .gov-en-entry-card {
     break-inside: avoid;
     page-break-inside: avoid;
   }
 
-  .gov-error-notebook-print .gov-en-entry-card--long {
+  .gov-error-notebook-print .gov-en-entry-card--long,
+  .gov-official-doc-print .gov-en-entry-card--long {
     break-inside: auto;
     page-break-inside: auto;
   }
 
-  .gov-error-notebook-print .gov-en-preview-only-footer {
+  .gov-error-notebook-print .gov-en-preview-only-footer,
+  .gov-official-doc-print .gov-en-preview-only-footer {
     display: none !important;
   }
 }
