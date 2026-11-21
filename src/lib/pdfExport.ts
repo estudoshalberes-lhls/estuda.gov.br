@@ -5,7 +5,7 @@ import {
   LawHighlight,
   LawItem,
 } from '../types/study';
-import { cleanSafeName, formatSequentialDeviceLabel, localDateIso, visibleName } from './parsers';
+import { cleanSafeName, formatSequentialDeviceLabel, localDateIso, normalizeSearch, visibleName } from './parsers';
 import type { CapturedD3Chart } from './d3SvgCapture';
 
 export const HIGHLIGHT_COLOR_RGB: Record<
@@ -281,83 +281,232 @@ function writeHighlightedContinuousText(
   }
 }
 
+export interface ErrorNotebookPdfOptions {
+  statusFilter?: 'pending' | 'corrected' | 'all';
+  pageBreakBySubject?: boolean;
+  scopeLabel?: string;
+}
+
 export function exportErrorNotebookPdf(
   allRows: ErrorNotebookEntry[],
-  subject: string,
+  subjects: string | string[],
   includeQuestion: boolean,
+  options?: ErrorNotebookPdfOptions,
 ): void {
-  const rows =
-    subject && subject !== 'Todas as Matérias'
-      ? allRows.filter((row) => row.materia === subject)
-      : allRows;
-  if (!rows.length) {
-    throw new Error('Não há registros para exportar nessa matéria.');
-  }
+  const statusFilter = options?.statusFilter ?? 'all';
+  const pageBreakBySubject = Boolean(options?.pageBreakBySubject);
 
-  const ctx = createDoc();
-  const { doc, margin, maxWidth } = ctx;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.setTextColor(20, 20, 20);
-  doc.text('Caderno de Erros - Central de Estudos', margin, ctx.y);
-  ctx.y += 7;
+  const selectedList = Array.isArray(subjects)
+    ? subjects.filter((s) => Boolean(s && s !== 'Todas as Matérias'))
+    : subjects && subjects !== 'Todas as Matérias'
+      ? [subjects]
+      : [];
 
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(9);
-  doc.setTextColor(95, 95, 95);
-  const subTitle = `${rows.length} registro(s) | ${subject && subject !== 'Todas as Matérias' ? visibleName(subject) : 'Todas as matérias'}`;
-  doc.text(safePdfText(subTitle), margin, ctx.y);
-  ctx.y += 8;
+  const isAllSubjects =
+    !Array.isArray(subjects)
+      ? !subjects || subjects === 'Todas as Matérias'
+      : selectedList.length === 0;
 
-  rows.forEach((row, index) => {
-    ctx.ensureSpace(18);
-    doc.setFillColor(235, 238, 242);
-    doc.setDrawColor(210, 214, 220);
-    doc.rect(margin, ctx.y - 4.5, maxWidth, 7, 'FD');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10);
-    doc.setTextColor(25, 25, 25);
-    const title = `${index + 1}. ${visibleName(row.tipo)} - ${visibleName(row.materia)} - ${row.data}`;
-    doc.text(safePdfText(doc.splitTextToSize(title, maxWidth - 4)[0]), margin + 2, ctx.y);
-    ctx.y += 6.5;
+  const selectedNorms = new Set(selectedList.map((s) => normalizeSearch(visibleName(s))));
 
-    doc.setFont('helvetica', 'normal');
-    doc.setFontSize(9.5);
-    doc.setTextColor(40, 40, 40);
-
-    if (row.correcao_prova && row.arquivo_prova) {
-      ctx.writeWrapped(`Prova: ${visibleName(row.arquivo_prova)}`, 5);
+  const rows = allRows.filter((row) => {
+    const isCorrected = Boolean(row.corrigido);
+    if (statusFilter === 'pending' && isCorrected) return false;
+    if (statusFilter === 'corrected' && !isCorrected) return false;
+    if (!isAllSubjects) {
+      const rowNorm = normalizeSearch(visibleName(row.materia));
+      if (!selectedNorms.has(rowNorm)) return false;
     }
-    ctx.writeWrapped(`Ponto para revisar: ${row.texto}`, 5.2);
-
-    if (includeQuestion && row.questao) {
-      ctx.y += 1.5;
-      doc.setFont('helvetica', 'bold');
-      ctx.writeWrapped('Questão:', 5);
-      doc.setFont('helvetica', 'normal');
-      ctx.writeWrapped(row.questao.enunciado, 5);
-      if (row.questao.alternativas?.length) {
-        row.questao.alternativas.forEach((alt) => {
-          ctx.writeWrapped(`[${alt.letra}] ${alt.texto}`, 4.8);
-        });
-      }
-      if (row.questao.resposta) {
-        ctx.writeWrapped(`Resposta marcada: ${row.questao.resposta}`, 5);
-      }
-      if (row.questao.gabarito) {
-        ctx.writeWrapped(`Gabarito: ${row.questao.gabarito}`, 5);
-      }
-      if (row.questao.comentario) {
-        ctx.writeWrapped(`Comentário: ${row.questao.comentario}`, 5);
-      }
-    }
-    ctx.y += 4;
+    return true;
   });
 
-  const name =
-    !subject || subject === 'Todas as Matérias'
-      ? 'caderno_erros_geral.pdf'
-      : `caderno_erros_${cleanSafeName(subject).replace(/\s+/g, '_')}.pdf`;
+  if (!rows.length) {
+    throw new Error('Não há registros para exportar com os filtros selecionados.');
+  }
+
+  // Group rows by subject preserving alphabetical order
+  const groupMap = new Map<string, { label: string; items: ErrorNotebookEntry[] }>();
+  rows.forEach((row) => {
+    const label = visibleName(row.materia || 'Geral') || 'Geral';
+    const key = normalizeSearch(label) || 'geral';
+    const existing = groupMap.get(key);
+    if (existing) {
+      existing.items.push(row);
+    } else {
+      groupMap.set(key, { label, items: [row] });
+    }
+  });
+
+  const groups = [...groupMap.values()].sort((a, b) =>
+    a.label.localeCompare(b.label, 'pt-BR'),
+  );
+
+  const ctx = createDoc();
+  const { doc, margin, maxWidth, pageWidth } = ctx;
+
+  // Institutional Gov.br Header Bar
+  doc.setFillColor(7, 29, 65);
+  doc.rect(margin, ctx.y - 4, maxWidth, 18, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(margin, ctx.y + 14, maxWidth, 1.4, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(7.5);
+  doc.setTextColor(255, 205, 7);
+  doc.text('PORTAL UNICO DO ESTUDANTE · OUVIDORIA & CORREGEDORIA', margin + 3.5, ctx.y + 1.5);
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13.5);
+  doc.setTextColor(255, 255, 255);
+  doc.text('Caderno Oficial de Erros e Revisao', margin + 3.5, ctx.y + 8);
+
+  const statusText =
+    statusFilter === 'pending'
+      ? 'Pendentes de Correcao'
+      : statusFilter === 'corrected'
+        ? 'Ja Corrigidos'
+        : 'Todos os Registros';
+
+  const scopeText =
+    options?.scopeLabel ||
+    (isAllSubjects
+      ? 'Todas as materias (em conjunto)'
+      : selectedList.length === 1
+        ? `${visibleName(selectedList[0])} (separado)`
+        : `${selectedList.length} materias em conjunto`);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8);
+  doc.setTextColor(220, 230, 245);
+  doc.text(
+    safePdfText(`${rows.length} registro(s) · ${groups.length} materia(s) · ${statusText} · ${scopeText}`),
+    margin + 3.5,
+    ctx.y + 12.2,
+  );
+
+  ctx.y += 21;
+
+  // Compact summary index if multiple subjects
+  if (groups.length > 1) {
+    doc.setFillColor(244, 247, 251);
+    doc.setDrawColor(198, 211, 228);
+    const summaryText = groups
+      .map((g) => `${g.label} (${g.items.length})`)
+      .join('  ·  ');
+    const wrappedSummary = doc.splitTextToSize(safePdfText(summaryText), maxWidth - 6) as string[];
+    const boxHeight = Math.max(8, wrappedSummary.length * 4.2 + 4);
+    ctx.ensureSpace(boxHeight + 4);
+    doc.rect(margin, ctx.y - 3, maxWidth, boxHeight, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(7, 29, 65);
+    wrappedSummary.forEach((line, idx) => {
+      doc.text(line, margin + 3, ctx.y + 1 + idx * 4.2);
+    });
+    ctx.y += boxHeight + 3;
+  }
+
+  let globalIndex = 0;
+
+  groups.forEach((group, groupIdx) => {
+    if (groupIdx > 0 && pageBreakBySubject) {
+      doc.addPage();
+      ctx.y = 18;
+    }
+
+    ctx.ensureSpace(16);
+    doc.setFillColor(232, 239, 249);
+    doc.setDrawColor(19, 81, 180);
+    doc.rect(margin, ctx.y - 4.5, maxWidth, 8, 'FD');
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(7, 29, 65);
+    const pendingInGroup = group.items.filter((i) => !i.corrigido).length;
+    const sectionHeader = `${group.label.toUpperCase()}  (${group.items.length} registro(s)${
+      pendingInGroup > 0 ? ` · ${pendingInGroup} pendente(s)` : ''
+    })`;
+    doc.text(safePdfText(doc.splitTextToSize(sectionHeader, maxWidth - 6)[0]), margin + 3, ctx.y + 0.6);
+    ctx.y += 8.5;
+
+    group.items.forEach((row) => {
+      globalIndex += 1;
+      ctx.ensureSpace(18);
+      doc.setFillColor(246, 248, 250);
+      doc.setDrawColor(210, 216, 224);
+      doc.rect(margin, ctx.y - 4.2, maxWidth, 6.6, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.2);
+      doc.setTextColor(22, 34, 56);
+      const statusBadge = row.corrigido ? 'Corrigido' : 'Pendente';
+      const title = `${globalIndex}. [${statusBadge}] ${visibleName(row.tipo)} · ${row.data}${
+        row.origem ? ` · ${row.origem}` : ''
+      }`;
+      doc.text(safePdfText(doc.splitTextToSize(title, maxWidth - 4)[0]), margin + 2, ctx.y + 0.2);
+      ctx.y += 6;
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.2);
+      doc.setTextColor(35, 35, 35);
+
+      if (row.correcao_prova && row.arquivo_prova) {
+        ctx.writeWrapped(`Prova: ${visibleName(row.arquivo_prova)}`, 4.8);
+      }
+      ctx.writeWrapped(`Ponto para revisar: ${row.texto}`, 5);
+
+      if (includeQuestion && row.questao) {
+        ctx.y += 1.2;
+        doc.setFont('helvetica', 'bold');
+        ctx.writeWrapped('Questao vinculada:', 4.8);
+        doc.setFont('helvetica', 'normal');
+        ctx.writeWrapped(row.questao.enunciado, 4.8);
+        if (row.questao.alternativas?.length) {
+          row.questao.alternativas.forEach((alt) => {
+            ctx.writeWrapped(`[${alt.letra}] ${alt.texto}`, 4.6);
+          });
+        }
+        const answerParts: string[] = [];
+        if (row.questao.resposta) answerParts.push(`Marcada: ${row.questao.resposta}`);
+        if (row.questao.gabarito) answerParts.push(`Gabarito: ${row.questao.gabarito}`);
+        if (answerParts.length) {
+          doc.setFont('helvetica', 'bold');
+          ctx.writeWrapped(answerParts.join('  |  '), 4.8);
+          doc.setFont('helvetica', 'normal');
+        }
+        if (row.questao.comentario) {
+          ctx.writeWrapped(`Comentario: ${row.questao.comentario}`, 4.8);
+        }
+      }
+      ctx.y += 3.5;
+    });
+
+    ctx.y += 2;
+  });
+
+  // Footer page numbers
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p += 1) {
+    doc.setPage(p);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(110, 120, 138);
+    doc.text(
+      safePdfText(`estuda.gov.br · Caderno Oficial de Erros · Emitido em ${localDateIso()}`),
+      margin,
+      doc.internal.pageSize.getHeight() - 8,
+    );
+    doc.text(
+      `Pagina ${p} de ${totalPages}`,
+      pageWidth - margin,
+      doc.internal.pageSize.getHeight() - 8,
+      { align: 'right' },
+    );
+  }
+
+  const name = isAllSubjects
+    ? 'caderno_erros_geral_conjunto.pdf'
+    : selectedList.length === 1
+      ? `caderno_erros_${cleanSafeName(selectedList[0]).replace(/\s+/g, '_')}.pdf`
+      : `caderno_erros_conjunto_${selectedList.length}_materias.pdf`;
   doc.save(name);
 }
 

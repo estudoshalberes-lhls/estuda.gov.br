@@ -794,6 +794,7 @@ interface StudyContextValue {
     silent?: boolean,
   ) => void;
   updateErrorEntrySubject: (id: string, materia: string) => void;
+  bulkUpdateErrorEntriesSubject: (ids: string[], materia: string) => void;
   deleteAnnotation: (id: string) => void;
   markAnnotationCorrected: (id: string) => void;
   reopenAnnotation: (id: string) => void;
@@ -1048,6 +1049,7 @@ interface StudyContextValue {
   drivePermissionNeedsPicker: { folderId: string; folderName: string; count: number } | null;
   authorizeDriveFolderViaPicker: () => Promise<boolean>;
   restoreProgress: RestoreProgress | null;
+  cancelDriveRestore: () => void;
   authError: string | null;
   connectGoogleDrive: (options?: { forceAccountPicker?: boolean }) => Promise<boolean>;
   disconnectGoogleDrive: () => Promise<void>;
@@ -2071,6 +2073,7 @@ async function restoreFilesAndOrphansFromDriveList(
     lazyBinaryBlobs?: boolean;
     knownSyncedFileIds?: Set<string>;
     dbBaselineMs?: number;
+    signal?: AbortSignal;
   },
 ): Promise<{
   updatedDb: StudyDatabase;
@@ -2092,6 +2095,61 @@ async function restoreFilesAndOrphansFromDriveList(
       fileEvents: [],
     };
   }
+
+  const abortSignal = options?.signal;
+  const throwIfAborted = () => {
+    if (abortSignal?.aborted) {
+      throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
+    }
+  };
+  const withStepTimeout = <T,>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> => {
+    throwIfAborted();
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const timer = window.setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error(`DOWNLOAD_TIMEOUT: Tempo limite (${Math.round(timeoutMs / 1000)}s) em "${label}".`));
+      }, timeoutMs);
+      const onAbort = () => {
+        if (settled) return;
+        settled = true;
+        window.clearTimeout(timer);
+        reject(new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.'));
+      };
+      abortSignal?.addEventListener('abort', onAbort, { once: true });
+      promise.then(
+        (val) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          abortSignal?.removeEventListener('abort', onAbort);
+          resolve(val);
+        },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          window.clearTimeout(timer);
+          abortSignal?.removeEventListener('abort', onAbort);
+          reject(err);
+        },
+      );
+    });
+  };
+  const downloadWithTimeout = (fileId: string, mimeHint: string | undefined, label: string) =>
+    token
+      ? withStepTimeout(
+          downloadDriveFileBlob(fileId, token, mimeHint, { timeoutMs: 45_000, signal: abortSignal }),
+          52_000,
+          label,
+        )
+      : Promise.resolve(null);
+  const extractTextSafe = (blob: Blob, filename: string, mimeType?: string) =>
+    withStepTimeout(
+      readStudyBlobText(blob, filename, mimeType, { timeoutMs: 20_000 }),
+      22_000,
+      filename,
+    );
 
   // Index Drive files by normalized exact name, stripped name, and Drive file ID (preferring active/selected folder)
   const driveByName = new Map<string, DriveFileInfo>();
@@ -2213,21 +2271,29 @@ async function restoreFilesAndOrphansFromDriveList(
     return true;
   };
 
-  const estimatedTotal = Math.max(
-    1,
-    (skipBlobDownload
-      ? 0
-      : Object.values(targetDb.pdfFolders || {}).reduce((s, list) => s + list.length, 0) +
-        Object.values(targetDb.summaryFolders || {}).reduce((s, list) => s + list.length, 0) +
-        Object.values(targetDb.laws || {}).reduce((s, f) => s + (f.pdfs?.length || 0), 0) +
-        (targetDb.proofFiles?.length || 0) +
-        (targetDb.essays?.length || 0)) +
-      driveFiles.filter((df) => !isBackupFile(df) && isSupportedRestorableStudyFile(df)).length,
-  );
+  const targetDbBlobCount = skipBlobDownload
+    ? 0
+    : Object.values(targetDb.pdfFolders || {}).reduce((s, list) => s + list.length, 0) +
+      Object.values(targetDb.summaryFolders || {}).reduce((s, list) => s + list.length, 0) +
+      Object.values(targetDb.laws || {}).reduce((s, f) => s + (f.pdfs?.length || 0), 0) +
+      (targetDb.proofFiles?.length || 0) +
+      (targetDb.essays?.length || 0);
+  const candidateDriveStudyCount = driveFiles.filter(
+    (df) =>
+      (!onlyFileIdSet || onlyFileIdSet.has(df.id)) &&
+      !isBackupFile(df) &&
+      isSupportedRestorableStudyFile(df),
+  ).length;
+  const estimatedTotal = Math.max(1, targetDbBlobCount + candidateDriveStudyCount);
   let processedSteps = 0;
-  const emitProgress = (label: string) => {
+  let lastProgressEmitMs = 0;
+  const emitProgress = (label: string, immediate = true) => {
     processedSteps += 1;
-    onProgress?.(Math.min(processedSteps, estimatedTotal), estimatedTotal, label);
+    const now = Date.now();
+    if (immediate || now - lastProgressEmitMs >= 80 || processedSteps >= estimatedTotal) {
+      lastProgressEmitMs = now;
+      onProgress?.(Math.min(processedSteps, estimatedTotal), estimatedTotal, label);
+    }
   };
 
   const refreshedBlobTimestamps = new Map<string, string>();
@@ -2237,13 +2303,17 @@ async function restoreFilesAndOrphansFromDriveList(
     mimeHint?: string,
     localTimestampIso?: string,
   ) => {
+    throwIfAborted();
     candidates.forEach((c) => {
       if (c) {
         knownFileNames.add(normalizeFileLookup(c));
         knownFileNames.add(normalizeFileLookup(stripDrivePrefix(c)));
       }
     });
-    if (!blobKey) return;
+    if (!blobKey) {
+      if (!skipBlobDownload) emitProgress(candidates[0] || 'Verificando arquivo…', false);
+      return;
+    }
 
     let match: DriveFileInfo | undefined;
     if (blobKey.startsWith('drive_')) {
@@ -2270,55 +2340,60 @@ async function restoreFilesAndOrphansFromDriveList(
     }
 
     if (hasExistingBlob && !driveIsNewer) {
-      emitProgress(candidates[0] || 'Arquivo local verificado');
+      emitProgress(candidates[0] || 'Arquivo local verificado', false);
       return;
     }
 
-    if (match) {
-      if (!onlyFileIdSet?.has(match.id) && isDriveFilePermissionBlocked(match.id)) {
-        permissionBlockedCount += 1;
-        return;
+    if (!match) {
+      if (!skipBlobDownload) emitProgress(candidates[0] || 'Arquivo verificado', false);
+      return;
+    }
+
+    if (!onlyFileIdSet?.has(match.id) && isDriveFilePermissionBlocked(match.id)) {
+      permissionBlockedCount += 1;
+      if (!skipBlobDownload) emitProgress(stripDrivePrefix(match.name) || match.name, false);
+      return;
+    }
+    const displayFile = stripDrivePrefix(match.name) || match.name;
+    emitProgress(
+      driveIsNewer
+        ? `Atualizando ${displayFile} (versão mais recente no Drive)`
+        : `Baixando ${displayFile}`,
+    );
+    try {
+      const blob = await downloadWithTimeout(match.id, mimeHint || match.mimeType, displayFile);
+      if (!blob) return;
+      await withStepTimeout(saveFileBlob(blobKey, blob, scope), 15_000, displayFile);
+      filesRestored += 1;
+      if (driveIsNewer) {
+        refreshedBlobTimestamps.set(blobKey, driveTimestampIso || new Date().toISOString());
       }
-      emitProgress(
-        driveIsNewer
-          ? `Atualizando ${stripDrivePrefix(match.name) || match.name} (versão mais recente no Drive)`
-          : `Carregando ${stripDrivePrefix(match.name) || match.name}`,
-      );
-      try {
-        const blob = token ? await downloadDriveFileBlob(match.id, token, mimeHint || match.mimeType) : null;
-        if (!blob) return;
-        await saveFileBlob(blobKey, blob, scope);
-        filesRestored += 1;
-        if (driveIsNewer) {
-          refreshedBlobTimestamps.set(blobKey, driveTimestampIso || new Date().toISOString());
-        }
-        const restoredTag = classifyDriveFileSyncOrigin(match);
-        pushFileEvent({
-          name: stripDrivePrefix(match.name) || match.name,
-          action: 'restored',
-          module: match.subfolderName || undefined,
-          driveFileId: match.id,
-          syncOrigin: restoredTag.origin,
-          detail: driveIsNewer
-            ? restoredTag.origin === 'external-modified'
-              ? 'Atualizado do Drive (modificado externamente)'
-              : 'Atualizado do Drive (versão mais recente)'
-            : undefined,
-        });
-      } catch (err: any) {
-        const msg = String(err?.message || '');
-        if (msg.includes('TOKEN_EXPIRED')) throw err;
-        if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
-        pushFileEvent({
-          name: stripDrivePrefix(match.name) || match.name,
-          action: 'failed',
-          module: match.subfolderName || undefined,
-          driveFileId: match.id,
-          syncOrigin: classifyDriveFileSyncOrigin(match).origin,
-          detail: msg || 'Falha ao baixar arquivo do Drive',
-        });
-        console.warn(`Falha ao carregar ${match.name}:`, err);
-      }
+      const restoredTag = classifyDriveFileSyncOrigin(match);
+      pushFileEvent({
+        name: displayFile,
+        action: 'restored',
+        module: match.subfolderName || undefined,
+        driveFileId: match.id,
+        syncOrigin: restoredTag.origin,
+        detail: driveIsNewer
+          ? restoredTag.origin === 'external-modified'
+            ? 'Atualizado do Drive (modificado externamente)'
+            : 'Atualizado do Drive (versão mais recente)'
+          : undefined,
+      });
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
+      if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+      pushFileEvent({
+        name: displayFile,
+        action: 'failed',
+        module: match.subfolderName || undefined,
+        driveFileId: match.id,
+        syncOrigin: classifyDriveFileSyncOrigin(match).origin,
+        detail: msg || 'Falha ao baixar arquivo do Drive',
+      });
+      console.warn(`Falha ao carregar ${match.name}:`, err);
     }
   };
 
@@ -2500,9 +2575,9 @@ async function restoreFilesAndOrphansFromDriveList(
     const gdf = gabaritoFileByStem.get(stem);
     if (!gdf) return null;
     try {
-      const gBlob = token ? await downloadDriveFileBlob(gdf.id, token, gdf.mimeType) : null;
+      const gBlob = await downloadWithTimeout(gdf.id, gdf.mimeType, gdf.name);
       if (!gBlob) return null;
-      const gText = await readStudyBlobText(gBlob, gdf.name, gdf.mimeType);
+      const gText = await extractTextSafe(gBlob, gdf.name, gdf.mimeType);
       let answers: Record<number, string> = {};
       try {
         answers = parseAnswerKeyWithMode(gText).answers;
@@ -2513,7 +2588,9 @@ async function restoreFilesAndOrphansFromDriveList(
       parsedGabaritoCache.set(stem, result);
       matchedDriveFileIds.add(gdf.id);
       return result;
-    } catch {
+    } catch (err: any) {
+      const msg = String(err?.message || '');
+      if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
       return null;
     }
   };
@@ -2630,6 +2707,7 @@ async function restoreFilesAndOrphansFromDriveList(
     const forced = options?.forceModule || 'auto';
 
     for (const df of unlinkedDriveFiles) {
+      throwIfAborted();
       if (isGabaritoFilename(df.name)) continue;
 
       try {
@@ -2655,13 +2733,15 @@ async function restoreFilesAndOrphansFromDriveList(
         const rawSizeBytes = Number(df.size || 0);
         const needsBlobForParsing =
           isTxtOrMd || (isLaw && (!options?.lazyBinaryBlobs || (rawSizeBytes > 0 && rawSizeBytes <= 3_500_000)));
+        const shouldDownloadNow = !options?.lazyBinaryBlobs || needsBlobForParsing;
         let blob: Blob | null = null;
-        if (!options?.lazyBinaryBlobs || needsBlobForParsing) {
+        if (shouldDownloadNow) {
           emitProgress(`Importando ${cleanName}`);
           try {
-            blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
+            blob = await downloadWithTimeout(df.id, df.mimeType, cleanName);
           } catch (dlErr: any) {
-            if (String(dlErr?.message || '').includes('TOKEN_EXPIRED')) throw dlErr;
+            const dlMsg = String(dlErr?.message || '');
+            if (dlMsg.includes('TOKEN_EXPIRED') || dlMsg.includes('RESTORE_ABORTED')) throw dlErr;
             // In lazy mode, if a binary Law PDF fails/times out during parsing download, still catalog it by metadata so it is never lost
             if (!options?.lazyBinaryBlobs || isTxtOrMd) {
               throw dlErr;
@@ -2670,10 +2750,12 @@ async function restoreFilesAndOrphansFromDriveList(
             blob = null;
           }
           if (!blob && (!options?.lazyBinaryBlobs || isTxtOrMd)) continue;
+        } else {
+          emitProgress(`Catalogando ${cleanName}`, false);
         }
         const blobKey = `drive_${df.id}`;
         if (blob) {
-          await saveFileBlob(blobKey, blob, scope);
+          await withStepTimeout(saveFileBlob(blobKey, blob, scope), 15_000, cleanName);
         }
         const sizeNum = Number(df.size || blob?.size || 0);
 
@@ -2764,7 +2846,7 @@ async function restoreFilesAndOrphansFromDriveList(
           let parsedItems: LawItem[] = [];
           if (blob) {
             try {
-              const extractedText = await readStudyBlobText(blob, cleanName, df.mimeType);
+              const extractedText = await extractTextSafe(blob, cleanName, df.mimeType);
               if (
                 isScheduleTxtDescriptor(cleanName, df.folderPath, extractedText) ||
                 isContestOrEditalTxtDescriptor(cleanName, df.folderPath, extractedText)
@@ -2772,7 +2854,8 @@ async function restoreFilesAndOrphansFromDriveList(
                 continue;
               }
               parsedItems = parseLawTextToItems(cleanName, extractedText);
-            } catch (parseErr) {
+            } catch (parseErr: any) {
+              if (String(parseErr?.message || '').includes('RESTORE_ABORTED')) throw parseErr;
               console.warn(`Não foi possível extrair dispositivos automaticamente de "${cleanName}":`, parseErr);
             }
           }
@@ -2825,7 +2908,7 @@ async function restoreFilesAndOrphansFromDriveList(
           const sourceLabel = `Arquivo restaurado do Google Drive (${df.folderPath || 'Drive'}).`;
 
           if (isTxtOrMd && blob) {
-            const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
+            const txt = await extractTextSafe(blob, cleanName, df.mimeType);
             if (
               isScheduleTxtDescriptor(cleanName, df.folderPath, txt) ||
               isContestOrEditalTxtDescriptor(cleanName, df.folderPath, txt)
@@ -2907,7 +2990,7 @@ async function restoreFilesAndOrphansFromDriveList(
           });
         } else if (isTxtOrMd && forced === 'auto' && blob) {
           // Inspect text files outside canonical folders before misfiling into Personal PDFs
-          const txt = await readStudyBlobText(blob, cleanName, df.mimeType);
+          const txt = await extractTextSafe(blob, cleanName, df.mimeType);
           if (
             isScheduleTxtDescriptor(cleanName, df.folderPath, txt) ||
             isContestOrEditalTxtDescriptor(cleanName, df.folderPath, txt)
@@ -2998,7 +3081,7 @@ async function restoreFilesAndOrphansFromDriveList(
         }
       } catch (err: any) {
         const msg = String(err?.message || '');
-        if (msg.includes('TOKEN_EXPIRED')) throw err;
+        if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
         if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
         pushFileEvent({
           name: stripDrivePrefix(df.name) || df.name,
@@ -3057,17 +3140,19 @@ async function restoreFilesAndOrphansFromDriveList(
     if ((folderData.items?.length || 0) > 0 || !(folderData.pdfs?.length)) continue;
     const recoveredItems: LawItem[] = [];
     for (const pdf of folderData.pdfs) {
+      throwIfAborted();
       if (!pdf.blobKey) continue;
       const blob = await getFileBlob(pdf.blobKey, scope);
       if (!blob) continue;
       try {
-        const text = await readStudyBlobText(blob, pdf.name);
+        const text = await extractTextSafe(blob, pdf.name);
         const items = parseLawTextToItems(pdf.name, text);
         if (items.length > 0) {
           recoveredItems.push(...items);
         }
-      } catch {
-        // ignore unparseable/image PDFs during silent auto-heal
+      } catch (err: any) {
+        if (String(err?.message || '').includes('RESTORE_ABORTED')) throw err;
+        // ignore unparseable/image/timeout PDFs during silent auto-heal
       }
     }
     if (recoveredItems.length > 0) {
@@ -3119,10 +3204,13 @@ async function restoreFilesAndOrphansFromDriveList(
     let latestRecoveredMs = 0;
 
     for (const df of scheduleTxtDriveFiles) {
+      throwIfAborted();
+      const displayFile = stripDrivePrefix(df.name) || df.name;
+      emitProgress(`Sincronizando cronograma ${displayFile}`);
       try {
-        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
+        const blob = await downloadWithTimeout(df.id, df.mimeType, displayFile);
         if (!blob) continue;
-        const text = await readStudyBlobText(blob, df.name);
+        const text = await extractTextSafe(blob, df.name);
         const parsedWeek = parseScheduleWeekText(text, df.name);
         if (
           !onlyFileIdSet?.has(df.id) &&
@@ -3134,7 +3222,7 @@ async function restoreFilesAndOrphansFromDriveList(
           )
         ) {
           pushFileEvent({
-            name: stripDrivePrefix(df.name) || df.name,
+            name: displayFile,
             action: 'skipped-tombstone',
             module: 'Cronogramas',
             driveFileId: df.id,
@@ -3143,7 +3231,7 @@ async function restoreFilesAndOrphansFromDriveList(
           continue;
         }
         const blobKey = `schedule_week_${parsedWeek.weekKey}`;
-        await saveFileBlob(blobKey, blob, scope);
+        await withStepTimeout(saveFileBlob(blobKey, blob, scope), 15_000, displayFile);
         const fileMs = Date.parse(df.modifiedTime || df.createdTime || '') || Date.now();
         const existingWeek = nextWeeklySchedules[parsedWeek.weekKey];
         const existingTopicsCount = existingWeek
@@ -3164,7 +3252,16 @@ async function restoreFilesAndOrphansFromDriveList(
           latestRecoveredWeek = nextWeeklySchedules[parsedWeek.weekKey];
         }
       } catch (err: any) {
-        if (String(err?.message || '').includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
+        if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        pushFileEvent({
+          name: displayFile,
+          action: 'failed',
+          module: 'Cronogramas',
+          driveFileId: df.id,
+          detail: msg || 'Falha ao baixar cronograma do Drive',
+        });
       }
     }
 
@@ -3247,10 +3344,13 @@ async function restoreFilesAndOrphansFromDriveList(
     let contestsChanged = false;
 
     for (const df of contestAndEditalTxtFiles) {
+      throwIfAborted();
+      const displayFile = stripDrivePrefix(df.name) || df.name;
+      emitProgress(`Sincronizando edital ${displayFile}`);
       try {
-        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
+        const blob = await downloadWithTimeout(df.id, df.mimeType, displayFile);
         if (!blob) continue;
-        const text = await readStudyBlobText(blob, df.name);
+        const text = await extractTextSafe(blob, df.name);
         const parsedContests = parseContestOrEditalTxt(text, df.name);
         for (const pc of parsedContests) {
           if (
@@ -3263,7 +3363,7 @@ async function restoreFilesAndOrphansFromDriveList(
             )
           ) {
             pushFileEvent({
-              name: pc.concurso || stripDrivePrefix(df.name) || df.name,
+              name: pc.concurso || displayFile,
               action: 'skipped-tombstone',
               module: 'Editais',
               driveFileId: df.id,
@@ -3331,7 +3431,16 @@ async function restoreFilesAndOrphansFromDriveList(
           }
         }
       } catch (err: any) {
-        if (String(err?.message || '').includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
+        if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        pushFileEvent({
+          name: displayFile,
+          action: 'failed',
+          module: df.subfolderName || 'Editais',
+          driveFileId: df.id,
+          detail: msg || 'Falha ao baixar edital/concurso do Drive',
+        });
       }
     }
 
@@ -3397,17 +3506,19 @@ async function restoreFilesAndOrphansFromDriveList(
     let simsAdded = false;
 
     for (const df of questionOrExamTxtFiles) {
+      throwIfAborted();
+      const cleanName = stripDrivePrefix(df.name) || df.name;
+      emitProgress(`Importando questões ${cleanName}`);
       try {
-        const cleanName = stripDrivePrefix(df.name) || df.name;
         const isProofFolderFile =
           df.subfolderName === 'Provas e Gabaritos' ||
           /^PROVA\s*-\s*/i.test(df.name) ||
           cleanName.toLowerCase().includes('_estruturada.');
         const isFromSimFolder = normalizeSearch(df.folderPath || '').includes('simulados');
 
-        const blob = token ? await downloadDriveFileBlob(df.id, token, df.mimeType) : null;
+        const blob = await downloadWithTimeout(df.id, df.mimeType, cleanName);
         if (!blob) continue;
-        const text = await readStudyBlobText(blob, df.name);
+        const text = await extractTextSafe(blob, df.name);
         if (
           isScheduleTxtDescriptor(cleanName, df.folderPath, text) ||
           isContestOrEditalTxtDescriptor(cleanName, df.folderPath, text)
@@ -3471,7 +3582,16 @@ async function restoreFilesAndOrphansFromDriveList(
           });
         }
       } catch (err: any) {
-        if (String(err?.message || '').includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        const msg = String(err?.message || '');
+        if (msg.includes('TOKEN_EXPIRED') || msg.includes('RESTORE_ABORTED')) throw err;
+        if (msg.includes('PICKER_FILE_PERMISSION')) permissionBlockedCount += 1;
+        pushFileEvent({
+          name: cleanName,
+          action: 'failed',
+          module: df.subfolderName || 'Questões',
+          driveFileId: df.id,
+          detail: msg || 'Falha ao importar arquivo de questões',
+        });
       }
     }
 
@@ -3601,6 +3721,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     count: number;
   } | null>(null);
   const [restoreProgress, setRestoreProgress] = useState<RestoreProgress | null>(null);
+  const restoreAbortControllerRef = useRef<AbortController | null>(null);
+  const cancelDriveRestore = useCallback(() => {
+    if (restoreAbortControllerRef.current) {
+      restoreAbortControllerRef.current.abort();
+      setRestoreProgress((prev) =>
+        prev ? { ...prev, label: 'Cancelando sincronização…' } : null,
+      );
+    }
+  }, []);
   const [authError, setAuthError] = useState<string | null>(null);
   const [syncActivityLogs, setSyncActivityLogs] = useState<SyncActivityLogEntry[]>(() =>
     loadSyncActivityLogs(initialScope),
@@ -3696,12 +3825,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (derivedStatus !== 'blocked-conflict' && derivedStatus !== 'checking') {
         derivedStatus = 'offline-queued';
       }
-    } else if (derivedStatus === 'in-sync' && activeSyncMeta.remoteChecksum && currentLocalChecksum !== activeSyncMeta.remoteChecksum) {
+    } else if (
+      derivedStatus === 'in-sync' &&
+      hasPendingCloudChanges &&
+      activeSyncMeta.remoteChecksum &&
+      currentLocalChecksum !== activeSyncMeta.remoteChecksum
+    ) {
       derivedStatus = 'local-ahead';
     } else if (derivedStatus === 'idle' && gasSession?.token) {
-      if (activeSyncMeta.remoteChecksum && currentLocalChecksum === activeSyncMeta.remoteChecksum) {
+      if (
+        activeSyncMeta.remoteChecksum &&
+        baseChecksum &&
+        activeSyncMeta.remoteChecksum === baseChecksum &&
+        !hasPendingCloudChanges
+      ) {
         derivedStatus = 'in-sync';
-      } else if (baseChecksum && currentLocalChecksum !== baseChecksum) {
+      } else if (activeSyncMeta.remoteChecksum && currentLocalChecksum === activeSyncMeta.remoteChecksum) {
+        derivedStatus = 'in-sync';
+      } else if (baseChecksum && (hasPendingCloudChanges || currentLocalChecksum !== baseChecksum)) {
         derivedStatus = 'local-ahead';
       }
     }
@@ -3713,7 +3854,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       baseChecksum,
       localBaseVersion,
     };
-  }, [activeSyncMeta, currentLocalChecksum, gasConnectionHealth.status, gasOperationQueue, gasSession?.lastContentHash, gasSession?.serverVersion, gasSession?.token]);
+  }, [activeSyncMeta, currentLocalChecksum, gasConnectionHealth.status, gasOperationQueue, gasSession?.lastContentHash, gasSession?.serverVersion, gasSession?.token, hasPendingCloudChanges]);
 
   useEffect(() => {
     return subscribeGasSession((next) => {
@@ -5642,29 +5783,76 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           Date.now() - lastDeletionMsRef.current < 120_000 ||
           syncedScopeOnceRef.current === scope;
 
-      const expectedBaseHash =
-        lastCloudHashRef.current || getGasSession()?.lastContentHash || null;
+      const expectedBaseHash = isGasActive
+        ? getGasSession()?.lastContentHash || lastCloudHashRef.current || null
+        : lastCloudHashRef.current || getGasSession()?.lastContentHash || null;
       const baseServerVersion = getGasSession()?.serverVersion;
 
-      const savedSync =
-        lastCloudHashRef.current !== mergedHash || flushedDeleteIds.length > 0
-          ? await saveCloudSyncSnapshot(
-              {
-                version: 2,
-                app: 'Central de Estudos',
-                updatedAt: nowIso,
-                contentHash: mergedHash,
-                userEmail: googleUser?.email || gasSession?.username || undefined,
-                data: mergedCloudDb,
-              },
-              token,
-              {
-                ...(forceSnapshot ? { force: true } : {}),
-                expectedContentHash: expectedBaseHash,
-                baseVersion: baseServerVersion,
-              },
-            )
-          : null;
+      const pushSnapshotOnce = async (overrideBaseHash?: string | null) =>
+        await saveCloudSyncSnapshot(
+          {
+            version: 2,
+            app: 'Central de Estudos',
+            updatedAt: nowIso,
+            contentHash: mergedHash,
+            userEmail: googleUser?.email || gasSession?.username || undefined,
+            data: mergedCloudDb,
+          },
+          token,
+          {
+            ...(forceSnapshot ? { force: true } : {}),
+            expectedContentHash: overrideBaseHash !== undefined ? overrideBaseHash : expectedBaseHash,
+            baseVersion: baseServerVersion,
+          },
+        );
+
+      let savedSync: DriveFileInfo | null = null;
+      if (lastCloudHashRef.current !== mergedHash || flushedDeleteIds.length > 0) {
+        try {
+          savedSync = await pushSnapshotOnce();
+        } catch (pushErr: any) {
+          const isSameVersionChecksumConflict =
+            isGasActive &&
+            pushErr?.code === 'VERSION_CONFLICT' &&
+            typeof baseServerVersion === 'number' &&
+            baseServerVersion > 0 &&
+            pushErr?.serverVersion === baseServerVersion;
+          if (!isSameVersionChecksumConflict) {
+            throw pushErr;
+          }
+          const pulled = await gasPullState().catch(() => null);
+          const pulledVersion =
+            pulled?.ok && typeof pulled.controlSheetVersion === 'number' && pulled.controlSheetVersion > 0
+              ? Math.max(pulled.controlSheetVersion, Number(pulled.serverVersion || 0))
+              : Number(pulled?.serverVersion || 0);
+          const canonicalServerHash = String(
+            pulled?.controlSheetHash || pulled?.contentHash || pushErr?.remoteContentHash || '',
+          ).trim();
+          const activeSess = getGasSession();
+          let canHeal = Boolean(
+            pulled?.ok &&
+              pulledVersion === baseServerVersion &&
+              canonicalServerHash &&
+              pushErr?.remoteDevice &&
+              activeSess?.deviceId &&
+              pushErr.remoteDevice === activeSess.deviceId,
+          );
+          if (!canHeal && pulled?.ok && pulled.payload && pulledVersion === baseServerVersion && canonicalServerHash) {
+            const mergedPulled = normalizeAndMergeDatabase(pulled.payload);
+            const tombstonedPulled = applyTombstonesToMergedDatabase(mergedPulled, scope);
+            const normRaw = computeDatabaseContentHash(mergedPulled);
+            const normTomb = computeDatabaseContentHash(tombstonedPulled);
+            if (expectedBaseHash === normTomb || expectedBaseHash === normRaw) {
+              canHeal = true;
+            }
+          }
+          if (!canHeal) {
+            throw pushErr;
+          }
+          updateGasSessionMetadata({ serverVersion: pulledVersion, lastContentHash: canonicalServerHash });
+          savedSync = await pushSnapshotOnce(canonicalServerHash);
+        }
+      }
 
       lastCloudDbRef.current = mergedCloudDb;
       lastCloudHashRef.current = mergedHash;
@@ -6351,6 +6539,25 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             pendingCloudSyncRef.current = false;
             setHasPendingCloudChanges(false);
             setLastCloudSyncAt(syncedAtIso);
+            const activeSessionNow = getGasSession();
+            const canonicalServerHash =
+              (typeof activeSessionNow?.lastContentHash === 'string' && activeSessionNow.lastContentHash.trim()) ||
+              (typeof payload?.contentHash === 'string' && payload.contentHash.trim()) ||
+              remoteHash;
+            const canonicalServerVersion =
+              typeof activeSessionNow?.serverVersion === 'number' ? activeSessionNow.serverVersion : 0;
+            setActiveSyncMeta((prev) => ({
+              ...prev,
+              status: 'in-sync',
+              baseChecksum: canonicalServerHash,
+              remoteChecksum: canonicalServerHash,
+              localBaseVersion: canonicalServerVersion,
+              remoteVersion: canonicalServerVersion,
+              remoteUpdatedAt: syncedAtIso,
+              lastCheckedAt: new Date().toISOString(),
+              lastGuardOutcome: 'allowed',
+              blockedReason: null,
+            }));
           }
         } else if (!isUntouchedSeedDatabase(dbRef.current)) {
           // Primeira vez no Apps Script: sobe o banco local atual como versão v1
@@ -6884,7 +7091,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     async (options?: { silent?: boolean }): Promise<ActiveSyncState> => {
       const localChecksum = computeDatabaseContentHash(dbRef.current);
       const session = getGasSession();
-      const baseChecksum = lastCloudHashRef.current || session?.lastContentHash || null;
+      let baseChecksum = session?.lastContentHash || lastCloudHashRef.current || null;
       const localBaseVersion = typeof session?.serverVersion === 'number' ? session.serverVersion : 0;
 
       if (!session?.token) {
@@ -6905,12 +7112,65 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         status: 'checking',
       }));
 
-      const res = await gasVerifyChecksumBeforeWrite({
+      let res = await gasVerifyChecksumBeforeWrite({
         localContentHash: localChecksum,
         expectedBaseHash: baseChecksum,
         expectedBaseVersion: localBaseVersion,
         auditOnResult: true,
       });
+
+      // Autocorreção segura: se ambos os lados estão na MESMA versão (ex.: v169) e o checksum local
+      // divergiu apenas por normalização prévia do JSON no cliente, re-sincroniza o hash canônico de tb_estado.
+      if (
+        res.ok &&
+        !res.allowedToWrite &&
+        res.status === 'conflict' &&
+        localBaseVersion > 0 &&
+        res.remoteVersion === localBaseVersion &&
+        res.remoteChecksum
+      ) {
+        try {
+          const pulled = await gasPullState();
+          if (pulled?.ok && pulled.payload && typeof pulled.payload === 'object') {
+            const pulledVersion =
+              typeof pulled.controlSheetVersion === 'number' && pulled.controlSheetVersion > 0
+                ? Math.max(pulled.controlSheetVersion, Number(pulled.serverVersion || 0))
+                : Number(pulled.serverVersion || 0);
+            const canonicalServerHash = String(
+              pulled.controlSheetHash || pulled.contentHash || res.remoteChecksum || '',
+            ).trim();
+            if (pulledVersion === localBaseVersion && canonicalServerHash) {
+              const scope = activeScopeRef.current;
+              const mergedPulled = normalizeAndMergeDatabase(pulled.payload);
+              const tombstonedPulled = applyTombstonesToMergedDatabase(mergedPulled, scope);
+              const normalizedRawHash = computeDatabaseContentHash(mergedPulled);
+              const normalizedTombstoneHash = computeDatabaseContentHash(tombstonedPulled);
+              const sameDevice = Boolean(res.remoteDevice && session.deviceId && res.remoteDevice === session.deviceId);
+              if (
+                baseChecksum === normalizedTombstoneHash ||
+                baseChecksum === normalizedRawHash ||
+                localChecksum === normalizedTombstoneHash ||
+                localChecksum === normalizedRawHash ||
+                sameDevice
+              ) {
+                updateGasSessionMetadata({
+                  serverVersion: pulledVersion,
+                  lastContentHash: canonicalServerHash,
+                });
+                baseChecksum = canonicalServerHash;
+                res = await gasVerifyChecksumBeforeWrite({
+                  localContentHash: localChecksum,
+                  expectedBaseHash: canonicalServerHash,
+                  expectedBaseVersion: pulledVersion,
+                  auditOnResult: true,
+                });
+              }
+            }
+          }
+        } catch {
+          // keep original conflict result if self-heal pull fails
+        }
+      }
 
       if (!res.ok) {
         setActiveSyncMeta((prev) => ({
@@ -6933,10 +7193,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         };
       }
 
+      const hasRealLocalDiff = Boolean(
+        pendingCloudSyncRef.current ||
+          (lastCloudHashRef.current && localChecksum !== lastCloudHashRef.current),
+      );
       const nextStatus: ActiveSyncGuardStatus =
         res.status === 'conflict'
           ? 'blocked-conflict'
-          : res.status === 'in-sync'
+          : res.status === 'in-sync' || !hasRealLocalDiff
             ? 'in-sync'
             : 'local-ahead';
 
@@ -6959,8 +7223,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (!options?.silent) {
         if (!res.allowedToWrite) {
           toast(res.reason, true);
-        } else if (res.status === 'in-sync') {
-          toast(`Sincronização Ativa OK: checksum idêntico à planilha de controle (v${res.remoteVersion ?? 0}).`);
+        } else if (nextStatus === 'in-sync') {
+          toast(`Sincronização Ativa OK: checksum verificado com a planilha de controle (v${res.remoteVersion ?? 0}).`);
         } else {
           toast(`Planilha de controle verificada (v${res.remoteVersion ?? 0}): cliente atualizado e liberado para gravar.`);
         }
@@ -7365,14 +7629,19 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setHasPendingCloudChanges(false);
         setLastCloudSyncAt(nowIso);
         if (isGasSessionActive()) {
-          updateGasSessionMetadata({ lastContentHash: remoteHash, lastSyncedAt: nowIso });
+          const canonicalServerHash =
+            (typeof getGasSession()?.lastContentHash === 'string' && getGasSession()?.lastContentHash?.trim()) ||
+            (typeof latestCloud.payload?.contentHash === 'string' && latestCloud.payload.contentHash.trim()) ||
+            remoteHash;
+          const serverVer = getGasSession()?.serverVersion;
+          updateGasSessionMetadata({ lastContentHash: canonicalServerHash, lastSyncedAt: nowIso });
           setActiveSyncMeta((prev) => ({
             ...prev,
             status: 'in-sync',
-            baseChecksum: remoteHash,
-            remoteChecksum: remoteHash,
-            localBaseVersion: getGasSession()?.serverVersion ?? prev.localBaseVersion,
-            remoteVersion: getGasSession()?.serverVersion ?? prev.remoteVersion,
+            baseChecksum: canonicalServerHash,
+            remoteChecksum: canonicalServerHash,
+            localBaseVersion: typeof serverVer === 'number' ? serverVer : prev.localBaseVersion,
+            remoteVersion: typeof serverVer === 'number' ? serverVer : prev.remoteVersion,
             remoteUpdatedAt: nowIso,
             lastCheckedAt: new Date().toISOString(),
             lastGuardOutcome: 'allowed',
@@ -7987,6 +8256,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         options?.folderId && options.folderId !== 'all' ? options.folderId : undefined;
       const forceModule = options?.forceModule || 'auto';
 
+      const controller = new AbortController();
+      restoreAbortControllerRef.current = controller;
       setIsSyncingDrive(true);
       try {
         const executeRestore = async (tokenToUse: string) => {
@@ -8188,11 +8459,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                     importFromAnyFolder: true,
                     skipTargetDbBlobs: !restoredDb,
                     lazyBinaryBlobs: isGasMode,
+                    signal: controller.signal,
                   }
                 : {
                     importFromAnyFolder: !hasStudyFolderFiles || isGasMode,
                     forceModule,
                     lazyBinaryBlobs: isGasMode,
+                    signal: controller.signal,
                   },
             );
 
@@ -8215,6 +8488,26 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               lastCloudContentHash: restoredHash,
               lastBackupContentHash: restoredHash,
             });
+            if (isGasSessionActive()) {
+              const gasSess = getGasSession();
+              const canonicalServerHash =
+                (typeof gasSess?.lastContentHash === 'string' && gasSess.lastContentHash.trim()) ||
+                (typeof latestCloud?.payload?.contentHash === 'string' && latestCloud.payload.contentHash.trim()) ||
+                restoredHash;
+              const serverVer = typeof gasSess?.serverVersion === 'number' ? gasSess.serverVersion : 0;
+              setActiveSyncMeta((prev) => ({
+                ...prev,
+                status: 'in-sync',
+                baseChecksum: canonicalServerHash,
+                remoteChecksum: canonicalServerHash,
+                localBaseVersion: serverVer,
+                remoteVersion: serverVer,
+                remoteUpdatedAt: cloudIso,
+                lastCheckedAt: new Date().toISOString(),
+                lastGuardOutcome: 'allowed',
+                blockedReason: null,
+              }));
+            }
           }
           if (!targetFolderId) {
             const scopedB = selectScopedBackupList(backupsList, { activeFolderId: folder.id });
@@ -8254,9 +8547,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             },
           });
 
+          const failedFilesCount = fileEvents.filter((ev) => ev.action === 'failed').length;
           if (permissionBlockedCount > 0 && totalFiles === 0) {
             toast(
               'Esses arquivos foram enviados fora do app. Use "Selecionar arquivos dentro da pasta no Drive" para autorizar o download pelo Google.',
+              true,
+            );
+          } else if (failedFilesCount > 0) {
+            toast(
+              `Restauração concluída com ${totalFiles} arquivo(s) importado(s) e ${failedFilesCount} arquivo(s) ignorado(s) por erro/tempo limite (confira o Log de Sincronização).`,
               true,
             );
           } else {
@@ -8288,6 +8587,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         }
       } catch (err: any) {
         const msg = String(err?.message || '');
+        if (msg.includes('RESTORE_ABORTED')) {
+          recordSyncActivity({
+            category: 'drive-restore',
+            operation: 'Restauração cancelada pelo usuário',
+            status: 'warning',
+            message: 'A restauração dos arquivos do Google Drive foi interrompida manualmente.',
+          });
+          toast('Restauração do Google Drive cancelada.');
+          return { restoredDb: false, filesRestored: 0, orphansImported: 0, permissionBlockedCount: 0 };
+        }
         if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
         recordSyncActivity({
           category: 'drive-restore',
@@ -8299,6 +8608,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         toast(`Erro ao restaurar dados do Google Drive: ${err?.message || 'Falha'}`, true);
         return { restoredDb: false, filesRestored: 0, orphansImported: 0, permissionBlockedCount: 0 };
       } finally {
+        if (restoreAbortControllerRef.current === controller) {
+          restoreAbortControllerRef.current = null;
+        }
         setRestoreProgress(null);
         setIsSyncingDrive(false);
       }
@@ -8395,25 +8707,34 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             let fileEvents: SyncAffectedFile[] = [];
 
             if (studyCandidates.length > 0) {
-              const res = await restoreFilesAndOrphansFromDriveList(
-                baseDb,
-                studyCandidates,
-                activeToken,
-                scope,
-                (current, total, label) => setRestoreProgress({ current, total, label }),
-                {
-                  onlyFileIds: studyCandidates.map((c) => c.id),
-                  forceModule: targetModule,
-                  importFromAnyFolder: true,
-                  skipTargetDbBlobs: true,
-                },
-              );
-              baseDb = res.updatedDb;
-              filesRestored = res.filesRestored;
-              orphansImported = res.orphansImported;
-              permissionBlockedCount = res.permissionBlockedCount;
-              skippedTombstonesCount = res.skippedTombstonesCount;
-              fileEvents = res.fileEvents;
+              const pickerController = new AbortController();
+              restoreAbortControllerRef.current = pickerController;
+              try {
+                const res = await restoreFilesAndOrphansFromDriveList(
+                  baseDb,
+                  studyCandidates,
+                  activeToken,
+                  scope,
+                  (current, total, label) => setRestoreProgress({ current, total, label }),
+                  {
+                    onlyFileIds: studyCandidates.map((c) => c.id),
+                    forceModule: targetModule,
+                    importFromAnyFolder: true,
+                    skipTargetDbBlobs: true,
+                    signal: pickerController.signal,
+                  },
+                );
+                baseDb = res.updatedDb;
+                filesRestored = res.filesRestored;
+                orphansImported = res.orphansImported;
+                permissionBlockedCount = res.permissionBlockedCount;
+                skippedTombstonesCount = res.skippedTombstonesCount;
+                fileEvents = res.fileEvents;
+              } finally {
+                if (restoreAbortControllerRef.current === pickerController) {
+                  restoreAbortControllerRef.current = null;
+                }
+              }
             }
 
             if (restoredDb || filesRestored > 0 || orphansImported > 0) {
@@ -9529,6 +9850,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     async (fileId: string): Promise<boolean> => {
       const activeToken = await ensureDriveToken();
       if (!activeToken) return false;
+      const controller = new AbortController();
+      restoreAbortControllerRef.current = controller;
       setIsSyncingDrive(true);
       try {
         toast('Baixando backup e restaurando arquivos do Google Drive...');
@@ -9585,6 +9908,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           activeToken,
           scope,
           (current, total, label) => setRestoreProgress({ current, total, label }),
+          { signal: controller.signal, lazyBinaryBlobs: isGasSessionActive() },
         );
 
         const cloudIso =
@@ -9629,6 +9953,16 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         return true;
       } catch (err: any) {
         const msg = String(err?.message || '');
+        if (msg.includes('RESTORE_ABORTED')) {
+          recordSyncActivity({
+            category: 'drive-restore',
+            operation: 'Restauração cancelada pelo usuário',
+            status: 'warning',
+            message: 'A restauração do backup foi interrompida manualmente.',
+          });
+          toast('Restauração do backup cancelada.');
+          return false;
+        }
         if (msg.includes('TOKEN_EXPIRED')) setDriveTokenReady(false);
         recordSyncActivity({
           category: 'drive-restore',
@@ -9640,11 +9974,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         toast(`Falha ao restaurar backup da nuvem: ${err?.message || 'Erro'}`, true);
         return false;
       } finally {
+        if (restoreAbortControllerRef.current === controller) {
+          restoreAbortControllerRef.current = null;
+        }
         setRestoreProgress(null);
         setIsSyncingDrive(false);
       }
     },
-    [applyRestoredDatabaseForScope, ensureDriveToken, recordSyncActivity, toast],
+    [applyRestoredDatabaseForScope, ensureDriveToken, googleUser?.email, recordSyncActivity, toast],
   );
 
   const deleteCloudBackup = useCallback(
@@ -10944,6 +11281,40 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [toast],
   );
 
+  const bulkUpdateErrorEntriesSubject = useCallback(
+    (ids: string[], materia: string) => {
+      const cleanMateria = visibleName(materia) || 'Geral';
+      const idSet = new Set(ids.filter(Boolean));
+      if (!idSet.size) return;
+      const now = new Date().toISOString().slice(0, 19);
+      const hasProofIds = Array.from(idSet).some((id) => id.startsWith('correcao-prova:'));
+      const hasAnnotationIds = Array.from(idSet).some((id) => !id.startsWith('correcao-prova:'));
+
+      setDb((prev) => ({
+        ...prev,
+        proofFiles: hasProofIds
+          ? prev.proofFiles.map((pf) => {
+              let touched = false;
+              const nextCorrecoes = pf.correcoes.map((corr) => {
+                const entryId = `correcao-prova:${pf.kind}:${pf.bank}:${pf.name}:${corr.id}`;
+                if (!idSet.has(entryId)) return corr;
+                touched = true;
+                return { ...corr, materia: cleanMateria, atualizado_em: now };
+              });
+              return touched ? { ...pf, correcoes: nextCorrecoes } : pf;
+            })
+          : prev.proofFiles,
+        annotations: hasAnnotationIds
+          ? prev.annotations.map((item) =>
+              idSet.has(item.id) ? { ...item, materia: cleanMateria } : item,
+            )
+          : prev.annotations,
+      }));
+      toast(`${idSet.size} registro(s) associado(s) à matéria ${cleanMateria}.`);
+    },
+    [toast],
+  );
+
   const deleteAnnotation = useCallback(
     (id: string) => {
       if (id.startsWith('correcao-prova:')) {
@@ -11151,10 +11522,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const startErrorNotebookQuiz = useCallback(
     (subjectFilter = 'Todas as Matérias', onlyPending = true) => {
+      const filterNorm = normalizeSearch(subjectFilter);
+      const registeredNorms = new Set(fixedSubjects.map((s) => normalizeSearch(visibleName(s))));
       const entries = allErrorEntries.filter((entry) => {
         if (!entry.questao?.enunciado) return false;
         if (onlyPending && entry.corrigido) return false;
-        if (subjectFilter !== 'Todas as Matérias' && entry.materia !== subjectFilter) return false;
+        if (subjectFilter === '__UNASSIGNED__') {
+          const entryNorm = normalizeSearch(visibleName(entry.materia));
+          if (entryNorm && registeredNorms.has(entryNorm)) return false;
+        } else if (subjectFilter !== 'Todas as Matérias') {
+          if (normalizeSearch(visibleName(entry.materia)) !== filterNorm) return false;
+        }
         return true;
       });
 
@@ -11184,7 +11562,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         id: uid(16),
         kind: 'training',
         titulo: 'Revisão do Caderno de Erros',
-        materia: subjectFilter,
+        materia: subjectFilter === '__UNASSIGNED__' ? 'Sem matéria cadastrada' : subjectFilter,
         questions,
         index: 0,
         answers: Array(questions.length),
@@ -11194,7 +11572,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setActivePage('Treino Diário');
       toast(`Iniciando bateria com ${questions.length} questão(ões) do Caderno de Erros!`);
     },
-    [allErrorEntries, ensureTimerRunning, getCurrentTimerSeconds, toast],
+    [allErrorEntries, ensureTimerRunning, fixedSubjects, getCurrentTimerSeconds, toast],
   );
 
   // Case Law
@@ -14569,6 +14947,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 
   // Utilities
+  const resolveCanonicalDiscipline = useCallback(
+    (rawInput: string, existingQuestions: Question[], fixedSubjectsList?: string[]): string => {
+      const clean = visibleName(rawInput);
+      if (!clean) return '';
+      const norm = normalizeSearch(clean);
+      const fromBank = existingQuestions.find(
+        (q) => q.materia && normalizeSearch(visibleName(q.materia)) === norm,
+      )?.materia;
+      if (fromBank) return visibleName(fromBank);
+      const fromFixed = (fixedSubjectsList || DEFAULT_FIXED_SUBJECTS).find(
+        (s) => s && normalizeSearch(visibleName(s)) === norm,
+      );
+      if (fromFixed) return visibleName(fromFixed);
+      return clean;
+    },
+    [],
+  );
+
   const importQuestionsTxt = useCallback(
     async (
       file: File,
@@ -14581,7 +14977,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (file.size > 5 * 1024 * 1024) {
         throw new Error('O arquivo de questões excede o limite de 5 MB.');
       }
-      const subject = subjectInput.trim() || displayBaseName(file.name);
+      const rawSubject = subjectInput.trim() || displayBaseName(file.name);
+      const subject =
+        resolveCanonicalDiscipline(
+          rawSubject,
+          dbRef.current.questions,
+          dbRef.current.fixedSubjects,
+        ) ||
+        visibleName(rawSubject) ||
+        displayBaseName(file.name);
       const text = await file.text();
       if (
         isScheduleTxtDescriptor(file.name, undefined, text) ||
@@ -14602,11 +15006,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const sim: SubmittedSimulation = {
           id: uid(32),
           titulo: displayBaseName(file.name),
-          materia: visibleName(subject),
+          materia: subject,
           arquivo: file.name,
           data: localDateTimeBrazilian(),
           criado_em: new Date().toISOString().slice(0, 19),
-          questoes: parsed.map((q, idx) => ({ ...q, numero: q.numero || idx + 1, materia: visibleName(subject) })),
+          questoes: parsed.map((q, idx) => ({ ...q, numero: q.numero || idx + 1, materia: subject })),
         };
         setDb((prev) => ({
           ...prev,
@@ -14623,7 +15027,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       await autoSyncFileToDrive(file, file.name, 'Questões');
       return { count: parsed.length, materia: subject, simulado: false };
     },
-    [autoSyncFileToDrive],
+    [autoSyncFileToDrive, resolveCanonicalDiscipline],
   );
 
   const addManualQuestion = useCallback(
@@ -14634,7 +15038,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       gabarito: string;
       comentario: string;
     }): { materia: string } => {
-      const materia = payload.materia.trim();
+      const materia = resolveCanonicalDiscipline(
+        payload.materia,
+        dbRef.current.questions,
+        dbRef.current.fixedSubjects,
+      );
       const enunciado = payload.enunciado.trim();
       if (!materia || !enunciado) {
         throw new Error('Informe a disciplina e o enunciado da questão.');
@@ -14682,7 +15090,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setDb((prev) => ({ ...prev, questions: [...prev.questions, q] }));
       return { materia };
     },
-    [],
+    [resolveCanonicalDiscipline],
   );
 
   const updateQuestion = useCallback(
@@ -14789,7 +15197,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (answerFile) {
         await autoSyncFileToDrive(answerFile, `GABARITO - ${answerFile.name}`, 'Provas e Gabaritos');
       }
-      const materia = subjectInput.trim() || displayBaseName(pdfFile.name);
+      const rawMateria = subjectInput.trim() || displayBaseName(pdfFile.name);
+      const materia =
+        resolveCanonicalDiscipline(
+          rawMateria,
+          dbRef.current.questions,
+          dbRef.current.fixedSubjects,
+        ) || visibleName(rawMateria);
       const rawKey = await readAnswerKeyInput(answerFile, answerText);
       const { answers: answerMap, positional } = parseAnswerKeyWithMode(rawKey);
       const answerKeys = Object.keys(answerMap).map(Number);
@@ -14821,7 +15235,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         parsedQuestions.push({
           id: uid(20),
           numero: b.numero,
-          materia: visibleName(materia),
+          materia,
           enunciado: b.enunciado,
           alternativas: b.alternativas,
           gabarito: answer,
@@ -14838,7 +15252,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const sim: SubmittedSimulation = {
           id: uid(32),
           titulo: displayBaseName(pdfFile.name),
-          materia: visibleName(materia),
+          materia,
           arquivo: pdfFile.name,
           data: localDateTimeBrazilian(),
           criado_em: new Date().toISOString().slice(0, 19),
@@ -14855,9 +15269,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...prev,
         questions: [...prev.questions, ...parsedQuestions],
       }));
-      return { count: parsedQuestions.length, materia: visibleName(materia), simulado: false };
+      return { count: parsedQuestions.length, materia, simulado: false };
     },
-    [autoSyncFileToDrive],
+    [autoSyncFileToDrive, resolveCanonicalDiscipline],
   );
 
   const convertExamToStructuredTxt = useCallback(
@@ -15114,6 +15528,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         addAnnotation,
         updateAnnotation,
         updateErrorEntrySubject,
+        bulkUpdateErrorEntriesSubject,
         deleteAnnotation,
         markAnnotationCorrected,
         reopenAnnotation,
@@ -15227,6 +15642,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         drivePermissionNeedsPicker,
         authorizeDriveFolderViaPicker,
         restoreProgress,
+        cancelDriveRestore,
         authError,
         connectGoogleDrive,
         disconnectGoogleDrive,

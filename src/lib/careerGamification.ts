@@ -1,8 +1,13 @@
 import { StudyDatabase } from '../types/study';
-import { localDateIso } from './parsers';
+import { localDateIso, normalizeSearch } from './parsers';
 
-export type MedalCategory = 'metas' | 'horas' | 'consistencia' | 'excelencia';
-export type MedalTier = 'bronze' | 'prata' | 'ouro' | 'diamante';
+export type MedalCategory =
+  | 'metas'
+  | 'horas'
+  | 'consistencia'
+  | 'excelencia'
+  | 'dominio';
+export type MedalTier = 'bronze' | 'prata' | 'ouro' | 'diamante' | 'supremo';
 
 export interface CareerLevelDefinition {
   level: number;
@@ -50,14 +55,22 @@ export interface CareerSummary {
     completedGoals: number;
     totalStudySeconds: number;
     totalStudyHours: number;
+    maxDailyHours: number;
     currentStreak: number;
     bestStreak: number;
     activeDaysTotal: number;
     totalAnswered: number;
     accuracyPct: number;
     completedSimulations: number;
+    bestSim20Pct: number;
+    bestSim30Pct: number;
     correctedErrors: number;
     lawReadings: number;
+    masteredSubjectsCount: number;
+    eliteSubjectsCount: number;
+    editalStudiedCount: number;
+    caseLawCount: number;
+    essaysCount: number;
   };
 }
 
@@ -162,7 +175,6 @@ function computeActivityStreaks(activeIsoSet: Set<string>): {
     prevMs = ms;
   }
 
-  // Current streak counting backwards from today (or yesterday if today not logged yet)
   const today = new Date();
   today.setHours(0, 0, 0, 0);
   const todayIso = localDateIso(today);
@@ -226,17 +238,52 @@ function buildMedal(params: {
 export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   const completedGoals = (db.completedGoals || []).length;
 
-  const totalStudySeconds = (db.studyTimeRecords || []).reduce(
-    (sum, rec) => sum + (rec.allocations || []).reduce((s, a) => s + (a.seconds || 0), 0),
-    0,
-  );
+  let totalStudySeconds = 0;
+  const secondsByDay = new Map<string, number>();
+  (db.studyTimeRecords || []).forEach((rec) => {
+    const secs = (rec.allocations || []).reduce((s, a) => s + (a.seconds || 0), 0);
+    totalStudySeconds += secs;
+    const iso = parseBrOrIsoDateToIso(rec.date);
+    if (iso && secs > 0) {
+      secondsByDay.set(iso, (secondsByDay.get(iso) || 0) + secs);
+    }
+  });
   const totalStudyHours = totalStudySeconds / 3600;
+  const maxDailySeconds = secondsByDay.size ? Math.max(...secondsByDay.values()) : 0;
+  const maxDailyHours = Math.floor((maxDailySeconds / 3600) * 10) / 10;
 
   const totalAnswered = (db.history || []).length;
   const totalCorrect = (db.history || []).filter((h) => h.correct).length;
   const accuracyPct = totalAnswered > 0 ? Math.round((totalCorrect / totalAnswered) * 100) : 0;
 
-  const completedSimulations = (db.completedSimulations || []).length;
+  // Per-subject mastery stats
+  const subjectStats = new Map<string, { total: number; correct: number }>();
+  (db.history || []).forEach((h) => {
+    const key = normalizeSearch(h.subject || '');
+    if (!key) return;
+    const prev = subjectStats.get(key) || { total: 0, correct: 0 };
+    prev.total += 1;
+    if (h.correct) prev.correct += 1;
+    subjectStats.set(key, prev);
+  });
+  let masteredSubjectsCount = 0;
+  let eliteSubjectsCount = 0;
+  subjectStats.forEach((st) => {
+    const pct = st.total > 0 ? (st.correct / st.total) * 100 : 0;
+    if (st.total >= 30 && pct >= 75) masteredSubjectsCount += 1;
+    if (st.total >= 50 && pct >= 80) eliteSubjectsCount += 1;
+  });
+
+  const completedSims = db.completedSimulations || [];
+  const completedSimulations = completedSims.length;
+  const bestSim20Pct = completedSims.reduce((max, sim) => {
+    const qty = sim.total || sim.questoes?.length || 0;
+    return qty >= 20 ? Math.max(max, Math.round(sim.aproveitamento || 0)) : max;
+  }, 0);
+  const bestSim30Pct = completedSims.reduce((max, sim) => {
+    const qty = sim.total || sim.questoes?.length || 0;
+    return qty >= 30 ? Math.max(max, Math.round(sim.aproveitamento || 0)) : max;
+  }, 0);
 
   const correctedAnnotations = (db.annotations || []).filter((a) => Boolean(a.corrigido)).length;
   const correctedProofItems = (db.proofFiles || []).reduce(
@@ -244,6 +291,13 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     0,
   );
   const correctedErrors = correctedAnnotations + correctedProofItems;
+
+  const editalStudiedCount = (db.contests || []).reduce(
+    (sum, contest) => sum + (contest.edital_pontos || []).filter((p) => Boolean(p.estudado)).length,
+    0,
+  );
+  const caseLawCount = (db.caseLaw || []).length;
+  const essaysCount = (db.essays || []).length;
 
   // Active days across all study actions for consistency streaks
   const activeDates = new Set<string>();
@@ -258,7 +312,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     if (secs > 0) registerIso(r.date);
   });
   (db.completedGoals || []).forEach((g) => registerIso(g.data));
-  (db.completedSimulations || []).forEach((s) => registerIso(s.criado_em || s.data));
+  completedSims.forEach((s) => registerIso(s.criado_em || s.data));
 
   let lawReadings = 0;
   Object.values(db.lawReadDates || {}).forEach((entries) => {
@@ -283,7 +337,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
 
   // XP Breakdown
   const xpBreakdown: CareerXpBreakdown = {
-    hoursXp: Math.round(totalStudySeconds / 60), // 1 XP per studied minute (60 XP/h)
+    hoursXp: Math.round(totalStudySeconds / 60),
     goalsXp: completedGoals * 45,
     questionsXp: totalAnswered * 2 + totalCorrect * 2,
     simulationsXp: completedSimulations * 120,
@@ -320,9 +374,11 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     ? Math.max(0, Math.min(100, Math.round((xpIntoLevel / Math.max(1, xpForNextLevel)) * 100)))
     : 100;
 
-  // Merit Medals (Metas, Horas, Consistência, Excelência)
+  const flooredHours = Math.floor(totalStudyHours * 10) / 10;
+
+  // Merit Medals (Metas, Horas, Consistência, Excelência, Domínio & Lei)
   const medals: MeritMedal[] = [
-    // Metas Batidas
+    // === METAS BATIDAS ===
     buildMedal({
       id: 'meta-1',
       title: 'Primeira Meta Batida',
@@ -363,15 +419,35 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       target: 75,
       unit: 'metas',
     }),
+    buildMedal({
+      id: 'meta-150',
+      title: 'Arquiteto do Cronograma',
+      description: 'Conclua 150 metas com execução rigorosa do planejamento.',
+      category: 'metas',
+      tier: 'supremo',
+      current: completedGoals,
+      target: 150,
+      unit: 'metas',
+    }),
+    buildMedal({
+      id: 'meta-300',
+      title: 'Comenda da Disciplina',
+      description: 'Marca extraordinária de 300 metas batidas na preparação.',
+      category: 'metas',
+      tier: 'supremo',
+      current: completedGoals,
+      target: 300,
+      unit: 'metas',
+    }),
 
-    // Horas Acumuladas
+    // === HORAS ACUMULADAS & MARATONAS ===
     buildMedal({
       id: 'horas-5',
       title: 'Primeiro Turno',
       description: 'Acumule 5 horas líquidas no Ponto Eletrônico.',
       category: 'horas',
       tier: 'bronze',
-      current: Math.floor(totalStudyHours * 10) / 10,
+      current: flooredHours,
       target: 5,
       unit: 'h',
     }),
@@ -381,7 +457,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       description: 'Acumule 25 horas líquidas de estudo registradas.',
       category: 'horas',
       tier: 'prata',
-      current: Math.floor(totalStudyHours * 10) / 10,
+      current: flooredHours,
       target: 25,
       unit: 'h',
     }),
@@ -391,7 +467,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       description: 'Rompa a marca histórica de 100 horas líquidas estudadas.',
       category: 'horas',
       tier: 'ouro',
-      current: Math.floor(totalStudyHours * 10) / 10,
+      current: flooredHours,
       target: 100,
       unit: 'h',
     }),
@@ -401,12 +477,52 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       description: 'Complete 250 horas líquidas acumuladas de estudo.',
       category: 'horas',
       tier: 'diamante',
-      current: Math.floor(totalStudyHours * 10) / 10,
+      current: flooredHours,
       target: 250,
       unit: 'h',
     }),
+    buildMedal({
+      id: 'horas-500',
+      title: 'Meio Milhar Líquido',
+      description: 'Sustente a marca pesada de 500 horas líquidas registradas.',
+      category: 'horas',
+      tier: 'supremo',
+      current: flooredHours,
+      target: 500,
+      unit: 'h',
+    }),
+    buildMedal({
+      id: 'horas-1000',
+      title: 'Milênio da Posse',
+      description: 'Patamar lendário de 1.000 horas líquidas acumuladas.',
+      category: 'horas',
+      tier: 'supremo',
+      current: flooredHours,
+      target: 1000,
+      unit: 'h',
+    }),
+    buildMedal({
+      id: 'maratona-6h',
+      title: 'Imersão de Turno Duplo',
+      description: 'Registre 6 horas líquidas ou mais em um único dia de estudo.',
+      category: 'horas',
+      tier: 'ouro',
+      current: maxDailyHours,
+      target: 6,
+      unit: 'h/dia',
+    }),
+    buildMedal({
+      id: 'maratona-8h',
+      title: 'Jornada Integral de Prova',
+      description: 'Alcance 8 horas líquidas ou mais em um único dia de dedicação.',
+      category: 'horas',
+      tier: 'diamante',
+      current: maxDailyHours,
+      target: 8,
+      unit: 'h/dia',
+    }),
 
-    // Consistência (Streaks)
+    // === CONSISTÊNCIA (STREAKS & DIAS ATIVOS) ===
     buildMedal({
       id: 'streak-3',
       title: 'Ritmo Ativado',
@@ -447,8 +563,48 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       target: 30,
       unit: 'dias',
     }),
+    buildMedal({
+      id: 'streak-60',
+      title: 'Bimestre Invicto',
+      description: 'Sustente 60 dias consecutivos de estudo sem nenhuma falha.',
+      category: 'consistencia',
+      tier: 'supremo',
+      current: bestStreak,
+      target: 60,
+      unit: 'dias',
+    }),
+    buildMedal({
+      id: 'streak-100',
+      title: 'Centenário Inquebrável',
+      description: 'Desafio extremo: 100 dias seguidos de atividade registrada.',
+      category: 'consistencia',
+      tier: 'supremo',
+      current: bestStreak,
+      target: 100,
+      unit: 'dias',
+    }),
+    buildMedal({
+      id: 'dias-ativos-90',
+      title: 'Trimestre em Campo',
+      description: 'Acumule 90 dias distintos com estudo ativo no calendário.',
+      category: 'consistencia',
+      tier: 'ouro',
+      current: activeDates.size,
+      target: 90,
+      unit: 'dias',
+    }),
+    buildMedal({
+      id: 'dias-ativos-180',
+      title: 'Semestre de Campanha',
+      description: 'Acumule 180 dias distintos de preparação ao longo da jornada.',
+      category: 'consistencia',
+      tier: 'diamante',
+      current: activeDates.size,
+      target: 180,
+      unit: 'dias',
+    }),
 
-    // Excelência (Precisão, Simulados e Caderno de Erros)
+    // === EXCELÊNCIA (VOLUME, PRECISÃO, SIMULADOS E ERROS) ===
     buildMedal({
       id: 'questoes-100',
       title: 'Bateria Centenária',
@@ -460,6 +616,36 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       unit: 'questões',
     }),
     buildMedal({
+      id: 'questoes-500',
+      title: 'Veterano de Bateria',
+      description: 'Atinja a marca de 500 questões resolvidas na plataforma.',
+      category: 'excelencia',
+      tier: 'prata',
+      current: totalAnswered,
+      target: 500,
+      unit: 'questões',
+    }),
+    buildMedal({
+      id: 'questoes-1500',
+      title: 'Arsenal de Questões',
+      description: 'Complete 1.500 questões resolvidas e consolide repertório.',
+      category: 'excelencia',
+      tier: 'ouro',
+      current: totalAnswered,
+      target: 1500,
+      unit: 'questões',
+    }),
+    buildMedal({
+      id: 'questoes-3000',
+      title: 'Acervo Monumental',
+      description: 'Resolva 3.000 questões no banco de treino e simulados.',
+      category: 'excelencia',
+      tier: 'supremo',
+      current: totalAnswered,
+      target: 3000,
+      unit: 'questões',
+    }),
+    buildMedal({
       id: 'simulados-3',
       title: 'Veterano de Simulados',
       description: 'Finalize 3 simulados fechados completos.',
@@ -468,6 +654,54 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       current: completedSimulations,
       target: 3,
       unit: 'simulados',
+    }),
+    buildMedal({
+      id: 'simulados-10',
+      title: 'Prova de Fogo',
+      description: 'Conclua 10 simulados fechados com controle de tempo.',
+      category: 'excelencia',
+      tier: 'ouro',
+      current: completedSimulations,
+      target: 10,
+      unit: 'simulados',
+    }),
+    buildMedal({
+      id: 'simulados-25',
+      title: 'Titã dos Simulados',
+      description: 'Complete 25 simulados fechados completos na plataforma.',
+      category: 'excelencia',
+      tier: 'supremo',
+      current: completedSimulations,
+      target: 25,
+      unit: 'simulados',
+    }),
+    buildMedal({
+      id: 'simulado-nota-85',
+      title: 'Desempenho de Posse (85%+)',
+      description: 'Alcance 85% ou mais de aproveitamento em um simulado (mín. 20 questões).',
+      category: 'excelencia',
+      tier: 'diamante',
+      current: bestSim20Pct,
+      target: 85,
+      unit: '%',
+      customLabel:
+        completedSimulations === 0
+          ? '0% · nenhum simulado (20+ q)'
+          : `Melhor: ${bestSim20Pct}% / 85%`,
+    }),
+    buildMedal({
+      id: 'simulado-nota-92',
+      title: 'Nota de Corte Suprema (92%+)',
+      description: 'Conquiste 92% ou mais em um simulado fechado com ao menos 30 questões.',
+      category: 'excelencia',
+      tier: 'supremo',
+      current: bestSim30Pct,
+      target: 92,
+      unit: '%',
+      customLabel:
+        completedSimulations === 0
+          ? '0% · nenhum simulado (30+ q)'
+          : `Melhor: ${bestSim30Pct}% / 92%`,
     }),
     buildMedal({
       id: 'precisao-80',
@@ -485,6 +719,36 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
           : `${accuracyPct}% / 80%`,
     }),
     buildMedal({
+      id: 'precisao-85',
+      title: 'Precisão Cirúrgica (85%+)',
+      description: 'Sustente 85% ou mais de acerto global após 200 questões resolvidas.',
+      category: 'excelencia',
+      tier: 'diamante',
+      current: totalAnswered >= 200 ? accuracyPct : Math.min(accuracyPct, 84),
+      target: 85,
+      unit: '%',
+      extraCondition: totalAnswered >= 200 && accuracyPct >= 85,
+      customLabel:
+        totalAnswered < 200
+          ? `${accuracyPct}% · ${totalAnswered}/200 questões`
+          : `${accuracyPct}% / 85%`,
+    }),
+    buildMedal({
+      id: 'precisao-90',
+      title: 'Excelência de Corte (90%+)',
+      description: 'Desafio máximo: mantenha 90%+ de acerto global com 500+ questões.',
+      category: 'excelencia',
+      tier: 'supremo',
+      current: totalAnswered >= 500 ? accuracyPct : Math.min(accuracyPct, 89),
+      target: 90,
+      unit: '%',
+      extraCondition: totalAnswered >= 500 && accuracyPct >= 90,
+      customLabel:
+        totalAnswered < 500
+          ? `${accuracyPct}% · ${totalAnswered}/500 questões`
+          : `${accuracyPct}% / 90%`,
+    }),
+    buildMedal({
       id: 'erros-10',
       title: 'Ouvidoria Superada',
       description: 'Marque 10 erros como corrigidos e dominados no Caderno.',
@@ -493,6 +757,98 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       current: correctedErrors,
       target: 10,
       unit: 'correções',
+    }),
+    buildMedal({
+      id: 'erros-50',
+      title: 'Caderno Blindado',
+      description: 'Neutralize 50 pontos falhos marcando-os como corrigidos no Caderno.',
+      category: 'excelencia',
+      tier: 'diamante',
+      current: correctedErrors,
+      target: 50,
+      unit: 'correções',
+    }),
+
+    // === DOMÍNIO & LEI SECA (OBJETIVOS MULTIDISCIPLINARES) ===
+    buildMedal({
+      id: 'lei-100',
+      title: 'Leitor da Letra Fria',
+      description: 'Registre 100 dispositivos lidos ou revisões no módulo de Lei Seca.',
+      category: 'dominio',
+      tier: 'bronze',
+      current: lawReadings,
+      target: 100,
+      unit: 'leituras',
+    }),
+    buildMedal({
+      id: 'lei-500',
+      title: 'Codificador de Norma',
+      description: 'Acumule 500 dispositivos lidos ou revisões na legislação.',
+      category: 'dominio',
+      tier: 'ouro',
+      current: lawReadings,
+      target: 500,
+      unit: 'leituras',
+    }),
+    buildMedal({
+      id: 'lei-1500',
+      title: 'Guardião do Ordenamento',
+      description: 'Alcance 1.500 leituras e dispositivos marcados na Lei Seca.',
+      category: 'dominio',
+      tier: 'supremo',
+      current: lawReadings,
+      target: 1500,
+      unit: 'leituras',
+    }),
+    buildMedal({
+      id: 'polimata-4',
+      title: 'Polímata do Edital',
+      description: 'Alcance 75%+ de acerto (mín. 30 questões) em 4 disciplinas diferentes.',
+      category: 'dominio',
+      tier: 'ouro',
+      current: masteredSubjectsCount,
+      target: 4,
+      unit: 'disciplinas',
+    }),
+    buildMedal({
+      id: 'polimata-8',
+      title: 'Domínio Multidisciplinar',
+      description: 'Sustente 80%+ de acerto (mín. 50 questões) em 8 disciplinas distintas.',
+      category: 'dominio',
+      tier: 'supremo',
+      current: eliteSubjectsCount,
+      target: 8,
+      unit: 'disciplinas',
+    }),
+    buildMedal({
+      id: 'edital-50',
+      title: 'Edital Verticalizado',
+      description: 'Marque 50 tópicos de edital como estudados na aba Editais.',
+      category: 'dominio',
+      tier: 'prata',
+      current: editalStudiedCount,
+      target: 50,
+      unit: 'tópicos',
+    }),
+    buildMedal({
+      id: 'sumulas-20',
+      title: 'Jurisconsulto',
+      description: 'Catalogue 20 súmulas ou julgados relevantes em Jurisprudência.',
+      category: 'dominio',
+      tier: 'prata',
+      current: caseLawCount,
+      target: 20,
+      unit: 'julgados',
+    }),
+    buildMedal({
+      id: 'discursiva-5',
+      title: 'Pena Oficial',
+      description: 'Registre 5 peças ou redações no módulo de Prova Discursiva.',
+      category: 'dominio',
+      tier: 'ouro',
+      current: essaysCount,
+      target: 5,
+      unit: 'discursivas',
     }),
   ];
 
@@ -514,14 +870,22 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       completedGoals,
       totalStudySeconds,
       totalStudyHours,
+      maxDailyHours,
       currentStreak,
       bestStreak,
       activeDaysTotal: activeDates.size,
       totalAnswered,
       accuracyPct,
       completedSimulations,
+      bestSim20Pct,
+      bestSim30Pct,
       correctedErrors,
       lawReadings,
+      masteredSubjectsCount,
+      eliteSubjectsCount,
+      editalStudiedCount,
+      caseLawCount,
+      essaysCount,
     },
   };
 }

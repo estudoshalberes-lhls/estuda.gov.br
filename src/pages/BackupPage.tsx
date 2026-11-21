@@ -20,6 +20,7 @@ import {
   Smartphone,
   Trash2,
   Upload,
+  X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { encryptBackupJson } from '../lib/cryptoBackup';
@@ -55,6 +56,7 @@ export const BackupPage: React.FC = () => {
     hasPendingCloudChanges,
     drivePermissionNeedsPicker,
     restoreProgress,
+    cancelDriveRestore,
     connectGoogleDrive,
     disconnectGoogleDrive,
     clearDriveBrowserCache,
@@ -896,9 +898,20 @@ export const BackupPage: React.FC = () => {
             <div className="rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] p-3">
               <div className="flex items-center justify-between gap-2 text-[11.5px] font-bold text-[var(--text)] mb-1.5">
                 <span className="truncate">{restoreProgress.label}</span>
-                <span className="font-mono-num text-[var(--accent)] shrink-0">
-                  {restoreProgress.current} de {restoreProgress.total} arquivos
-                </span>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="font-mono-num text-[var(--accent)]">
+                    {restoreProgress.current} de {restoreProgress.total} arquivos
+                  </span>
+                  <button
+                    type="button"
+                    onClick={cancelDriveRestore}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--bad)]/40 bg-[var(--panel)] text-[10.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] transition-colors cursor-pointer"
+                    title="Interromper restauração em andamento"
+                  >
+                    <X className="w-3 h-3" />
+                    <span>Cancelar</span>
+                  </button>
+                </div>
               </div>
               <div className="h-2 rounded-full bg-[var(--panel)] border border-[var(--line)] overflow-hidden">
                 <div

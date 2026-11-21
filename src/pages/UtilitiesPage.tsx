@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   BookOpen,
   BookPlus,
@@ -20,7 +20,7 @@ import {
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { triggerBlobDownload } from '../lib/fileStorage';
-import { cleanSafeName, visibleName } from '../lib/parsers';
+import { cleanSafeName, normalizeSearch, visibleName } from '../lib/parsers';
 import { PageHeader } from '../components/ui/PageHeader';
 
 type UtilCategory = 'Todos' | 'Questões' | 'Lei Seca' | 'Cronograma';
@@ -109,20 +109,51 @@ export const UtilitiesPage: React.FC = () => {
   const hideUpload = moduleVisibility('Utilidades').hide_upload;
   const [category, setCategory] = useState<UtilCategory>('Todos');
 
+  const availableDisciplines = useMemo(() => {
+    const seen = new Set<string>();
+    const merged: string[] = [];
+    const pushUnique = (raw?: string) => {
+      const clean = visibleName(String(raw || ''));
+      if (!clean) return;
+      const key = normalizeSearch(clean);
+      if (!key || seen.has(key)) return;
+      seen.add(key);
+      merged.push(clean);
+    };
+    disciplines.forEach(pushUnique);
+    fixedSubjects.forEach(pushUnique);
+    return merged.sort((a, b) => a.localeCompare(b, 'pt-BR'));
+  }, [disciplines, fixedSubjects]);
+
   // 1. Schedule TXT import
   const [schedFile, setSchedFile] = useState<File | null>(null);
   const [schedLoading, setSchedLoading] = useState(false);
   const schedRef = useRef<HTMLInputElement | null>(null);
 
   // 2. Questions TXT import
-  const [qFile, setQFile] = useState<File | null>(null);
-  const [qSubject, setQSubject] = useState('');
+  const [qFiles, setQFiles] = useState<File[]>([]);
+  const [qSelectValue, setQSelectValue] = useState<string>(() =>
+    availableDisciplines[0] || '__NEW__',
+  );
+  const [qCustomSubject, setQCustomSubject] = useState('');
   const [qAsSim, setQAsSim] = useState(false);
   const [qLoading, setQLoading] = useState(false);
   const qRef = useRef<HTMLInputElement | null>(null);
 
+  useEffect(() => {
+    if (
+      qSelectValue === '__NEW__' &&
+      !qCustomSubject.trim() &&
+      availableDisciplines.length > 0
+    ) {
+      setQSelectValue(availableDisciplines[0]);
+    }
+  }, [availableDisciplines, qCustomSubject, qSelectValue]);
+
   // 3. Manual Question
-  const [mSubject, setMSubject] = useState(disciplines[0] || 'Direito Constitucional');
+  const [mSubject, setMSubject] = useState(
+    availableDisciplines[0] || 'Direito Constitucional',
+  );
   const [mStatement, setMStatement] = useState('');
   const [mAlternatives, setMAlternatives] = useState('');
   const [mAnswer, setMAnswer] = useState('C');
@@ -211,25 +242,63 @@ export const UtilitiesPage: React.FC = () => {
     }
   };
 
+  const resolvedQSubject = useMemo(() => {
+    if (qSelectValue === '__FILENAME__') return '';
+    if (qSelectValue === '__NEW__') return visibleName(qCustomSubject);
+    return visibleName(qSelectValue);
+  }, [qCustomSubject, qSelectValue]);
+
   const handleImportQuestions = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!qFile) {
-      toast('Selecione o arquivo .txt com questões.', true);
+    if (!qFiles.length) {
+      toast('Selecione ao menos um arquivo .txt com questões.', true);
+      return;
+    }
+    if (qSelectValue === '__NEW__' && !resolvedQSubject) {
+      toast('Informe o nome da disciplina ou selecione uma disciplina existente.', true);
       return;
     }
     setQLoading(true);
+    let totalCount = 0;
+    let lastMateria = resolvedQSubject;
+    let succeededFiles = 0;
+    const failed: File[] = [];
+    let firstError = '';
+
     try {
-      const res = await importQuestionsTxt(qFile, qSubject, qAsSim);
-      toast(
-        res.simulado
-          ? `Simulado enviado criado com ${res.count} questão(ões) em ${res.materia}.`
-          : `${res.count} questão(ões) adicionada(s) ao banco de ${res.materia}.`,
-      );
-      setQFile(null);
-      setQSubject('');
-      if (qRef.current) qRef.current.value = '';
-    } catch (err) {
-      toast((err as Error).message, true);
+      for (const file of qFiles) {
+        try {
+          const res = await importQuestionsTxt(file, resolvedQSubject, qAsSim);
+          totalCount += res.count;
+          lastMateria = res.materia;
+          succeededFiles += 1;
+        } catch (err) {
+          failed.push(file);
+          if (!firstError) firstError = (err as Error).message;
+        }
+      }
+
+      if (failed.length === 0) {
+        toast(
+          qAsSim
+            ? `${succeededFiles} simulado(s) enviado(s) criado(s) com ${totalCount} questão(ões) em ${lastMateria}.`
+            : `${totalCount} questão(ões) adicionada(s) diretamente à disciplina "${lastMateria}".`,
+        );
+        setQFiles([]);
+        if (qSelectValue === '__NEW__' && lastMateria) {
+          setQSelectValue(lastMateria);
+          setQCustomSubject('');
+        }
+        if (qRef.current) qRef.current.value = '';
+      } else if (succeededFiles > 0) {
+        toast(
+          `${totalCount} questão(ões) importada(s) em "${lastMateria}", mas ${failed.length} arquivo(s) falhou: ${firstError}`,
+          true,
+        );
+        setQFiles(failed);
+      } else {
+        toast(firstError || 'Não foi possível importar os arquivos selecionados.', true);
+      }
     } finally {
       setQLoading(false);
     }
@@ -621,9 +690,10 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                     <label className={COMPACT_LABEL}>Disciplina / Nome da prova</label>
                     <input
                       type="text"
+                      list="util-disciplines"
                       value={examSubject}
                       onChange={(e) => setExamSubject(e.target.value)}
-                      placeholder="Ex.: Simulado CESPE 2026"
+                      placeholder="Selecione ou digite (ex.: Direito Constitucional)"
                       className={COMPACT_INPUT}
                     />
                   </div>
@@ -706,33 +776,88 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
 
             <CompactUtilCard
               title="Importar questões (.txt)"
-              subtitle="Suporta blocos numerados, divisor pipe (|) ou gabarito ao final."
+              subtitle="Adicione questões a uma disciplina específica sem criar matérias extras pelo nome do .txt."
               icon={<FileSpreadsheet className="w-4 h-4" />}
               badge=".TXT"
             >
               <form onSubmit={handleImportQuestions} className="flex flex-col gap-2">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div>
-                    <label className={COMPACT_LABEL}>Arquivo .txt / .md</label>
+                    <label className={COMPACT_LABEL}>Arquivo(s) .txt / .md</label>
                     <input
                       ref={qRef}
                       type="file"
+                      multiple
                       accept=".txt,.md"
-                      onChange={(e) => setQFile(e.target.files?.[0] || null)}
+                      onChange={(e) => setQFiles(Array.from(e.target.files || []))}
                       className={COMPACT_INPUT}
                     />
                   </div>
                   <div>
-                    <label className={COMPACT_LABEL}>Disciplina (opcional)</label>
+                    <label className={COMPACT_LABEL}>Disciplina de destino</label>
+                    <select
+                      aria-label="Disciplina de destino das questões"
+                      value={
+                        qSelectValue === '__NEW__' ||
+                        qSelectValue === '__FILENAME__' ||
+                        availableDisciplines.includes(qSelectValue)
+                          ? qSelectValue
+                          : '__NEW__'
+                      }
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        setQSelectValue(val);
+                        if (val !== '__NEW__') {
+                          setQCustomSubject('');
+                        }
+                      }}
+                      className={COMPACT_INPUT}
+                    >
+                      {availableDisciplines.length > 0 && (
+                        <optgroup label="Disciplinas existentes / fixadas">
+                          {availableDisciplines.map((d) => (
+                            <option key={d} value={d}>
+                              {d}
+                            </option>
+                          ))}
+                        </optgroup>
+                      )}
+                      <optgroup label="Outras opções">
+                        <option value="__NEW__">+ Nova disciplina personalizada…</option>
+                        <option value="__FILENAME__">Usar nome de cada arquivo (.txt)</option>
+                      </optgroup>
+                    </select>
+                  </div>
+                </div>
+
+                {qSelectValue === '__NEW__' && (
+                  <div>
+                    <label className={COMPACT_LABEL}>Nome da nova disciplina</label>
                     <input
                       type="text"
-                      value={qSubject}
-                      onChange={(e) => setQSubject(e.target.value)}
-                      placeholder="Padrão: nome do arquivo"
+                      value={qCustomSubject}
+                      onChange={(e) => setQCustomSubject(e.target.value)}
+                      placeholder="Ex.: Direito Previdenciário"
                       className={COMPACT_INPUT}
                     />
                   </div>
+                )}
+
+                <div className="text-[10.5px] text-[var(--muted)] leading-snug">
+                  {qSelectValue === '__FILENAME__' ? (
+                    <span>
+                      Cada arquivo criará/usará a disciplina com o próprio nome do <code>.txt</code>.
+                    </span>
+                  ) : resolvedQSubject ? (
+                    <span>
+                      Todas as questões{qFiles.length > 1 ? ` dos ${qFiles.length} arquivos` : ''} irão direto para{' '}
+                      <strong className="text-[var(--text)]">{resolvedQSubject}</strong>, sem criar disciplina extra pelo nome do arquivo.
+                    </span>
+                  ) : (
+                    <span>Digite o nome da disciplina que receberá as questões importadas.</span>
+                  )}
                 </div>
+
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <label className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[var(--text)] cursor-pointer select-none">
                     <input
@@ -745,7 +870,11 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                   </label>
                   <button type="submit" disabled={qLoading} className={BTN_PRIMARY}>
                     <FileSpreadsheet className="w-3.5 h-3.5" />
-                    {qLoading ? 'Importando…' : 'Importar questões'}
+                    {qLoading
+                      ? 'Importando…'
+                      : qFiles.length > 1
+                        ? `Importar (${qFiles.length} arquivos)`
+                        : 'Importar questões'}
                   </button>
                 </div>
               </form>
@@ -803,7 +932,7 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                     className={COMPACT_INPUT}
                   />
                   <datalist id="util-disciplines">
-                    {disciplines.map((d) => (
+                    {availableDisciplines.map((d) => (
                       <option key={d} value={d} />
                     ))}
                   </datalist>

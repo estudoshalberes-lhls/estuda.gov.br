@@ -75,6 +75,8 @@ export interface GasLoginResponse {
   serverVersion?: number;
   updatedAt?: string | null;
   contentHash?: string;
+  controlSheetVersion?: number;
+  controlSheetHash?: string;
   payload?: any;
   summary?: GasVersionSummary;
   postIt?: {
@@ -321,12 +323,16 @@ export function subscribeGasSession(listener: GasSessionListener): () => void {
 async function gasPost<T = any>(
   action: string,
   payload: Record<string, unknown> = {},
-  options?: { apiUrl?: string; timeoutMs?: number; skipAuth?: boolean },
+  options?: { apiUrl?: string; timeoutMs?: number; skipAuth?: boolean; signal?: AbortSignal },
 ): Promise<T> {
   const session = getGasSession();
   const targetUrl = (options?.apiUrl || session?.apiUrl || getConfiguredGasApiUrl()).trim();
   if (!targetUrl) {
     throw new Error('URL do Google Apps Script não configurada.');
+  }
+
+  if (options?.signal?.aborted) {
+    throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
   }
 
   const bodyObj: Record<string, unknown> = {
@@ -340,7 +346,13 @@ async function gasPost<T = any>(
 
   const controller = new AbortController();
   const timeoutMs = options?.timeoutMs ?? 60_000;
-  const timerId = window.setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  const timerId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
   const startedAtMs = typeof performance !== 'undefined' ? performance.now() : Date.now();
   const shouldAuditAction =
     action !== 'ping' && action !== 'listAuditLogs' && action !== 'uploadFileChunk';
@@ -410,9 +422,11 @@ async function gasPost<T = any>(
     );
     const wrappedErr =
       err?.name === 'AbortError'
-        ? new Error(
-            `Tempo esgotado (${Math.round(timeoutMs / 1000)}s) ao aguardar o Google Apps Script (${action}). A pasta do Drive pode estar grande ou o script demorou para responder; aguarde alguns segundos e tente novamente.`,
-          )
+        ? options?.signal?.aborted && !timedOut
+          ? new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.')
+          : new Error(
+              `Tempo esgotado (${Math.round(timeoutMs / 1000)}s) ao aguardar o Google Apps Script (${action}). A pasta do Drive pode estar grande ou o script demorou para responder; aguarde alguns segundos e tente novamente.`,
+            )
         : err;
     if (shouldAuditAction) {
       recordLocalGasAuditEntry({
@@ -427,6 +441,7 @@ async function gasPost<T = any>(
     throw wrappedErr;
   } finally {
     window.clearTimeout(timerId);
+    options?.signal?.removeEventListener('abort', onExternalAbort);
   }
 }
 
@@ -593,6 +608,16 @@ export async function gasLogin(
 
   if (res.ok && res.sessionToken) {
     if (customApiUrl) setConfiguredGasApiUrl(apiUrl);
+    const canonicalVersion =
+      typeof res.controlSheetVersion === 'number' && res.controlSheetVersion > 0
+        ? Math.max(res.controlSheetVersion, Number(res.serverVersion || 0))
+        : typeof res.serverVersion === 'number'
+          ? res.serverVersion
+          : 0;
+    const canonicalHash =
+      (typeof res.controlSheetHash === 'string' && res.controlSheetHash.trim()) ||
+      (typeof res.contentHash === 'string' && res.contentHash.trim()) ||
+      null;
     saveGasSession({
       token: res.sessionToken,
       username: res.username || username.trim().toLowerCase(),
@@ -601,11 +626,11 @@ export async function gasLogin(
       folderId: res.folderId || '',
       folderName: res.folderName || 'Central de Estudos - Materiais',
       folderUrl: res.folderUrl || '',
-      serverVersion: typeof res.serverVersion === 'number' ? res.serverVersion : 0,
+      serverVersion: canonicalVersion,
       expiresAt: typeof res.expiresAt === 'number' ? res.expiresAt : Date.now() + 29 * 86400000,
       deviceId: getOrCreateGasDeviceId(),
       lastSyncedAt: res.updatedAt || new Date().toISOString(),
-      lastContentHash: typeof res.contentHash === 'string' && res.contentHash ? res.contentHash : null,
+      lastContentHash: canonicalHash,
     });
   }
 
@@ -653,6 +678,8 @@ export async function gasPullState(): Promise<{
   serverVersion: number;
   updatedAt: string | null;
   contentHash?: string;
+  controlSheetVersion?: number;
+  controlSheetHash?: string;
   fileId?: string | null;
   fileName?: string;
   payload: any;
@@ -670,11 +697,19 @@ export async function gasPullState(): Promise<{
   const task = (async () => {
     const res = await gasPost<any>('pullState', {}, { timeoutMs: 150_000 });
     if (res?.ok) {
+      const canonicalVersion =
+        typeof res.controlSheetVersion === 'number' && res.controlSheetVersion > 0
+          ? Math.max(res.controlSheetVersion, Number(res.serverVersion || 0))
+          : typeof res.serverVersion === 'number'
+            ? res.serverVersion
+            : undefined;
+      const canonicalHash =
+        (typeof res.controlSheetHash === 'string' && res.controlSheetHash.trim()) ||
+        (typeof res.contentHash === 'string' && res.contentHash.trim()) ||
+        undefined;
       updateGasSessionMetadata({
-        ...(typeof res.serverVersion === 'number' ? { serverVersion: res.serverVersion } : {}),
-        ...(typeof res.contentHash === 'string' && res.contentHash
-          ? { lastContentHash: res.contentHash }
-          : {}),
+        ...(typeof canonicalVersion === 'number' ? { serverVersion: canonicalVersion } : {}),
+        ...(canonicalHash ? { lastContentHash: canonicalHash } : {}),
         ...(res.folderId ? { folderId: res.folderId } : {}),
         ...(res.folderName ? { folderName: res.folderName } : {}),
         ...(res.folderUrl ? { folderUrl: res.folderUrl } : {}),
@@ -931,7 +966,11 @@ async function gasPushStateRaw(payload: Record<string, unknown>): Promise<GasPus
         : 0;
   const contentHash = String(payload.contentHash || '').trim();
   const expectedContentHash = String(
-    payload.expectedContentHash || session?.lastContentHash || '',
+    session?.lastContentHash &&
+      typeof session?.serverVersion === 'number' &&
+      session.serverVersion === baseVersion
+      ? session.lastContentHash
+      : payload.expectedContentHash || session?.lastContentHash || '',
   ).trim();
 
   // Sincronização Ativa: compara versão + checksum com a planilha de controle ANTES de gravar
@@ -1288,13 +1327,21 @@ export async function gasListFiles(options?: { forceRefresh?: boolean }): Promis
   }
 }
 
-export async function gasDownloadFileBlob(fileId: string, fallbackMime = 'application/octet-stream'): Promise<Blob | null> {
+export async function gasDownloadFileBlob(
+  fileId: string,
+  fallbackMime = 'application/octet-stream',
+  options?: { timeoutMs?: number; signal?: AbortSignal },
+): Promise<Blob | null> {
   const res = await gasPost<{
     ok: boolean;
     base64Data?: string;
     mimeType?: string;
     error?: string;
-  }>('downloadFile', { fileId }, { timeoutMs: 180_000 });
+  }>(
+    'downloadFile',
+    { fileId },
+    { timeoutMs: options?.timeoutMs ?? 55_000, signal: options?.signal },
+  );
   if (!res.ok || !res.base64Data) return null;
   return base64ToBlob(res.base64Data, res.mimeType || fallbackMime);
 }

@@ -246,69 +246,116 @@ function yieldToMainThread(): Promise<void> {
   });
 }
 
+function raceTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const id = window.setTimeout(() => {
+      reject(new Error(`PDF_EXTRACT_TIMEOUT: Tempo limite ao processar ${label}.`));
+    }, timeoutMs);
+    promise.then(
+      (val) => {
+        window.clearTimeout(id);
+        resolve(val);
+      },
+      (err) => {
+        window.clearTimeout(id);
+        reject(err);
+      },
+    );
+  });
+}
+
 export async function extractTextFromPdfFile(
   file: File | Blob,
   kind = 'documento',
   onProgress?: (currentPage: number, totalPages: number) => void,
+  options?: { timeoutMs?: number; maxPages?: number },
 ): Promise<string> {
-  const pdfjsLib = await getPdfJs();
+  const startedAt = Date.now();
+  const timeoutMs = options?.timeoutMs ?? 0;
+  const remainingMs = () => (timeoutMs > 0 ? Math.max(1000, timeoutMs - (Date.now() - startedAt)) : 0);
+
+  const pdfjsLib = await raceTimeout(getPdfJs(), remainingMs(), `leitor de PDF (${kind})`);
   const buffer = await file.arrayBuffer();
-  let pdf: import('pdfjs-dist').PDFDocumentProxy;
+  let pdf: import('pdfjs-dist').PDFDocumentProxy | null = null;
+  let loadingTask: import('pdfjs-dist').PDFDocumentLoadingTask | null = null;
   try {
-    pdf = await pdfjsLib.getDocument({ data: buffer }).promise;
+    loadingTask = pdfjsLib.getDocument({ data: buffer });
+    pdf = await raceTimeout(loadingTask.promise, remainingMs(), `PDF de ${kind}`);
   } catch (err) {
+    if (loadingTask) {
+      void loadingTask.destroy().catch(() => {});
+    }
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`Não foi possível ler o PDF de ${kind}: ${message}`);
   }
 
-  const pageTexts: string[] = [];
-  for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex++) {
-    if (pageIndex > 1 && pageIndex % 2 === 0) {
-      await yieldToMainThread();
-    }
-    onProgress?.(pageIndex, pdf.numPages);
-    const page = await pdf.getPage(pageIndex);
-    const content = await page.getTextContent();
-    const spans: PositionedTextSpan[] = [];
-    let fallbackLines: string[] = [];
-    let hasAllCoords = true;
+  try {
+    const totalPagesToRead =
+      options?.maxPages && options.maxPages > 0
+        ? Math.min(pdf.numPages, options.maxPages)
+        : pdf.numPages;
 
-    for (let idx = 0; idx < content.items.length; idx++) {
-      const item = content.items[idx];
-      if (!('str' in item)) continue;
-      const textItem = item as { str: string; transform?: number[]; width?: number; height?: number; hasEOL?: boolean };
-      if (!textItem.str) continue;
-      if (Array.isArray(textItem.transform) && textItem.transform.length >= 6) {
-        const a = textItem.transform[0] || 0;
-        const b = textItem.transform[1] || 0;
-        const d = textItem.transform[3] || 0;
-        const x = textItem.transform[4];
-        const y = textItem.transform[5];
-        const fontSize = Math.max(6, Math.hypot(a, b) || Math.abs(d) || textItem.height || 10);
-        const width =
-          typeof textItem.width === 'number' && Number.isFinite(textItem.width)
-            ? Math.max(0, textItem.width)
-            : textItem.str.length * fontSize * 0.45;
-        spans.push({ str: textItem.str, x, y, width, fontSize, order: idx });
-      } else {
-        hasAllCoords = false;
-        fallbackLines.push(textItem.str);
+    const pageTexts: string[] = [];
+    for (let pageIndex = 1; pageIndex <= totalPagesToRead; pageIndex++) {
+      if (timeoutMs > 0 && Date.now() - startedAt > timeoutMs) {
+        throw new Error(`PDF_EXTRACT_TIMEOUT: Tempo limite ao extrair páginas de ${kind}.`);
       }
+      if (pageIndex > 1 && pageIndex % 2 === 0) {
+        await yieldToMainThread();
+      }
+      onProgress?.(pageIndex, totalPagesToRead);
+      const page = await raceTimeout(pdf.getPage(pageIndex), remainingMs(), `página ${pageIndex} de ${kind}`);
+      const content = await raceTimeout(page.getTextContent(), remainingMs(), `texto da página ${pageIndex}`);
+      const spans: PositionedTextSpan[] = [];
+      const fallbackLines: string[] = [];
+      let hasAllCoords = true;
+
+      for (let idx = 0; idx < content.items.length; idx++) {
+        const item = content.items[idx];
+        if (!('str' in item)) continue;
+        const textItem = item as { str: string; transform?: number[]; width?: number; height?: number; hasEOL?: boolean };
+        if (!textItem.str) continue;
+        if (Array.isArray(textItem.transform) && textItem.transform.length >= 6) {
+          const a = textItem.transform[0] || 0;
+          const b = textItem.transform[1] || 0;
+          const d = textItem.transform[3] || 0;
+          const x = textItem.transform[4];
+          const y = textItem.transform[5];
+          const fontSize = Math.max(6, Math.hypot(a, b) || Math.abs(d) || textItem.height || 10);
+          const width =
+            typeof textItem.width === 'number' && Number.isFinite(textItem.width)
+              ? Math.max(0, textItem.width)
+              : textItem.str.length * fontSize * 0.45;
+          spans.push({ str: textItem.str, x, y, width, fontSize, order: idx });
+        } else {
+          hasAllCoords = false;
+          fallbackLines.push(textItem.str);
+        }
+      }
+
+      const lines =
+        hasAllCoords && spans.length > 0
+          ? extractOrderedPageLines(spans)
+          : fallbackLines.map((l) => l.trim()).filter(Boolean);
+      pageTexts.push(lines.join('\n'));
     }
 
-    const lines = hasAllCoords && spans.length > 0
-      ? extractOrderedPageLines(spans)
-      : fallbackLines.map((l) => l.trim()).filter(Boolean);
-    pageTexts.push(lines.join('\n'));
+    const joined = pageTexts.join('\n\f\n');
+    if (!joined.trim()) {
+      throw new Error(
+        `O PDF de ${kind} não contém texto selecionável; OCR não está disponível nesta versão. Envie um arquivo com texto selecionável ou digite/cole as respostas.`,
+      );
+    }
+    return joined;
+  } finally {
+    if (pdf && typeof pdf.cleanup === 'function') {
+      await Promise.resolve(pdf.cleanup()).catch(() => {});
+    }
+    if (loadingTask && typeof loadingTask.destroy === 'function') {
+      await loadingTask.destroy().catch(() => {});
+    }
   }
-
-  const joined = pageTexts.join('\n\f\n');
-  if (!joined.trim()) {
-    throw new Error(
-      `O PDF de ${kind} não contém texto selecionável; OCR não está disponível nesta versão. Envie um arquivo com texto selecionável ou digite/cole as respostas.`,
-    );
-  }
-  return joined;
 }
 
 function decodeTextBuffer(buffer: ArrayBuffer): string {
@@ -372,11 +419,12 @@ export async function readStudyBlobText(
   blob: Blob,
   filename: string,
   mimeType?: string,
+  options?: { timeoutMs?: number; maxPages?: number },
 ): Promise<string> {
   const lower = String(filename || '').toLowerCase();
   const effectiveMime = String(mimeType || blob.type || '').toLowerCase();
   if (lower.endsWith('.pdf') || effectiveMime === 'application/pdf') {
-    return extractTextFromPdfFile(blob, 'legislação');
+    return extractTextFromPdfFile(blob, 'legislação', undefined, options);
   }
   if (
     lower.endsWith('.txt') ||

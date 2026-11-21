@@ -5,6 +5,7 @@ import {
   ArrowLeft,
   ArrowRight,
   BarChart3,
+  BookOpen,
   CalendarClock,
   Check,
   CheckCircle2,
@@ -17,9 +18,12 @@ import {
   Pencil,
   Play,
   Plus,
+  Printer,
   RotateCcw,
   Search,
+  Tag,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import {
@@ -33,6 +37,9 @@ import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftSt
 import { ErrorNotebookEntry, ModuleName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ErrorParetoD3Panel, ParetoDatum } from '../components/charts/ErrorParetoD3Panel';
+import { ErrorNotebookOfficialPrintSheet } from '../components/errors/ErrorNotebookOfficialPrintSheet';
+
+const UNASSIGNED_SUBJECT_FILTER = '__UNASSIGNED__';
 
 const NOTE_TYPES = [
   'Erro Frequente',
@@ -144,6 +151,9 @@ function formatBrDateStr(iso?: string): string {
 interface ErrorNotebookRowProps {
   entries: ErrorNotebookEntry[];
   registeredSubjects: string[];
+  registeredSubjectNorms: Set<string>;
+  selectedEntryIds: Set<string>;
+  onToggleSelectEntry: (id: string) => void;
   todayIso: string;
   editingEntry: EditingErrorEntryState | null;
   setEditingEntry: React.Dispatch<React.SetStateAction<EditingErrorEntryState | null>>;
@@ -164,6 +174,9 @@ const ErrorNotebookEntryRow = React.memo(
     ariaAttributes,
     entries,
     registeredSubjects,
+    registeredSubjectNorms,
+    selectedEntryIds,
+    onToggleSelectEntry,
     todayIso,
     editingEntry,
     setEditingEntry,
@@ -180,8 +193,11 @@ const ErrorNotebookEntryRow = React.memo(
     if (!entry) return null;
     const isEditing = editingEntry?.id === entry.id;
     const isCorrected = Boolean(entry.corrigido);
+    const isSelected = selectedEntryIds.has(entry.id);
+    const entryMateriaNorm = normalizeSearch(visibleName(entry.materia));
+    const isRegisteredMatch = Boolean(entryMateriaNorm && registeredSubjectNorms.has(entryMateriaNorm));
     const selectedSubjectVal =
-      registeredSubjects.find((s) => normalizeSearch(s) === normalizeSearch(entry.materia)) ||
+      registeredSubjects.find((s) => normalizeSearch(s) === entryMateriaNorm) ||
       entry.materia;
     const editingSubjectVal = editingEntry
       ? registeredSubjects.find(
@@ -191,67 +207,97 @@ const ErrorNotebookEntryRow = React.memo(
 
     return (
       <div style={style} {...ariaAttributes} className="pb-3">
-        <Panel>
+        <Panel className={isSelected ? 'border-[var(--accent)] bg-[var(--accent-soft)]/30' : undefined}>
           <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
-            <div className="flex flex-wrap items-center gap-2">
+            <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+              {!isCorrected && (
+                <label
+                  className="inline-flex items-center cursor-pointer select-none"
+                  title="Selecionar questão pendente para associar em lote a uma matéria"
+                >
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => onToggleSelectEntry(entry.id)}
+                    aria-label={`Selecionar questão pendente ${entry.id}`}
+                    className="accent-[var(--accent)] w-4 h-4 cursor-pointer"
+                  />
+                </label>
+              )}
+
               {isCorrected ? (
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--good)] bg-[var(--good)]/15 text-[11px] font-bold text-[var(--good)]">
-                  <CheckCircle2 className="w-3 h-3" />
+                <span className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--good)]">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
                   Já Corrigido {entry.corrigido_em ? `(${entry.corrigido_em})` : ''}
                 </span>
               ) : (
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md border border-[var(--warning)] bg-[var(--warning)]/15 text-[11px] font-bold text-[var(--warning)]">
-                  <Clock className="w-3 h-3" />
+                <span className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--warning)]">
+                  <Clock className="w-3.5 h-3.5" />
                   Pendente de Correção
                 </span>
               )}
 
-              <span className="px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--accent)]">
+              <span className="text-[var(--line-strong)]">·</span>
+              <span className="text-[11.5px] font-bold text-[var(--accent)]">
                 {visibleName(entry.tipo)}
               </span>
+
               <div className="inline-flex items-center gap-1.5">
                 <span className="text-[11px] font-bold text-[var(--muted)]">Matéria:</span>
                 <select
-                  aria-label={`Atribuir matéria fixada à questão ${entry.id}`}
+                  aria-label={`Associar matéria cadastrada à questão ${entry.id}`}
                   value={selectedSubjectVal}
                   onChange={(e) => updateErrorEntrySubject(entry.id, e.target.value)}
-                  className="ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[12px] font-bold"
-                  title="Alterar matéria da questão usando as mesmas matérias fixadas no cronômetro"
+                  className={`ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[12px] font-bold ${
+                    !isCorrected && !isRegisteredMatch ? '!border-[var(--warning)]' : ''
+                  }`}
+                  title="Associar questão a uma matéria cadastrada"
                 >
-                  {!registeredSubjects.some(
-                    (s) => normalizeSearch(s) === normalizeSearch(selectedSubjectVal),
-                  ) &&
-                    selectedSubjectVal && (
-                      <option value={selectedSubjectVal}>{visibleName(selectedSubjectVal)}</option>
-                    )}
+                  {!isRegisteredMatch && selectedSubjectVal && (
+                    <option value={selectedSubjectVal}>
+                      {visibleName(selectedSubjectVal)} (não cadastrada)
+                    </option>
+                  )}
                   {registeredSubjects.map((subj) => (
                     <option key={subj} value={subj}>
                       {subj}
                     </option>
                   ))}
                 </select>
+                {!isCorrected && !isRegisteredMatch && (
+                  <span className="text-[10.5px] font-bold text-[var(--warning)]">
+                    Associar
+                  </span>
+                )}
               </div>
+
               {entry.origem && (
-                <span className="px-2 py-0.5 rounded-md border border-[var(--line)] bg-[var(--panel-raised)] text-[10.5px] font-bold text-[var(--muted)]">
-                  Origem: {entry.origem}
-                </span>
+                <>
+                  <span className="text-[var(--line-strong)]">·</span>
+                  <span className="text-[11px] font-semibold text-[var(--muted)]">
+                    Origem: {entry.origem}
+                  </span>
+                </>
               )}
               <span className="text-[11.5px] text-[var(--muted)] font-mono-num">
                 · {entry.data}
               </span>
               {entry.proxima_revisao && (
-                <span
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[10.5px] font-bold ${
-                    entry.proxima_revisao <= todayIso
-                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
-                      : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)]'
-                  }`}
-                >
-                  <CalendarClock className="w-3 h-3" />
-                  {entry.proxima_revisao <= todayIso
-                    ? `Revisar hoje (Nível ${entry.nivel_revisao ?? 1})`
-                    : `Próx. revisão: ${formatBrDateStr(entry.proxima_revisao)} (Nível ${entry.nivel_revisao ?? 1})`}
-                </span>
+                <>
+                  <span className="text-[var(--line-strong)]">·</span>
+                  <span
+                    className={`inline-flex items-center gap-1 text-[11px] font-bold ${
+                      entry.proxima_revisao <= todayIso
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--muted)]'
+                    }`}
+                  >
+                    <CalendarClock className="w-3 h-3" />
+                    {entry.proxima_revisao <= todayIso
+                      ? `Revisar hoje (Nível ${entry.nivel_revisao ?? 1})`
+                      : `Próx. revisão: ${formatBrDateStr(entry.proxima_revisao)} (Nível ${entry.nivel_revisao ?? 1})`}
+                  </span>
+                </>
               )}
             </div>
 
@@ -500,17 +546,22 @@ export const ErrorNotebookPage: React.FC = () => {
   const {
     db,
     fixedSubjects,
+    addFixedSubject,
+    removeFixedSubject,
     allErrorEntries,
     moduleVisibility,
     setActivePage,
     addAnnotation,
     updateAnnotation,
     updateErrorEntrySubject,
+    bulkUpdateErrorEntriesSubject,
     deleteAnnotation,
     markAnnotationCorrected,
     reopenAnnotation,
     advanceErrorReview,
     startErrorNotebookQuiz,
+    googleUser,
+    requestConfirm,
     toast,
   } = useStudy();
 
@@ -537,6 +588,11 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [newSubject, newText, newType]);
 
+  // Subject registration & bulk assignment state
+  const [newSubjectName, setNewSubjectName] = useState('');
+  const [selectedEntryIds, setSelectedEntryIds] = useState<string[]>([]);
+  const [bulkTargetSubject, setBulkTargetSubject] = useState(fixedSubjects[0] || '');
+
   const [filterSubject, setFilterSubject] = useState('Todas as Matérias');
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
   const [filterStatus, setFilterStatus] = useState<'pending' | 'corrected' | 'all'>('pending');
@@ -545,8 +601,21 @@ export const ErrorNotebookPage: React.FC = () => {
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardRevealed, setFlashcardRevealed] = useState(false);
 
-  const [exportSubject, setExportSubject] = useState('Todas as Matérias');
+  // Print & PDF export configuration (combined or separate by subject)
+  const [exportMode, setExportMode] = useState<'all' | 'multi' | 'single'>('all');
+  const [exportSingleSubject, setExportSingleSubject] = useState(fixedSubjects[0] || '');
+  const [exportMultiSubjects, setExportMultiSubjects] = useState<string[]>([]);
+  const [exportStatus, setExportStatus] = useState<'pending' | 'corrected' | 'all'>('all');
   const [includeQuestion, setIncludeQuestion] = useState(true);
+  const [pageBreakBySubject, setPageBreakBySubject] = useState(true);
+
+  const [printOverride, setPrintOverride] = useState<{
+    mode: 'all' | 'multi' | 'single';
+    singleSubject: string;
+    multiSubjects: string[];
+    statusFilter: 'pending' | 'corrected' | 'all';
+  } | null>(null);
+  const [printTriggerTick, setPrintTriggerTick] = useState(0);
 
   const [statsExpanded, setStatsExpanded] = useState(true);
   const [statsShowAll, setStatsShowAll] = useState(false);
@@ -569,7 +638,7 @@ export const ErrorNotebookPage: React.FC = () => {
     return allErrorEntries.filter((e) => Boolean(e.corrigido)).length;
   }, [allErrorEntries]);
 
-  // Same registered subjects used in Cronômetro / Cronograma / Utilidades
+  // Same registered subjects used across Cronômetro / Cronograma / Caderno de Erros
   const registeredSubjects = useMemo(() => {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -584,6 +653,24 @@ export const ErrorNotebookPage: React.FC = () => {
     return list;
   }, [fixedSubjects]);
 
+  const registeredSubjectNorms = useMemo(
+    () => new Set(registeredSubjects.map((s) => normalizeSearch(s))),
+    [registeredSubjects],
+  );
+
+  // Keep bulkTargetSubject and exportSingleSubject synced with registeredSubjects
+  useEffect(() => {
+    if (!bulkTargetSubject && registeredSubjects.length > 0) {
+      setBulkTargetSubject(registeredSubjects[0]);
+    } else if (
+      bulkTargetSubject &&
+      registeredSubjects.length > 0 &&
+      !registeredSubjectNorms.has(normalizeSearch(bulkTargetSubject))
+    ) {
+      setBulkTargetSubject(registeredSubjects[0]);
+    }
+  }, [bulkTargetSubject, registeredSubjectNorms, registeredSubjects]);
+
   const subjectOptions = useMemo(() => {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -596,9 +683,42 @@ export const ErrorNotebookPage: React.FC = () => {
     };
     registeredSubjects.forEach(push);
     allErrorEntries.forEach((e) => push(e.materia));
-    if (filterSubject !== 'Todas as Matérias') push(filterSubject);
+    if (filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER) {
+      push(filterSubject);
+    }
     return list.sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [allErrorEntries, filterSubject, registeredSubjects]);
+
+  useEffect(() => {
+    if (!exportSingleSubject && subjectOptions.length > 0) {
+      setExportSingleSubject(subjectOptions[0]);
+    }
+  }, [exportSingleSubject, subjectOptions]);
+
+  // Counts per subject (exact normalized match) + unassigned counts
+  const subjectDirectoryMetrics = useMemo(() => {
+    const byNorm = new Map<string, { pending: number; corrected: number; total: number }>();
+    let unassignedPending = 0;
+    let unassignedTotal = 0;
+
+    allErrorEntries.forEach((e) => {
+      const norm = normalizeSearch(visibleName(e.materia));
+      const isCorr = Boolean(e.corrigido);
+      if (norm) {
+        const cur = byNorm.get(norm) || { pending: 0, corrected: 0, total: 0 };
+        cur.total += 1;
+        if (isCorr) cur.corrected += 1;
+        else cur.pending += 1;
+        byNorm.set(norm, cur);
+      }
+      if (!norm || !registeredSubjectNorms.has(norm)) {
+        unassignedTotal += 1;
+        if (!isCorr) unassignedPending += 1;
+      }
+    });
+
+    return { byNorm, unassignedPending, unassignedTotal };
+  }, [allErrorEntries, registeredSubjectNorms]);
 
   const resolveStatsSubject = useMemo(() => {
     const byNorm = new Map<string, string>();
@@ -776,8 +896,11 @@ export const ErrorNotebookPage: React.FC = () => {
     const term = normalizeSearch(search);
     const filterNorm = normalizeSearch(filterSubject);
     return allErrorEntries.filter((e) => {
-      if (filterSubject !== 'Todas as Matérias') {
-        const entryNorm = normalizeSearch(e.materia);
+      if (filterSubject === UNASSIGNED_SUBJECT_FILTER) {
+        const entryNorm = normalizeSearch(visibleName(e.materia));
+        if (entryNorm && registeredSubjectNorms.has(entryNorm)) return false;
+      } else if (filterSubject !== 'Todas as Matérias') {
+        const entryNorm = normalizeSearch(visibleName(e.materia));
         const resolvedNorm = normalizeSearch(resolveStatsSubject(e.materia));
         if (entryNorm !== filterNorm && resolvedNorm !== filterNorm) return false;
       }
@@ -800,7 +923,256 @@ export const ErrorNotebookPage: React.FC = () => {
       }
       return true;
     });
-  }, [allErrorEntries, filterMode, filterStatus, filterSubject, resolveStatsSubject, search]);
+  }, [
+    allErrorEntries,
+    filterMode,
+    filterStatus,
+    filterSubject,
+    registeredSubjectNorms,
+    resolveStatsSubject,
+    search,
+  ]);
+
+  // Selection helpers for bulk association of pending questions
+  const filteredPendingIds = useMemo(
+    () => filteredEntries.filter((e) => !e.corrigido).map((e) => e.id),
+    [filteredEntries],
+  );
+
+  const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds]);
+
+  // Keep selectedEntryIds valid when entries are deleted or corrected
+  useEffect(() => {
+    const validPending = new Set(allErrorEntries.filter((e) => !e.corrigido).map((e) => e.id));
+    setSelectedEntryIds((prev) => {
+      const next = prev.filter((id) => validPending.has(id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [allErrorEntries]);
+
+  const handleToggleSelectEntry = useCallback((id: string) => {
+    setSelectedEntryIds((prev) =>
+      prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id],
+    );
+  }, []);
+
+  const allFilteredPendingSelected =
+    filteredPendingIds.length > 0 &&
+    filteredPendingIds.every((id) => selectedEntryIdSet.has(id));
+
+  const handleToggleSelectAllFilteredPending = () => {
+    if (allFilteredPendingSelected) {
+      const toRemove = new Set(filteredPendingIds);
+      setSelectedEntryIds((prev) => prev.filter((id) => !toRemove.has(id)));
+    } else {
+      setSelectedEntryIds((prev) => Array.from(new Set([...prev, ...filteredPendingIds])));
+    }
+  };
+
+  const handleRegisterSubject = (e: React.FormEvent) => {
+    e.preventDefault();
+    const clean = visibleName(newSubjectName).trim();
+    if (!clean) {
+      toast('Digite o nome da matéria para cadastrar.', true);
+      return;
+    }
+    if (registeredSubjectNorms.has(normalizeSearch(clean))) {
+      toast(`A matéria "${clean}" já está cadastrada.`, true);
+      setNewSubjectName('');
+      return;
+    }
+    addFixedSubject(clean);
+    setNewSubjectName('');
+    setNewSubject(clean);
+    setBulkTargetSubject(clean);
+    if (!exportSingleSubject) setExportSingleSubject(clean);
+  };
+
+  const handleRemoveRegisteredSubject = async (subj: string) => {
+    const ok = await requestConfirm({
+      title: 'Remover matéria cadastrada',
+      description: `Deseja remover "${subj}" da lista de matérias cadastradas? As anotações e questões já existentes não serão apagadas.`,
+      confirmLabel: 'Remover matéria',
+      cancelLabel: 'Cancelar',
+      danger: true,
+    });
+    if (!ok) return;
+    removeFixedSubject(subj);
+    if (normalizeSearch(filterSubject) === normalizeSearch(subj)) {
+      setFilterSubject('Todas as Matérias');
+    }
+    setExportMultiSubjects((prev) =>
+      prev.filter((item) => normalizeSearch(item) !== normalizeSearch(subj)),
+    );
+  };
+
+  const handleBulkAssociatePending = () => {
+    if (!selectedEntryIds.length) {
+      toast('Selecione ao menos uma questão pendente para associar.', true);
+      return;
+    }
+    if (!bulkTargetSubject.trim()) {
+      toast('Cadastre ou selecione uma matéria de destino primeiro.', true);
+      return;
+    }
+    bulkUpdateErrorEntriesSubject(selectedEntryIds, bulkTargetSubject);
+    setSelectedEntryIds([]);
+  };
+
+  // Resolve entries & labels for Print Sheet and PDF Export
+  const computeBundleForConfig = useCallback(
+    (cfg: {
+      mode: 'all' | 'multi' | 'single';
+      singleSubject: string;
+      multiSubjects: string[];
+      statusFilter: 'pending' | 'corrected' | 'all';
+    }) => {
+      const targetSubjects: string | string[] =
+        cfg.mode === 'all'
+          ? 'Todas as Matérias'
+          : cfg.mode === 'single'
+            ? cfg.singleSubject
+            : cfg.multiSubjects;
+
+      const selectedList = Array.isArray(targetSubjects)
+        ? targetSubjects.filter(Boolean)
+        : targetSubjects && targetSubjects !== 'Todas as Matérias'
+          ? [targetSubjects]
+          : [];
+
+      const isAll = cfg.mode === 'all';
+      const selectedNorms = new Set(selectedList.map((s) => normalizeSearch(visibleName(s))));
+
+      const entries = allErrorEntries.filter((row) => {
+        const isCorr = Boolean(row.corrigido);
+        if (cfg.statusFilter === 'pending' && isCorr) return false;
+        if (cfg.statusFilter === 'corrected' && !isCorr) return false;
+        if (!isAll) {
+          if (!selectedNorms.size) return false;
+          const rowNorm = normalizeSearch(visibleName(row.materia));
+          if (!selectedNorms.has(rowNorm)) return false;
+        }
+        return true;
+      });
+
+      const distinctSubjectsCount = new Set(
+        entries.map((e) => normalizeSearch(visibleName(e.materia || 'Geral'))),
+      ).size;
+
+      const scopeLabel = isAll
+        ? 'Todas as matérias (em conjunto)'
+        : cfg.mode === 'single'
+          ? `${visibleName(cfg.singleSubject || 'Geral')} (separado)`
+          : selectedList.length === 1
+            ? `${visibleName(selectedList[0])} (separado)`
+            : `${selectedList.length} matérias selecionadas (em conjunto)`;
+
+      return {
+        entries,
+        distinctSubjectsCount,
+        scopeLabel,
+        targetSubjects,
+      };
+    },
+    [allErrorEntries],
+  );
+
+  const exportPreview = useMemo(
+    () =>
+      computeBundleForConfig({
+        mode: exportMode,
+        singleSubject: exportSingleSubject,
+        multiSubjects: exportMultiSubjects,
+        statusFilter: exportStatus,
+      }),
+    [computeBundleForConfig, exportMode, exportMultiSubjects, exportSingleSubject, exportStatus],
+  );
+
+  const activePrintConfig = printOverride ?? {
+    mode: exportMode,
+    singleSubject: exportSingleSubject,
+    multiSubjects: exportMultiSubjects,
+    statusFilter: exportStatus,
+  };
+
+  const activePrintBundle = useMemo(
+    () => computeBundleForConfig(activePrintConfig),
+    [activePrintConfig, computeBundleForConfig],
+  );
+
+  useEffect(() => {
+    if (printTriggerTick === 0) return;
+    let raf1 = 0;
+    let raf2 = 0;
+    raf1 = window.requestAnimationFrame(() => {
+      raf2 = window.requestAnimationFrame(() => {
+        window.print();
+      });
+    });
+    const handleAfterPrint = () => {
+      setPrintOverride(null);
+    };
+    window.addEventListener('afterprint', handleAfterPrint);
+    return () => {
+      window.cancelAnimationFrame(raf1);
+      window.cancelAnimationFrame(raf2);
+      window.removeEventListener('afterprint', handleAfterPrint);
+    };
+  }, [printTriggerTick]);
+
+  const handlePrintFromPanel = () => {
+    if (exportMode === 'multi' && exportMultiSubjects.length === 0) {
+      toast('Marque ao menos uma matéria para imprimir em conjunto.', true);
+      return;
+    }
+    if (exportPreview.entries.length === 0) {
+      toast('Não há registros para imprimir com os filtros selecionados.', true);
+      return;
+    }
+    setPrintOverride(null);
+    setPrintTriggerTick((t) => t + 1);
+  };
+
+  const handlePrintSingleSubjectDirect = (subj: string) => {
+    const preferredStatus = filterStatus;
+    const checkPreferred = computeBundleForConfig({
+      mode: 'single',
+      singleSubject: subj,
+      multiSubjects: [],
+      statusFilter: preferredStatus,
+    });
+    const fallbackAll =
+      checkPreferred.entries.length > 0
+        ? checkPreferred
+        : computeBundleForConfig({
+            mode: 'single',
+            singleSubject: subj,
+            multiSubjects: [],
+            statusFilter: 'all',
+          });
+
+    if (fallbackAll.entries.length === 0) {
+      toast(`Não há registros no caderno para a matéria "${subj}".`, true);
+      return;
+    }
+
+    setPrintOverride({
+      mode: 'single',
+      singleSubject: subj,
+      multiSubjects: [],
+      statusFilter: checkPreferred.entries.length > 0 ? preferredStatus : 'all',
+    });
+    setPrintTriggerTick((t) => t + 1);
+  };
+
+  const handleToggleMultiExportSubject = (subj: string) => {
+    const norm = normalizeSearch(subj);
+    setExportMultiSubjects((prev) =>
+      prev.some((s) => normalizeSearch(s) === norm)
+        ? prev.filter((s) => normalizeSearch(s) !== norm)
+        : [...prev, subj],
+    );
+  };
 
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
@@ -810,8 +1182,21 @@ export const ErrorNotebookPage: React.FC = () => {
   };
 
   const handleExportPdf = () => {
+    if (exportMode === 'multi' && exportMultiSubjects.length === 0) {
+      toast('Marque ao menos uma matéria para baixar o PDF em conjunto.', true);
+      return;
+    }
     try {
-      exportErrorNotebookPdf(allErrorEntries, exportSubject, includeQuestion);
+      exportErrorNotebookPdf(
+        allErrorEntries,
+        exportPreview.targetSubjects,
+        includeQuestion,
+        {
+          statusFilter: exportStatus,
+          pageBreakBySubject,
+          scopeLabel: exportPreview.scopeLabel,
+        },
+      );
       toast('PDF do Caderno de Erros gerado com sucesso.');
     } catch (err) {
       toast((err as Error).message, true);
@@ -958,6 +1343,9 @@ export const ErrorNotebookPage: React.FC = () => {
     () => ({
       entries: filteredEntries,
       registeredSubjects,
+      registeredSubjectNorms,
+      selectedEntryIds: selectedEntryIdSet,
+      onToggleSelectEntry: handleToggleSelectEntry,
       todayIso,
       editingEntry,
       setEditingEntry,
@@ -973,6 +1361,9 @@ export const ErrorNotebookPage: React.FC = () => {
     [
       filteredEntries,
       registeredSubjects,
+      registeredSubjectNorms,
+      selectedEntryIdSet,
+      handleToggleSelectEntry,
       todayIso,
       editingEntry,
       flushEditingDraft,
@@ -993,18 +1384,161 @@ export const ErrorNotebookPage: React.FC = () => {
 
   return (
     <div>
+      <div className="print:hidden">
       <PageHeader
         eyebrow="OUVIDORIA ESTUDANTIL · CADERNO DE ERROS"
         title="Revisão direcionada de erros e anotações"
-        description="Centraliza recursos de questões erradas nos treinos, apontamentos vinculados a provas e revisões espaçadas pendentes."
+        description="Cadastre suas matérias, associe questões pendentes de correção, filtre por disciplina e imprima o caderno de erros em conjunto ou separadamente."
       />
 
-      <div className="grid grid-cols-1 lg:grid-cols-[1.2fr_1fr] gap-3.5 mb-4 items-start">
+      {/* Cadastro de Matérias & Filtro Rápido com Impressão Individual */}
+      <Panel
+        className="mb-4"
+        title="Matérias Cadastradas · Filtrar e Imprimir"
+        subtitle="Cadastre novas matérias para associar às questões pendentes, clique em uma matéria para filtrar ou use o botão de impressão para gerar o caderno separado."
+        action={
+          <form onSubmit={handleRegisterSubject} className="flex items-center gap-2">
+            <input
+              type="text"
+              value={newSubjectName}
+              onChange={(e) => setNewSubjectName(e.target.value)}
+              placeholder="Nova matéria (ex.: Direito Penal)..."
+              aria-label="Nome da nova matéria"
+              className="ce-input !min-h-[34px] !py-1 w-[210px] sm:w-[240px]"
+            />
+            <button
+              type="submit"
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              Cadastrar matéria
+            </button>
+          </form>
+        }
+      >
+        <div className="flex flex-wrap items-center gap-2 mb-3 pb-2.5 border-b border-[var(--line)]">
+          <button
+            type="button"
+            onClick={() => setFilterSubject('Todas as Matérias')}
+            className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+              filterSubject === 'Todas as Matérias'
+                ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                : 'border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+            }`}
+          >
+            <BookOpen className="w-3.5 h-3.5" />
+            Todas as Matérias
+            <span className="font-mono-num text-[11px] opacity-85">
+              {pendingCount} pend. · {allErrorEntries.length} total
+            </span>
+          </button>
+
+          {subjectDirectoryMetrics.unassignedTotal > 0 && (
+            <button
+              type="button"
+              onClick={() =>
+                setFilterSubject((prev) =>
+                  prev === UNASSIGNED_SUBJECT_FILTER
+                    ? 'Todas as Matérias'
+                    : UNASSIGNED_SUBJECT_FILTER,
+                )
+              }
+              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                filterSubject === UNASSIGNED_SUBJECT_FILTER
+                  ? 'border-[var(--warning)] bg-[var(--warning)] text-white'
+                  : 'border-[var(--warning)]/60 bg-[var(--warning)]/10 text-[var(--warning)] hover:border-[var(--warning)]'
+              }`}
+              title="Isolar questões cuja matéria ainda não pertence à sua lista cadastrada"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              Sem matéria cadastrada
+              <span className="font-mono-num text-[11px]">
+                {subjectDirectoryMetrics.unassignedPending} pend. · {subjectDirectoryMetrics.unassignedTotal} total
+              </span>
+            </button>
+          )}
+        </div>
+
+        {registeredSubjects.length === 0 ? (
+          <div className="text-[12.5px] text-[var(--muted)] py-1">
+            Nenhuma matéria cadastrada ainda. Use o campo acima para cadastrar sua primeira matéria.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            {registeredSubjects.map((subj) => {
+              const norm = normalizeSearch(subj);
+              const counts = subjectDirectoryMetrics.byNorm.get(norm) || {
+                pending: 0,
+                corrected: 0,
+                total: 0,
+              };
+              const isSelected = normalizeSearch(filterSubject) === norm;
+
+              return (
+                <div
+                  key={subj}
+                  className={`flex items-center justify-between gap-2 rounded-lg border px-2.5 py-2 transition-colors ${
+                    isSelected
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+                      : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setFilterSubject((prev) =>
+                        normalizeSearch(prev) === norm ? 'Todas as Matérias' : subj,
+                      )
+                    }
+                    className="min-w-0 flex-1 text-left cursor-pointer"
+                    title={`Filtrar caderno por ${subj}`}
+                  >
+                    <div className="text-[12.5px] font-bold text-[var(--text)] truncate">
+                      {subj}
+                    </div>
+                    <div className="text-[11px] font-mono-num text-[var(--muted)] mt-0.5">
+                      <span className={counts.pending > 0 ? 'font-bold text-[var(--warning)]' : ''}>
+                        {counts.pending} pend.
+                      </span>
+                      {' · '}
+                      <span>{counts.total} total</span>
+                    </div>
+                  </button>
+
+                  <div className="flex items-center gap-1 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => handlePrintSingleSubjectDirect(subj)}
+                      disabled={counts.total === 0}
+                      title={`Imprimir caderno de ${subj} separadamente (A4)`}
+                      aria-label={`Imprimir caderno de ${subj}`}
+                      className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-35 cursor-pointer"
+                    >
+                      <Printer className="w-3.5 h-3.5" />
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleRemoveRegisteredSubject(subj)}
+                      title={`Remover ${subj} do cadastro`}
+                      aria-label={`Remover matéria ${subj}`}
+                      className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-[var(--line)] bg-transparent text-[var(--muted)] hover:border-[var(--bad)] hover:text-[var(--bad)] cursor-pointer"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </Panel>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[1.1fr_1.1fr] gap-3.5 mb-4 items-start">
         <Panel title="Nova anotação manual">
           <form onSubmit={handleAdd} className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                Matéria (fixada no cronômetro)
+                Matéria cadastrada
               </label>
               <select
                 value={newSubject}
@@ -1064,43 +1598,193 @@ export const ErrorNotebookPage: React.FC = () => {
           </form>
         </Panel>
 
-        <Panel title="Exportar PDF de revisão" subtitle="Gera caderno organizado para impressão ou leitura offline.">
+        <Panel
+          title="Imprimir e Exportar Caderno de Erros"
+          subtitle="Imprima em folha oficial A4 ou baixe em PDF todas as matérias juntas, um grupo selecionado ou cada matéria separadamente."
+        >
           <div className="flex flex-col gap-3">
             <div>
-              <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                Filtrar matéria na exportação
-              </label>
-              <select
-                value={exportSubject}
-                onChange={(e) => setExportSubject(e.target.value)}
-                className="ce-select"
-              >
-                <option value="Todas as Matérias">Todas as Matérias</option>
-                {subjectOptions.map((s) => (
-                  <option key={s} value={s}>
-                    {s}
-                  </option>
+              <span className="block text-[11px] font-bold text-[var(--muted)] mb-1.5">
+                Modo de emissão
+              </span>
+              <div className="inline-flex flex-wrap rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5 gap-0.5">
+                {(
+                  [
+                    { id: 'all', label: 'Todas em conjunto' },
+                    { id: 'multi', label: 'Selecionar em conjunto' },
+                    { id: 'single', label: 'Separadamente (1 matéria)' },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setExportMode(opt.id)}
+                    className={`px-2.5 py-1.5 rounded-md text-[11.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                      exportMode === opt.id
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--muted)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
                 ))}
-              </select>
+              </div>
             </div>
-            <label className="inline-flex items-center gap-2 text-[12.5px] text-[var(--text)] cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={includeQuestion}
-                onChange={(e) => setIncludeQuestion(e.target.checked)}
-                className="accent-[var(--accent)] w-4 h-4"
-              />
-              Incluir enunciado, alternativas, gabarito e comentário
-            </label>
-            <div>
-              <button
-                type="button"
-                onClick={handleExportPdf}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
-              >
-                <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Baixar PDF do caderno
-              </button>
+
+            {exportMode === 'single' && (
+              <div>
+                <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                  Matéria para emissão separada
+                </label>
+                <select
+                  value={exportSingleSubject}
+                  onChange={(e) => setExportSingleSubject(e.target.value)}
+                  className="ce-select"
+                >
+                  {subjectOptions.map((s) => {
+                    const cnt = subjectDirectoryMetrics.byNorm.get(normalizeSearch(s))?.total ?? 0;
+                    return (
+                      <option key={s} value={s}>
+                        {s} ({cnt})
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+            )}
+
+            {exportMode === 'multi' && (
+              <div>
+                <div className="flex items-center justify-between gap-2 mb-1.5">
+                  <span className="text-[11px] font-bold text-[var(--muted)]">
+                    Selecione as matérias ({exportMultiSubjects.length} marcada(s))
+                  </span>
+                  <div className="flex items-center gap-2 text-[11px] font-bold">
+                    <button
+                      type="button"
+                      onClick={() => setExportMultiSubjects(subjectOptions)}
+                      className="text-[var(--accent)] hover:underline cursor-pointer"
+                    >
+                      Marcar todas
+                    </button>
+                    <span className="text-[var(--line-strong)]">·</span>
+                    <button
+                      type="button"
+                      onClick={() => setExportMultiSubjects([])}
+                      className="text-[var(--muted)] hover:text-[var(--text)] hover:underline cursor-pointer"
+                    >
+                      Limpar
+                    </button>
+                  </div>
+                </div>
+                <div className="max-h-[124px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+                  {subjectOptions.map((s) => {
+                    const checked = exportMultiSubjects.some(
+                      (item) => normalizeSearch(item) === normalizeSearch(s),
+                    );
+                    const cnt = subjectDirectoryMetrics.byNorm.get(normalizeSearch(s))?.total ?? 0;
+                    return (
+                      <label
+                        key={s}
+                        className="inline-flex items-center justify-between gap-2 px-2 py-1 rounded-md hover:bg-[var(--panel-raised)] text-[12px] text-[var(--text)] cursor-pointer select-none"
+                      >
+                        <span className="inline-flex items-center gap-2 min-w-0">
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => handleToggleMultiExportSubject(s)}
+                            className="accent-[var(--accent)] w-3.5 h-3.5 shrink-0"
+                          />
+                          <span className="truncate">{s}</span>
+                        </span>
+                        <span className="font-mono-num text-[11px] text-[var(--muted)] shrink-0">
+                          {cnt}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-[11px] font-bold text-[var(--muted)]">Status incluído:</span>
+              <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
+                {(
+                  [
+                    { id: 'pending', label: 'Pendentes' },
+                    { id: 'corrected', label: 'Corrigidos' },
+                    { id: 'all', label: 'Todos' },
+                  ] as const
+                ).map((opt) => (
+                  <button
+                    key={opt.id}
+                    type="button"
+                    onClick={() => setExportStatus(opt.id)}
+                    className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                      exportStatus === opt.id
+                        ? 'bg-[var(--accent)] text-white'
+                        : 'text-[var(--muted)] hover:text-[var(--text)]'
+                    }`}
+                  >
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="flex flex-col gap-1.5">
+              <label className="inline-flex items-center gap-2 text-[12px] text-[var(--text)] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={includeQuestion}
+                  onChange={(e) => setIncludeQuestion(e.target.checked)}
+                  className="accent-[var(--accent)] w-4 h-4"
+                />
+                Incluir enunciado, alternativas, gabarito e comentário
+              </label>
+
+              {exportMode !== 'single' && (
+                <label className="inline-flex items-center gap-2 text-[12px] text-[var(--text)] cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={pageBreakBySubject}
+                    onChange={(e) => setPageBreakBySubject(e.target.checked)}
+                    className="accent-[var(--accent)] w-4 h-4"
+                  />
+                  Iniciar cada matéria em uma nova página A4
+                </label>
+              )}
+            </div>
+
+            <div className="pt-2 border-t border-[var(--line)] flex flex-wrap items-center justify-between gap-2.5">
+              <span className="text-[11.5px] font-mono-num text-[var(--muted)]">
+                Pronto:{' '}
+                <strong className="text-[var(--text)]">{exportPreview.entries.length}</strong>{' '}
+                registro(s) em{' '}
+                <strong className="text-[var(--text)]">{exportPreview.distinctSubjectsCount}</strong>{' '}
+                matéria(s)
+              </span>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handlePrintFromPanel}
+                  disabled={exportPreview.entries.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  Imprimir Caderno (A4)
+                </button>
+                <button
+                  type="button"
+                  onClick={handleExportPdf}
+                  disabled={exportPreview.entries.length === 0}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
+                >
+                  <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Baixar PDF
+                </button>
+              </div>
             </div>
           </div>
         </Panel>
@@ -1115,7 +1799,7 @@ export const ErrorNotebookPage: React.FC = () => {
         selectedKey={
           paretoMode === 'by_type'
             ? search || null
-            : filterSubject !== 'Todas as Matérias'
+            : filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER
               ? filterSubject
               : null
         }
@@ -1402,9 +2086,14 @@ export const ErrorNotebookPage: React.FC = () => {
           aria-label="Filtrar caderno por matéria"
           value={filterSubject}
           onChange={(e) => setFilterSubject(e.target.value)}
-          className="ce-select w-auto min-w-[190px]"
+          className="ce-select w-auto min-w-[200px]"
         >
           <option value="Todas as Matérias">Todas as Matérias</option>
+          {subjectDirectoryMetrics.unassignedTotal > 0 && (
+            <option value={UNASSIGNED_SUBJECT_FILTER}>
+              Sem matéria cadastrada ({subjectDirectoryMetrics.unassignedTotal})
+            </option>
+          )}
           {subjectOptions.map((s) => (
             <option key={s} value={s}>
               {s}
@@ -1585,6 +2274,69 @@ export const ErrorNotebookPage: React.FC = () => {
         </Panel>
       )}
 
+      {/* Barra de Associação em Lote para Questões Pendentes */}
+      {(filteredPendingIds.length > 0 || selectedEntryIds.length > 0) && (
+        <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-3.5 py-2.5 mb-3.5 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            {filteredPendingIds.length > 0 && (
+              <label className="inline-flex items-center gap-2 text-[12px] font-bold text-[var(--text)] cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allFilteredPendingSelected}
+                  onChange={handleToggleSelectAllFilteredPending}
+                  className="accent-[var(--accent)] w-4 h-4 cursor-pointer"
+                />
+                Selecionar pendentes visíveis ({filteredPendingIds.length})
+              </label>
+            )}
+            <span className="text-[11.5px] font-mono-num text-[var(--muted)]">
+              <strong className="text-[var(--text)]">{selectedEntryIds.length}</strong> selecionada(s)
+            </span>
+            {selectedEntryIds.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSelectedEntryIds([])}
+                className="text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:underline cursor-pointer"
+              >
+                Limpar seleção
+              </button>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-[11.5px] font-bold text-[var(--muted)] whitespace-nowrap">
+              Associar pendentes à matéria:
+            </span>
+            <select
+              aria-label="Matéria de destino para associação em lote"
+              value={bulkTargetSubject}
+              onChange={(e) => setBulkTargetSubject(e.target.value)}
+              disabled={registeredSubjects.length === 0}
+              className="ce-select !w-auto !min-h-[32px] !py-1 min-w-[180px]"
+            >
+              {registeredSubjects.length === 0 ? (
+                <option value="">Cadastre uma matéria acima</option>
+              ) : (
+                registeredSubjects.map((s) => (
+                  <option key={s} value={s}>
+                    {s}
+                  </option>
+                ))
+              )}
+            </select>
+            <button
+              type="button"
+              onClick={handleBulkAssociatePending}
+              disabled={selectedEntryIds.length === 0 || !bulkTargetSubject}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
+            >
+              <Tag className="w-3.5 h-3.5" />
+              Associar ({selectedEntryIds.length})
+            </button>
+          </div>
+        </div>
+      )}
+
       <div>
         {filteredEntries.length ? (
           <List
@@ -1601,6 +2353,18 @@ export const ErrorNotebookPage: React.FC = () => {
           <EmptyState message="Nenhum registro encontrado para os filtros aplicados." />
         )}
       </div>
+      </div>
+
+      <ErrorNotebookOfficialPrintSheet
+        entries={activePrintBundle.entries}
+        selectedSubjectsLabel={activePrintBundle.scopeLabel}
+        statusFilter={activePrintConfig.statusFilter}
+        includeQuestion={includeQuestion}
+        pageBreakBySubject={
+          activePrintConfig.mode === 'single' ? false : pageBreakBySubject
+        }
+        holderName={googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal'}
+      />
     </div>
   );
 };

@@ -1,6 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import {
   Award,
+  BookOpen,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
@@ -61,6 +62,12 @@ const TIER_STYLES: Record<
     bg: 'rgba(56, 189, 248, 0.15)',
     border: 'rgba(56, 189, 248, 0.45)',
   },
+  supremo: {
+    label: 'Supremo',
+    color: '#a855f7',
+    bg: 'rgba(168, 85, 247, 0.16)',
+    border: 'rgba(168, 85, 247, 0.48)',
+  },
 };
 
 const CATEGORY_LABELS: Record<'todas' | MedalCategory, string> = {
@@ -69,12 +76,14 @@ const CATEGORY_LABELS: Record<'todas' | MedalCategory, string> = {
   horas: 'Horas',
   consistencia: 'Consistência',
   excelencia: 'Excelência',
+  dominio: 'Domínio & Lei',
 };
 
 function renderCategoryIcon(category: MedalCategory, className = 'w-4 h-4') {
   if (category === 'metas') return <Target className={className} />;
   if (category === 'horas') return <Clock className={className} />;
   if (category === 'consistencia') return <Flame className={className} />;
+  if (category === 'dominio') return <BookOpen className={className} />;
   return <Award className={className} />;
 }
 
@@ -82,6 +91,7 @@ export const CareerAchievementsBanner: React.FC<CareerAchievementsBannerProps> =
   const summary = useMemo(() => computeCareerSummary(db), [db]);
 
   const [categoryFilter, setCategoryFilter] = useState<'todas' | MedalCategory>('todas');
+  const [tierFilter, setTierFilter] = useState<'todos' | MedalTier>('todos');
   const [onlyUnlocked, setOnlyUnlocked] = useState(false);
   const [showAllMedals, setShowAllMedals] = useState(false);
   const [showCareerTrack, setShowCareerTrack] = useState(false);
@@ -89,11 +99,13 @@ export const CareerAchievementsBanner: React.FC<CareerAchievementsBannerProps> =
   const filteredMedals = useMemo<MeritMedal[]>(() => {
     const base = summary.medals.filter((m) => {
       if (categoryFilter !== 'todas' && m.category !== categoryFilter) return false;
+      if (tierFilter !== 'todos' && m.tier !== tierFilter) return false;
       if (onlyUnlocked && !m.unlocked) return false;
       return true;
     });
     // Sort: unlocked first (highest tier first), then locked closest to completion
     const tierOrder: Record<MedalTier, number> = {
+      supremo: 5,
       diamante: 4,
       ouro: 3,
       prata: 2,
@@ -104,9 +116,12 @@ export const CareerAchievementsBanner: React.FC<CareerAchievementsBannerProps> =
       if (a.unlocked && b.unlocked) {
         return tierOrder[b.tier] - tierOrder[a.tier];
       }
-      return b.progressPct - a.progressPct;
+      if (b.progressPct !== a.progressPct) {
+        return b.progressPct - a.progressPct;
+      }
+      return tierOrder[a.tier] - tierOrder[b.tier];
     });
-  }, [categoryFilter, onlyUnlocked, summary.medals]);
+  }, [categoryFilter, onlyUnlocked, summary.medals, tierFilter]);
 
   const visibleMedals = showAllMedals ? filteredMedals : filteredMedals.slice(0, 6);
 
@@ -317,8 +332,8 @@ export const CareerAchievementsBanner: React.FC<CareerAchievementsBannerProps> =
               <ShieldCheck className="w-3.5 h-3.5 text-[var(--accent)]" />
               Quadro de Medalhas de Mérito
             </h4>
-            <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
-              {(['todas', 'metas', 'horas', 'consistencia', 'excelencia'] as const).map((cat) => (
+            <div className="inline-flex flex-wrap rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
+              {(['todas', 'metas', 'horas', 'consistencia', 'excelencia', 'dominio'] as const).map((cat) => (
                 <button
                   key={cat}
                   type="button"
@@ -335,7 +350,21 @@ export const CareerAchievementsBanner: React.FC<CareerAchievementsBannerProps> =
             </div>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
+            <select
+              aria-label="Filtrar medalhas por grau"
+              value={tierFilter}
+              onChange={(e) => setTierFilter(e.target.value as 'todos' | MedalTier)}
+              className="h-[28px] px-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] outline-none focus:border-[var(--accent)]"
+            >
+              <option value="todos">Todos os graus</option>
+              <option value="bronze">Bronze</option>
+              <option value="prata">Prata</option>
+              <option value="ouro">Ouro</option>
+              <option value="diamante">Diamante</option>
+              <option value="supremo">Supremo</option>
+            </select>
+
             <label className="inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-[var(--muted)] cursor-pointer select-none whitespace-nowrap">
               <input
                 type="checkbox"

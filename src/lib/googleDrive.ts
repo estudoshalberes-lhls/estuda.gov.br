@@ -722,22 +722,65 @@ const CANONICAL_SUBFOLDER_NAMES = [
   'Datas e Locais',
 ];
 
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs = 45_000,
+  externalSignal?: AbortSignal,
+): Promise<Response> {
+  if (externalSignal?.aborted) {
+    throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
+  }
+  const controller = new AbortController();
+  let timedOut = false;
+  const timerId = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  const onExternalAbort = () => controller.abort();
+  externalSignal?.addEventListener('abort', onExternalAbort, { once: true });
+
+  try {
+    const mergedInit: RequestInit = { ...init, signal: controller.signal };
+    return await fetch(url, mergedInit);
+  } catch (err: any) {
+    if (err?.name === 'AbortError') {
+      if (externalSignal?.aborted && !timedOut) {
+        throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
+      }
+      throw new Error(
+        `DOWNLOAD_TIMEOUT: Tempo limite (${Math.round(timeoutMs / 1000)}s) excedido ao conectar com o Google Drive.`,
+      );
+    }
+    throw err;
+  } finally {
+    window.clearTimeout(timerId);
+    externalSignal?.removeEventListener('abort', onExternalAbort);
+  }
+}
+
 async function driveFetchWithRetry(
   url: string,
   init: RequestInit,
   retries = 2,
+  timeoutMs = 45_000,
+  externalSignal?: AbortSignal,
 ): Promise<Response> {
   let lastRes: Response | null = null;
   let lastErr: unknown = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (externalSignal?.aborted) {
+      throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
+    }
     try {
-      const res = await fetch(url, init);
+      const res = await fetchWithTimeout(url, init, timeoutMs, externalSignal);
       if (res.ok || (res.status !== 500 && res.status !== 502 && res.status !== 503 && res.status !== 504 && res.status !== 429)) {
         return res;
       }
       lastRes = res;
-    } catch (err) {
+    } catch (err: any) {
+      if (String(err?.message || '').includes('RESTORE_ABORTED')) throw err;
       lastErr = err;
     }
     if (attempt < retries) {
@@ -776,7 +819,7 @@ async function authorizedDriveFetch(
   url: string,
   buildInit: (token: string) => RequestInit,
   explicitToken?: string,
-  options?: { withRetry?: boolean; retries?: number },
+  options?: { withRetry?: boolean; retries?: number; timeoutMs?: number; signal?: AbortSignal },
 ): Promise<{ res: Response; usedToken: string }> {
   let tokenToUse = explicitToken || (await getAccessToken()) || '';
   if (isGasSessionActive() || tokenToUse === 'gas-session-active') {
@@ -786,10 +829,11 @@ async function authorizedDriveFetch(
     throw new Error('TOKEN_EXPIRED: Conecte sua conta no Modo Google Apps Script.');
   }
 
+  const timeoutMs = options?.timeoutMs ?? 45_000;
   const exec = (t: string) =>
     options?.withRetry
-      ? driveFetchWithRetry(url, buildInit(t), options.retries ?? 2)
-      : fetch(url, buildInit(t));
+      ? driveFetchWithRetry(url, buildInit(t), options.retries ?? 2, timeoutMs, options.signal)
+      : fetchWithTimeout(url, buildInit(t), timeoutMs, options?.signal);
 
   let res = await exec(tokenToUse);
   if (res.status === 401) {
@@ -2956,9 +3000,17 @@ export async function downloadDriveFileBlob(
   fileId: string,
   token?: string,
   fallbackMime?: string,
+  options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<Blob> {
+  const timeoutMs = options?.timeoutMs ?? 45_000;
+  if (options?.signal?.aborted) {
+    throw new Error('RESTORE_ABORTED: Operação cancelada pelo usuário.');
+  }
   if (isGasSessionActive()) {
-    const blob = await gasDownloadFileBlob(fileId, fallbackMime);
+    const blob = await gasDownloadFileBlob(fileId, fallbackMime, {
+      timeoutMs: options?.timeoutMs ?? 55_000,
+      signal: options?.signal,
+    });
     if (!blob) {
       throw new Error('Arquivo não encontrado no Google Drive via Google Apps Script.');
     }
@@ -2976,36 +3028,82 @@ export async function downloadDriveFileBlob(
     ? `https://www.googleapis.com/drive/v3/files/${fileId}/export?mimeType=application/pdf`
     : `https://www.googleapis.com/drive/v3/files/${fileId}?alt=media&supportsAllDrives=true`;
 
-  const { res } = await authorizedDriveFetch(
-    url,
-    (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
-    activeToken,
-  );
+  const downloadController = new AbortController();
+  let timedOut = false;
+  const dlTimer = window.setTimeout(() => {
+    timedOut = true;
+    downloadController.abort();
+  }, timeoutMs);
+  const onExternalAbort = () => downloadController.abort();
+  options?.signal?.addEventListener('abort', onExternalAbort, { once: true });
 
-  if (!res.ok) {
-    if (res.status === 403) {
-      const errText = await res.text();
-      if (
-        errText.includes('insufficientFilePermissions') ||
-        errText.includes('appNotAuthorizedToFile') ||
-        errText.includes('cannotDownloadFile')
-      ) {
-        markDriveFilePermissionBlocked(fileId);
-        throw new Error(
-          'PICKER_FILE_PERMISSION: Selecione os arquivos pelo seletor oficial do Google Drive para liberar o download.',
-        );
+  try {
+    const { res } = await authorizedDriveFetch(
+      url,
+      (t) => ({ headers: { Authorization: `Bearer ${t}` } }),
+      activeToken,
+      { withRetry: true, retries: 1, timeoutMs, signal: downloadController.signal },
+    );
+
+    if (!res.ok) {
+      if (res.status === 403) {
+        const errText = await res.text();
+        if (
+          errText.includes('insufficientFilePermissions') ||
+          errText.includes('appNotAuthorizedToFile') ||
+          errText.includes('cannotDownloadFile')
+        ) {
+          markDriveFilePermissionBlocked(fileId);
+          throw new Error(
+            'PICKER_FILE_PERMISSION: Selecione os arquivos pelo seletor oficial do Google Drive para liberar o download.',
+          );
+        }
+        throw new Error(`Falha ao baixar arquivo do Google Drive: ${errText}`);
       }
-      throw new Error(`Falha ao baixar arquivo do Google Drive: ${errText}`);
+      await throwDriveResponseError(res, 'Falha ao baixar arquivo do Google Drive');
     }
-    await throwDriveResponseError(res, 'Falha ao baixar arquivo do Google Drive');
-  }
 
-  clearDrivePermissionBlockedFiles([fileId]);
-  const blob = await res.blob();
-  if (!blob.type && fallbackMime && !isWorkspaceDoc) {
-    return new Blob([blob], { type: fallbackMime });
+    clearDrivePermissionBlockedFiles([fileId]);
+    const blob = await new Promise<Blob>((resolve, reject) => {
+      if (downloadController.signal.aborted) {
+        reject(
+          new Error(
+            timedOut
+              ? `DOWNLOAD_TIMEOUT: Tempo limite (${Math.round(timeoutMs / 1000)}s) excedido ao baixar arquivo.`
+              : 'RESTORE_ABORTED: Operação cancelada pelo usuário.',
+          ),
+        );
+        return;
+      }
+      const onAbortBlob = () => {
+        reject(
+          new Error(
+            timedOut
+              ? `DOWNLOAD_TIMEOUT: Tempo limite (${Math.round(timeoutMs / 1000)}s) excedido ao baixar arquivo.`
+              : 'RESTORE_ABORTED: Operação cancelada pelo usuário.',
+          ),
+        );
+      };
+      downloadController.signal.addEventListener('abort', onAbortBlob, { once: true });
+      res.blob().then(
+        (b) => {
+          downloadController.signal.removeEventListener('abort', onAbortBlob);
+          resolve(b);
+        },
+        (e) => {
+          downloadController.signal.removeEventListener('abort', onAbortBlob);
+          reject(e);
+        },
+      );
+    });
+    if (!blob.type && fallbackMime && !isWorkspaceDoc) {
+      return new Blob([blob], { type: fallbackMime });
+    }
+    return blob;
+  } finally {
+    window.clearTimeout(dlTimer);
+    options?.signal?.removeEventListener('abort', onExternalAbort);
   }
-  return blob;
 }
 
 export type DriveTrashFailureReason =

@@ -544,6 +544,8 @@ function handleLogin_(body) {
       serverVersion: stateInfo.serverVersion,
       updatedAt: stateInfo.updatedAt,
       contentHash: stateInfo.contentHash,
+      controlSheetVersion: stateInfo.controlSheet ? stateInfo.controlSheet.version : stateInfo.serverVersion,
+      controlSheetHash: stateInfo.controlSheet ? stateInfo.controlSheet.contentHash : stateInfo.contentHash,
       payload: stateInfo.payload,
       summary: stateInfo.summary,
       postIt: postIt,
