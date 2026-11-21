@@ -1,6 +1,8 @@
 import React, { useMemo, useState } from 'react';
 import {
   AlertTriangle,
+  Bell,
+  BellRing,
   CalendarClock,
   CheckCircle2,
   Flame,
@@ -10,10 +12,13 @@ import {
 import { useStudy } from '../../context/StudyContext';
 import { formatScheduleDuration } from '../../lib/parsers';
 import { computeDailyGoalAndExamPace } from '../../lib/studyTools';
+import { DailyGoalPushModal } from '../study/DailyGoalPushModal';
 
 export const DailyGoalPacePanel: React.FC = () => {
   const { db, updatePreferences, toast } = useStudy();
   const [editing, setEditing] = useState(false);
+  const [pushModalOpen, setPushModalOpen] = useState(false);
+  const pushEnabled = Boolean(db.preferences?.push_notifications?.enabled);
 
   const summary = useMemo(() => computeDailyGoalAndExamPace(db), [db]);
 
@@ -69,14 +74,33 @@ export const DailyGoalPacePanel: React.FC = () => {
           </h3>
         </div>
 
-        <button
-          type="button"
-          onClick={openEditor}
-          className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors cursor-pointer"
-        >
-          <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--accent)]" />
-          {editing ? 'Fechar ajustes' : 'Ajustar metas'}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setPushModalOpen(true)}
+            className={`inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border text-[11.5px] font-bold transition-colors cursor-pointer ${
+              pushEnabled
+                ? 'border-[var(--good)]/50 bg-[var(--good)]/12 text-[var(--good)] hover:border-[var(--good)]'
+                : 'border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white'
+            }`}
+          >
+            {pushEnabled ? (
+              <BellRing className="w-3.5 h-3.5 shrink-0" />
+            ) : (
+              <Bell className="w-3.5 h-3.5 shrink-0" />
+            )}
+            {pushEnabled ? 'Push Ativo' : 'Alertas Push'}
+          </button>
+
+          <button
+            type="button"
+            onClick={openEditor}
+            className="inline-flex items-center gap-1.5 h-8 px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] transition-colors cursor-pointer"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-[var(--accent)]" />
+            {editing ? 'Fechar ajustes' : 'Ajustar metas'}
+          </button>
+        </div>
       </div>
 
       {editing && (
@@ -242,6 +266,8 @@ export const DailyGoalPacePanel: React.FC = () => {
           </div>
         )}
       </div>
+
+      <DailyGoalPushModal open={pushModalOpen} onClose={() => setPushModalOpen(false)} />
     </section>
   );
 };

@@ -49,6 +49,44 @@ async function startServer() {
     });
   });
 
+  // Web Push subscription registry (VAPID optional; SW local/scheduled alerts work without secrets)
+  const pushSubscriptions = new Map<string, { endpoint: string; keys?: Record<string, string>; updatedAt: string }>();
+
+  app.get('/api/push/status', requireAuthorizedStudyClient, (_req: Request, res: Response) => {
+    const vapidPublicKey =
+      String(process.env.VAPID_PUBLIC_KEY || process.env.VITE_VAPID_PUBLIC_KEY || '').trim() || null;
+    res.json({
+      ok: true,
+      vapidPublicKey,
+      activeSubscriptions: pushSubscriptions.size,
+    });
+  });
+
+  app.post('/api/push/subscribe', requireAuthorizedStudyClient, (req: Request, res: Response) => {
+    const sub = req.body?.subscription as
+      | { endpoint?: string; keys?: Record<string, string> }
+      | undefined;
+    const endpoint = typeof sub?.endpoint === 'string' ? sub.endpoint.trim() : '';
+    if (!endpoint || !/^https?:\/\//i.test(endpoint)) {
+      res.status(400).json({ error: 'Inscrição Push inválida (endpoint ausente).' });
+      return;
+    }
+    pushSubscriptions.set(endpoint, {
+      endpoint,
+      keys: sub?.keys && typeof sub.keys === 'object' ? sub.keys : undefined,
+      updatedAt: new Date().toISOString(),
+    });
+    res.json({ ok: true, activeSubscriptions: pushSubscriptions.size });
+  });
+
+  app.post('/api/push/unsubscribe', requireAuthorizedStudyClient, (req: Request, res: Response) => {
+    const endpoint = typeof req.body?.endpoint === 'string' ? req.body.endpoint.trim() : '';
+    if (endpoint) {
+      pushSubscriptions.delete(endpoint);
+    }
+    res.json({ ok: true, activeSubscriptions: pushSubscriptions.size });
+  });
+
   app.post('/api/ai/analyze-edital', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
     try {
       const { text, defaultSubject, contestName } = (req.body || {}) as {

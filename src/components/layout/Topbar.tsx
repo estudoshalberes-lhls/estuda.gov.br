@@ -1,5 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  Bell,
+  BellRing,
   Check,
   CloudOff,
   CloudUpload,
@@ -22,6 +24,7 @@ import { PostItWidget } from './PostItWidget';
 import { ModuleIcon } from '../ui/ModuleIcon';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
 import { GasConnectionTopbarWidget } from '../backup/GasConnectionMonitor';
+import { DailyGoalPushModal } from '../study/DailyGoalPushModal';
 
 interface TopbarProps {
   onExitToLogin?: () => void;
@@ -174,6 +177,8 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
   } = useStudy();
 
   const [pomoMenuOpen, setPomoMenuOpen] = useState(false);
+  const [pushModalOpen, setPushModalOpen] = useState(false);
+  const pushAlertsActive = Boolean(db.preferences?.push_notifications?.enabled);
   const [pomoFocusInput, setPomoFocusInput] = useState<string>(
     String(db.preferences?.pomodoro_focus_minutes || 40),
   );
@@ -861,6 +866,31 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
 
         <GasConnectionTopbarWidget />
 
+        <button
+          type="button"
+          onClick={() => setPushModalOpen(true)}
+          aria-label="Alertas Push de Metas Diárias"
+          title={
+            pushAlertsActive
+              ? 'Notificações Push de metas diárias ativas — clique para configurar'
+              : 'Configurar notificações Push de metas diárias'
+          }
+          className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 cursor-pointer ${
+            pushAlertsActive
+              ? 'border-[var(--good)]/50 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--good)]'
+              : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
+          }`}
+        >
+          {pushAlertsActive ? (
+            <BellRing className="w-4 h-4" />
+          ) : (
+            <Bell className="w-4 h-4" />
+          )}
+          {pushAlertsActive && (
+            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--good)]" />
+          )}
+        </button>
+
         {onExitToLogin && (
           <button
             type="button"
@@ -873,6 +903,8 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
           </button>
         )}
       </div>
+
+      <DailyGoalPushModal open={pushModalOpen} onClose={() => setPushModalOpen(false)} />
     </header>
   );
 });

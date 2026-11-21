@@ -12,6 +12,7 @@ import { ToastRegion } from './components/ui/ToastRegion';
 import { BackToTopButton } from './components/ui/BackToTopButton';
 import { OfflineIndicator } from './components/ui/OfflineIndicator';
 import { CareerAchievementWatcher } from './components/performance/CareerAchievementWatcher';
+import { DailyGoalPushWatcher } from './components/study/DailyGoalPushWatcher';
 import { ModuleName } from './types/study';
 
 const CHUNK_RELOAD_GUARD_KEY = 'estuda_chunk_reload_once';
@@ -335,6 +336,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
       <MobileTimerFloat />
       <BackToTopButton />
       <CareerAchievementWatcher />
+      <DailyGoalPushWatcher />
     </div>
   );
 };

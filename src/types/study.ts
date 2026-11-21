@@ -443,6 +443,19 @@ export interface FlashcardSrsState {
   reviews: number;
 }
 
+export interface DailyPushNotificationPrefs {
+  enabled: boolean;
+  reminderTimes: string[]; // HH:mm in 24h format, e.g. ['09:00', '14:00', '20:00']
+  alertDailyHoursGoal: boolean;
+  alertDailyQuestionsGoal: boolean;
+  alertDueReviews: boolean;
+  alertGoalAchieved: boolean;
+  alertExamCountdown: boolean;
+  quietHoursStart?: string; // HH:mm, e.g. '22:30'
+  quietHoursEnd?: string; // HH:mm, e.g. '07:00'
+  pushEndpoint?: string;
+}
+
 export interface AppPreferences {
   tema: ThemeId;
   modules_top: boolean;
@@ -461,6 +474,7 @@ export interface AppPreferences {
   pomodoro_break_minutes?: number;
   pomodoro_auto_commit?: boolean;
   flashcard_srs?: Record<string, FlashcardSrsState>;
+  push_notifications?: DailyPushNotificationPrefs;
 }
 
 export interface QuizAnswer {

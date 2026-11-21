@@ -12,6 +12,7 @@ export default defineConfig(() => {
       VitePWA({
         registerType: 'autoUpdate',
         includeAssets: [
+          'sw-push.js',
           'icon.svg',
           'apple-touch-icon.png',
           'pwa-192x192.png',
@@ -56,6 +57,7 @@ export default defineConfig(() => {
           ],
         },
         workbox: {
+          importScripts: ['/sw-push.js'],
           globPatterns: [
             '**/*.{js,mjs,css,html,ico,svg,woff,woff2}',
             'pwa-*.png',
