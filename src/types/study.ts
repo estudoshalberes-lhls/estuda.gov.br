@@ -333,6 +333,17 @@ export interface PersonalPdfFile {
   hasAnnotations?: boolean;
 }
 
+export type SummaryItemKind = 'note' | 'pdf' | 'mindmap' | 'image';
+
+export interface MindMapNode {
+  id: string;
+  label: string;
+  note?: string;
+  color?: string;
+  collapsed?: boolean;
+  children: MindMapNode[];
+}
+
 export interface SummaryFile {
   id: string;
   name: string;
@@ -341,6 +352,11 @@ export interface SummaryFile {
   blobKey: string;
   createdAt: string;
   updatedAt?: string;
+  kind?: SummaryItemKind;
+  title?: string;
+  content?: string;
+  tags?: string[];
+  mindMap?: MindMapNode;
 }
 
 export interface ProofCorrection {
@@ -375,12 +391,52 @@ export interface ProofFileRecord {
   updatedAt?: string;
 }
 
+export type EssayType =
+  | 'Dissertação'
+  | 'Estudo de Caso'
+  | 'Questão Discursiva'
+  | 'Peça / Parecer';
+
+export type EssayRubricMode = 'cebraspe' | 'criteria' | 'simple';
+
+export interface EssayRubricScores {
+  mode: EssayRubricMode;
+  notaMaxima: number;
+  notaConteudo?: number;
+  notaEstrutura?: number;
+  notaGramatica?: number;
+  numErrosGramaticais?: number;
+  totalLinhas?: number;
+  notaFinal: number;
+}
+
+export interface EssayRewriteVersion {
+  texto?: string;
+  arquivo?: string;
+  blobKey?: string;
+  mime?: string;
+  notaFinal?: number;
+  linhas?: number;
+  linhas_escritas?: number;
+  observacoes?: string;
+  atualizada_em: string;
+}
+
 export interface EssayRecord {
   id: string;
   titulo: string;
   data: string;
   created_at: string;
   updatedAt?: string;
+  banca?: string;
+  tipo?: EssayType;
+  disciplina?: string;
+  proposta?: string;
+  espelho?: string;
+  texto_original?: string;
+  limite_linhas?: number;
+  linhas_escritas?: number;
+  tempo_segundos?: number;
   original_arquivo: string;
   original_blobKey: string;
   original_mime: string;
@@ -388,6 +444,9 @@ export interface EssayRecord {
   corrigido_blobKey?: string;
   corrigido_mime?: string;
   feedback: string;
+  rubrica?: EssayRubricScores;
+  erros_tags?: string[];
+  reescrita?: EssayRewriteVersion;
   corrigida_em?: string;
 }
 

@@ -240,6 +240,9 @@ import {
   EditalLawLink,
   ErrorNotebookEntry,
   EssayRecord,
+  EssayRewriteVersion,
+  EssayRubricScores,
+  EssayType,
   HighlightColorKey,
   HistoryRecord,
   IncidenceGrade,
@@ -248,6 +251,7 @@ import {
   LawItem,
   LawPdfEntry,
   LawReadingEntry,
+  MindMapNode,
   ModuleName,
   ModuleVisibility,
   PdfFileAnnotations,
@@ -697,6 +701,33 @@ export interface ActiveSyncState {
   controlSheetTable: string;
 }
 
+export interface SubmitEssayOptions {
+  banca?: string;
+  tipo?: EssayType;
+  disciplina?: string;
+  proposta?: string;
+  espelho?: string;
+  texto_original?: string;
+  limite_linhas?: number;
+  linhas_escritas?: number;
+  tempo_segundos?: number;
+  logToTransparency?: boolean;
+}
+
+export interface UpdateEssayCorrectionOptions {
+  banca?: string;
+  tipo?: EssayType;
+  disciplina?: string;
+  proposta?: string;
+  espelho?: string;
+  texto_original?: string;
+  linhas_escritas?: number;
+  rubrica?: EssayRubricScores | null;
+  erros_tags?: string[];
+  reescrita?: Partial<EssayRewriteVersion> | null;
+  rewriteFile?: File | null;
+}
+
 interface StudyContextValue {
   db: StudyDatabase;
   activePage: ModuleName;
@@ -978,7 +1009,18 @@ interface StudyContextValue {
 
   // Summaries
   createSummaryFolder: (name: string) => string;
+  renameSummaryFolder: (oldFolder: string, newRawName: string) => string;
+  deleteSummaryFolder: (folder: string) => Promise<void>;
   uploadSummaryFile: (folder: string, file: File) => Promise<void>;
+  uploadSummaryFiles: (folder: string, files: File[]) => Promise<number>;
+  saveSummaryNote: (
+    folder: string,
+    payload: { id?: string; title: string; content: string; tags?: string[] },
+  ) => Promise<SummaryFile>;
+  saveSummaryMindMap: (
+    folder: string,
+    payload: { id?: string; title: string; mindMap: MindMapNode; tags?: string[] },
+  ) => Promise<SummaryFile>;
   deleteSummaryFile: (folder: string, fileId: string) => Promise<void>;
 
   // Proofs
@@ -1004,8 +1046,17 @@ interface StudyContextValue {
   deleteProofCorrection: (proofId: string, correctionId: string) => void;
 
   // Discursive Essays
-  submitEssay: (titulo: string, file: File) => Promise<EssayRecord>;
-  updateEssayCorrection: (essayId: string, feedback: string, correctedFile?: File | null) => Promise<EssayRecord>;
+  submitEssay: (
+    titulo: string,
+    file: File | null,
+    options?: SubmitEssayOptions,
+  ) => Promise<EssayRecord>;
+  updateEssayCorrection: (
+    essayId: string,
+    feedback: string,
+    correctedFile?: File | null,
+    options?: UpdateEssayCorrectionOptions,
+  ) => Promise<EssayRecord>;
   deleteEssay: (essayId: string) => Promise<void>;
 
   // Critical Points
@@ -15316,28 +15367,81 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (prev.summaryFolders[name]) return prev;
         return { ...prev, summaryFolders: { ...prev.summaryFolders, [name]: [] } };
       });
-      toast('Pasta temática criada.');
+      toast(`Matéria "${visibleName(name)}" criada no Dossiê de Resumos.`);
       return name;
     },
     [toast],
   );
 
+  const renameSummaryFolder = useCallback(
+    (oldFolder: string, newRawName: string): string => {
+      const nextName = cleanSafeName(newRawName, 'Resumo').replace(/\s+/g, '_');
+      if (!oldFolder || nextName === oldFolder) return oldFolder;
+      setDb((prev) => {
+        const items = prev.summaryFolders[oldFolder] || [];
+        const rest = { ...prev.summaryFolders };
+        delete rest[oldFolder];
+        const existingTarget = rest[nextName] || [];
+        return {
+          ...prev,
+          summaryFolders: {
+            ...rest,
+            [nextName]: [...existingTarget, ...items],
+          },
+        };
+      });
+      toast(`Matéria renomeada para "${visibleName(nextName)}".`);
+      return nextName;
+    },
+    [toast],
+  );
+
+  const deleteSummaryFolder = useCallback(
+    async (folder: string) => {
+      const files = dbRef.current.summaryFolders[folder] || [];
+      const fileIds: string[] = [];
+      const names: string[] = [];
+      for (const f of files) {
+        if (f.blobKey) await deleteFileBlob(f.blobKey);
+        if (f.blobKey?.startsWith('drive_')) fileIds.push(f.blobKey);
+        if (f.name) names.push(`RESUMO - ${f.name}`, f.name);
+      }
+      if (fileIds.length > 0 || names.length > 0) {
+        deleteOrQueueDriveFiles({
+          fileIds: fileIds.length > 0 ? fileIds : undefined,
+          names: names.length > 0 ? names : undefined,
+          subfolderHints: ['Resumos e Mapas', visibleName(folder)].filter(Boolean),
+        });
+      }
+      setDb((prev) => {
+        const next = { ...prev.summaryFolders };
+        delete next[folder];
+        return { ...prev, summaryFolders: next };
+      });
+      toast(`Matéria "${visibleName(folder)}" removida do Dossiê de Resumos.`);
+    },
+    [deleteOrQueueDriveFiles, toast],
+  );
+
   const uploadSummaryFile = useCallback(
     async (folder: string, file: File) => {
-      if (!/\.(pdf|png|jpe?g)$/i.test(file.name)) {
-        throw new Error('Permitidos apenas PDF ou imagens (.png, .jpg, .jpeg).');
+      if (!/\.(pdf|png|jpe?g|webp)$/i.test(file.name)) {
+        throw new Error('Permitidos apenas PDF ou imagens (.pdf, .png, .jpg, .jpeg, .webp).');
       }
       const blobKey = `summary-${uid(16)}`;
       await saveFileBlob(blobKey, file);
       const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
       const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
       await autoSyncFileToDrive(file, file.name, driveSubfolders);
+      const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
       const record: SummaryFile = {
         id: uid(12),
         name: file.name,
+        title: file.name.replace(/\.[^.]+$/, ''),
         size: file.size,
-        mimeType: file.type || (file.name.toLowerCase().endsWith('.pdf') ? 'application/pdf' : 'image/png'),
+        mimeType: file.type || (isPdf ? 'application/pdf' : 'image/png'),
         blobKey,
+        kind: isPdf ? 'pdf' : 'image',
         createdAt: localDateIso(),
         updatedAt: new Date().toISOString(),
       };
@@ -15345,10 +15449,201 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...prev,
         summaryFolders: {
           ...prev.summaryFolders,
-          [folder]: [...(prev.summaryFolders[folder] || []), record],
+          [folder]: [record, ...(prev.summaryFolders[folder] || [])],
         },
       }));
-      toast('Arquivo enviado.');
+      toast(`Arquivo "${visibleName(file.name)}" anexado em ${visibleName(folder)}.`);
+    },
+    [autoSyncFileToDrive, toast],
+  );
+
+  const uploadSummaryFiles = useCallback(
+    async (folder: string, files: File[]): Promise<number> => {
+      if (!folder) throw new Error('Selecione ou crie uma matéria primeiro.');
+      const validFiles = files.filter((f) => /\.(pdf|png|jpe?g|webp)$/i.test(f.name));
+      if (validFiles.length === 0) {
+        throw new Error('Selecione arquivos em PDF ou imagem (.pdf, .png, .jpg, .webp).');
+      }
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+      const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
+      const createdRecords: SummaryFile[] = [];
+
+      for (const file of validFiles) {
+        const blobKey = `summary-${uid(16)}`;
+        await saveFileBlob(blobKey, file);
+        await autoSyncFileToDrive(file, file.name, driveSubfolders);
+        const isPdf = file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf';
+        createdRecords.push({
+          id: uid(12),
+          name: file.name,
+          title: file.name.replace(/\.[^.]+$/, ''),
+          size: file.size,
+          mimeType: file.type || (isPdf ? 'application/pdf' : 'image/png'),
+          blobKey,
+          kind: isPdf ? 'pdf' : 'image',
+          createdAt: localDateIso(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      setDb((prev) => ({
+        ...prev,
+        summaryFolders: {
+          ...prev.summaryFolders,
+          [folder]: [...createdRecords, ...(prev.summaryFolders[folder] || [])],
+        },
+      }));
+      toast(
+        createdRecords.length === 1
+          ? `Arquivo "${visibleName(createdRecords[0].name)}" anexado em ${visibleName(folder)}.`
+          : `${createdRecords.length} arquivos anexados em ${visibleName(folder)}.`,
+      );
+      return createdRecords.length;
+    },
+    [autoSyncFileToDrive, toast],
+  );
+
+  const saveSummaryNote = useCallback(
+    async (
+      folder: string,
+      payload: { id?: string; title: string; content: string; tags?: string[] },
+    ): Promise<SummaryFile> => {
+      if (!folder) throw new Error('Selecione ou crie uma matéria.');
+      const cleanTitle = payload.title.trim();
+      const cleanContent = payload.content.trim();
+      if (!cleanTitle) throw new Error('Informe um título para a anotação de resumo.');
+      if (!cleanContent) throw new Error('Escreva o conteúdo da anotação antes de salvar.');
+
+      const existing = payload.id
+        ? (dbRef.current.summaryFolders[folder] || []).find((f) => f.id === payload.id)
+        : undefined;
+
+      const safeSlug =
+        cleanTitle
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-zA-Z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 48) || 'anotacao';
+      const fileName = `${safeSlug}.txt`;
+      const noteFile = new File([`${cleanTitle}\n\n${cleanContent}`], fileName, {
+        type: 'text/plain;charset=utf-8',
+      });
+      const blobKey = existing?.blobKey || `summary-note-${uid(16)}`;
+      await saveFileBlob(blobKey, noteFile);
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+      const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
+      await autoSyncFileToDrive(noteFile, fileName, driveSubfolders);
+
+      const cleanTags = Array.from(
+        new Set((payload.tags || []).map((t) => t.trim()).filter(Boolean)),
+      );
+      const nowIso = new Date().toISOString();
+      const record: SummaryFile = {
+        id: existing?.id || uid(12),
+        name: fileName,
+        title: cleanTitle,
+        size: noteFile.size,
+        mimeType: 'text/plain;charset=utf-8',
+        blobKey,
+        kind: 'note',
+        content: cleanContent,
+        ...(cleanTags.length > 0 ? { tags: cleanTags } : {}),
+        createdAt: existing?.createdAt || localDateIso(),
+        updatedAt: nowIso,
+      };
+
+      setDb((prev) => {
+        const list = prev.summaryFolders[folder] || [];
+        const nextList = existing
+          ? list.map((f) => (f.id === existing.id ? record : f))
+          : [record, ...list];
+        return {
+          ...prev,
+          summaryFolders: {
+            ...prev.summaryFolders,
+            [folder]: nextList,
+          },
+        };
+      });
+
+      toast(
+        existing
+          ? `Anotação "${cleanTitle}" atualizada.`
+          : `Anotação "${cleanTitle}" salva em ${visibleName(folder)}.`,
+      );
+      return record;
+    },
+    [autoSyncFileToDrive, toast],
+  );
+
+  const saveSummaryMindMap = useCallback(
+    async (
+      folder: string,
+      payload: { id?: string; title: string; mindMap: MindMapNode; tags?: string[] },
+    ): Promise<SummaryFile> => {
+      if (!folder) throw new Error('Selecione ou crie uma matéria.');
+      const cleanTitle = payload.title.trim() || payload.mindMap.label.trim() || 'Mapa Mental';
+      const existing = payload.id
+        ? (dbRef.current.summaryFolders[folder] || []).find((f) => f.id === payload.id)
+        : undefined;
+
+      const safeSlug =
+        cleanTitle
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-zA-Z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 48) || 'mapa_mental';
+      const fileName = `${safeSlug}.mindmap.json`;
+      const jsonString = JSON.stringify(payload.mindMap, null, 2);
+      const mapFile = new File([jsonString], fileName, {
+        type: 'application/json;charset=utf-8',
+      });
+      const blobKey = existing?.blobKey || `summary-map-${uid(16)}`;
+      await saveFileBlob(blobKey, mapFile);
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+      const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
+      await autoSyncFileToDrive(mapFile, fileName, driveSubfolders);
+
+      const cleanTags = Array.from(
+        new Set((payload.tags || []).map((t) => t.trim()).filter(Boolean)),
+      );
+      const nowIso = new Date().toISOString();
+      const record: SummaryFile = {
+        id: existing?.id || uid(12),
+        name: fileName,
+        title: cleanTitle,
+        size: mapFile.size,
+        mimeType: 'application/json;charset=utf-8',
+        blobKey,
+        kind: 'mindmap',
+        mindMap: payload.mindMap,
+        ...(cleanTags.length > 0 ? { tags: cleanTags } : {}),
+        createdAt: existing?.createdAt || localDateIso(),
+        updatedAt: nowIso,
+      };
+
+      setDb((prev) => {
+        const list = prev.summaryFolders[folder] || [];
+        const nextList = existing
+          ? list.map((f) => (f.id === existing.id ? record : f))
+          : [record, ...list];
+        return {
+          ...prev,
+          summaryFolders: {
+            ...prev.summaryFolders,
+            [folder]: nextList,
+          },
+        };
+      });
+
+      toast(
+        existing
+          ? `Mapa mental "${cleanTitle}" atualizado.`
+          : `Mapa mental "${cleanTitle}" salvo em ${visibleName(folder)}.`,
+      );
+      return record;
     },
     [autoSyncFileToDrive, toast],
   );
@@ -15357,7 +15652,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     async (folder: string, fileId: string) => {
       const target = (dbRef.current.summaryFolders[folder] || []).find((f) => f.id === fileId);
       if (target) {
-        await deleteFileBlob(target.blobKey);
+        if (target.blobKey) await deleteFileBlob(target.blobKey);
         deleteOrQueueDriveFiles({
           fileIds: target.blobKey?.startsWith('drive_') ? [target.blobKey] : undefined,
           names: [`RESUMO - ${target.name}`, target.name],
@@ -15371,7 +15666,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           [folder]: (prev.summaryFolders[folder] || []).filter((f) => f.id !== fileId),
         },
       }));
-      toast('Arquivo excluído.');
+      toast('Item removido do Dossiê de Resumos.');
     },
     [deleteOrQueueDriveFiles, toast],
   );
@@ -15750,29 +16045,106 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // Discursive Essays
   const submitEssay = useCallback(
-    async (titulo: string, file: File): Promise<EssayRecord> => {
-      if (!titulo.trim()) throw new Error('Informe o título da redação.');
-      if (!/\.(txt|pdf|docx)$/i.test(file.name)) {
+    async (
+      titulo: string,
+      file: File | null,
+      options?: SubmitEssayOptions,
+    ): Promise<EssayRecord> => {
+      const cleanTitle = titulo.trim();
+      if (!cleanTitle) throw new Error('Informe o título ou tema da redação.');
+
+      const rawText = options?.texto_original?.trim() || '';
+      let effectiveFile = file;
+
+      if (!effectiveFile) {
+        if (!rawText) {
+          throw new Error('Escreva sua redação na folha integrada ou anexe um arquivo (.txt, .pdf ou .docx).');
+        }
+        const safeSlug = cleanTitle
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/[^a-zA-Z0-9]+/g, '_')
+          .replace(/^_+|_+$/g, '')
+          .slice(0, 48) || 'redacao';
+        effectiveFile = new File([rawText], `${safeSlug}.txt`, {
+          type: 'text/plain;charset=utf-8',
+        });
+      } else if (!/\.(txt|pdf|docx)$/i.test(effectiveFile.name)) {
         throw new Error('Anexe a redação em TXT, PDF ou DOCX.');
       }
+
       const blobKey = `essay-${uid(16)}`;
-      await saveFileBlob(blobKey, file);
-      await autoSyncFileToDrive(file, `DISCURSIVA - ${file.name}`, 'Discursivas');
+      await saveFileBlob(blobKey, effectiveFile);
+      await autoSyncFileToDrive(effectiveFile, `DISCURSIVA - ${effectiveFile.name}`, 'Discursivas');
       const nowIso = new Date().toISOString();
+      const timedSeconds =
+        typeof options?.tempo_segundos === 'number' && options.tempo_segundos > 0
+          ? Math.round(options.tempo_segundos)
+          : undefined;
+      const shouldLogTime =
+        Boolean(timedSeconds && timedSeconds >= 60 && options?.logToTransparency !== false);
+      const subjectForLog = (options?.disciplina || '').trim() || 'Discursiva';
+
       const record: EssayRecord = {
         id: uid(16),
-        titulo: titulo.trim(),
+        titulo: cleanTitle,
         data: localDateTimeBrazilian(),
         created_at: nowIso.slice(0, 19),
         updatedAt: nowIso,
-        original_arquivo: file.name,
+        original_arquivo: effectiveFile.name,
         original_blobKey: blobKey,
-        original_mime: file.type || 'application/octet-stream',
+        original_mime: effectiveFile.type || 'application/octet-stream',
         corrigido_arquivo: '',
         feedback: '',
+        ...(options?.banca?.trim() ? { banca: options.banca.trim() } : {}),
+        ...(options?.tipo ? { tipo: options.tipo } : {}),
+        ...(options?.disciplina?.trim() ? { disciplina: options.disciplina.trim() } : {}),
+        ...(options?.proposta?.trim() ? { proposta: options.proposta.trim() } : {}),
+        ...(options?.espelho?.trim() ? { espelho: options.espelho.trim() } : {}),
+        ...(rawText ? { texto_original: rawText } : {}),
+        ...(typeof options?.limite_linhas === 'number' && options.limite_linhas > 0
+          ? { limite_linhas: options.limite_linhas }
+          : {}),
+        ...(typeof options?.linhas_escritas === 'number' && options.linhas_escritas > 0
+          ? { linhas_escritas: options.linhas_escritas }
+          : {}),
+        ...(timedSeconds ? { tempo_segundos: timedSeconds } : {}),
       };
-      setDb((prev) => ({ ...prev, essays: [record, ...prev.essays] }));
-      toast(`Redação "${visibleName(record.titulo)}" enviada.`);
+
+      let timeRecord: StudyTimeRecord | null = null;
+      if (shouldLogTime && timedSeconds) {
+        const todayWeekday: WeekdayName = WEEKDAYS[(new Date().getDay() + 6) % 7];
+        timeRecord = {
+          quizId: `discursive-${uid(10)}`,
+          day: todayWeekday,
+          date: localDateIso(),
+          source: 'manual',
+          recordedAt: nowIso,
+          allocations: [
+            {
+              subject: subjectForLog,
+              seconds: timedSeconds,
+              topicLabel: `Discursiva: ${cleanTitle}`,
+            },
+          ],
+        };
+      }
+
+      setDb((prev) => ({
+        ...prev,
+        essays: [record, ...prev.essays],
+        studyTimeRecords: timeRecord
+          ? [...prev.studyTimeRecords, timeRecord]
+          : prev.studyTimeRecords,
+      }));
+
+      if (timeRecord && timedSeconds) {
+        toast(
+          `Redação "${visibleName(record.titulo)}" protocolada (+${formatScheduleDuration(timedSeconds)} lançados em ${visibleName(subjectForLog)} no Portal da Transparência).`,
+        );
+      } else {
+        toast(`Redação "${visibleName(record.titulo)}" protocolada.`);
+      }
       return record;
     },
     [autoSyncFileToDrive, toast],
@@ -15783,19 +16155,35 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       essayId: string,
       feedback: string,
       correctedFile?: File | null,
+      options?: UpdateEssayCorrectionOptions,
     ): Promise<EssayRecord> => {
-      const target = db.essays.find((e) => e.id === essayId);
+      const target = dbRef.current.essays.find((e) => e.id === essayId);
       if (!target) throw new Error('Redação não encontrada.');
       const trimmedFeedback = feedback.trim();
-      const hasFile = !!(correctedFile && correctedFile.size > 0);
-      if (!hasFile && trimmedFeedback === target.feedback.trim()) {
-        throw new Error('Anexe a redação corrigida ou atualize os comentários.');
+      const hasCorrectedFile = Boolean(correctedFile && correctedFile.size > 0);
+      const hasRewriteFile = Boolean(options?.rewriteFile && options.rewriteFile.size > 0);
+      const hasStructuredPatch = Boolean(
+        options &&
+          (options.rubrica !== undefined ||
+            options.erros_tags !== undefined ||
+            options.banca !== undefined ||
+            options.tipo !== undefined ||
+            options.disciplina !== undefined ||
+            options.proposta !== undefined ||
+            options.espelho !== undefined ||
+            options.texto_original !== undefined ||
+            options.reescrita !== undefined ||
+            hasRewriteFile),
+      );
+
+      if (!hasCorrectedFile && !hasStructuredPatch && trimmedFeedback === target.feedback.trim()) {
+        throw new Error('Atualize o parecer, o espelho de notas, a reescrita ou anexe o arquivo corrigido.');
       }
 
       let corrigido_arquivo = target.corrigido_arquivo;
       let corrigido_blobKey = target.corrigido_blobKey;
       let corrigido_mime = target.corrigido_mime;
-      if (hasFile && correctedFile) {
+      if (hasCorrectedFile && correctedFile) {
         if (!/\.(txt|pdf|docx)$/i.test(correctedFile.name)) {
           throw new Error('Formato inválido para redação corrigida (.txt, .pdf ou .docx).');
         }
@@ -15809,23 +16197,134 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
 
       const nowIso = new Date().toISOString();
+      let nextReescrita = target.reescrita;
+
+      if (options?.reescrita !== undefined || hasRewriteFile) {
+        const incoming = options?.reescrita;
+        if (incoming === null && !hasRewriteFile) {
+          if (target.reescrita?.blobKey) await deleteFileBlob(target.reescrita.blobKey);
+          nextReescrita = undefined;
+        } else {
+          const rewriteText = incoming?.texto !== undefined ? incoming.texto.trim() : target.reescrita?.texto || '';
+          let rwArquivo = incoming?.arquivo ?? target.reescrita?.arquivo;
+          let rwBlobKey = incoming?.blobKey ?? target.reescrita?.blobKey;
+          let rwMime = incoming?.mime ?? target.reescrita?.mime;
+
+          if (hasRewriteFile && options?.rewriteFile) {
+            if (!/\.(txt|pdf|docx)$/i.test(options.rewriteFile.name)) {
+              throw new Error('Formato inválido para reescrita (.txt, .pdf ou .docx).');
+            }
+            const rwKey = `essay-rw-${uid(16)}`;
+            await saveFileBlob(rwKey, options.rewriteFile);
+            await autoSyncFileToDrive(options.rewriteFile, `REESCRITA - ${options.rewriteFile.name}`, 'Discursivas');
+            if (target.reescrita?.blobKey) await deleteFileBlob(target.reescrita.blobKey);
+            rwArquivo = options.rewriteFile.name;
+            rwBlobKey = rwKey;
+            rwMime = options.rewriteFile.type || 'application/octet-stream';
+          } else if (rewriteText && (!rwBlobKey || rwMime?.startsWith('text/plain'))) {
+            const safeSlug = target.titulo
+              .normalize('NFD')
+              .replace(/[\u0300-\u036f]/g, '')
+              .replace(/[^a-zA-Z0-9]+/g, '_')
+              .replace(/^_+|_+$/g, '')
+              .slice(0, 42) || 'redacao';
+            const rwFile = new File([rewriteText], `${safeSlug}_v2.txt`, {
+              type: 'text/plain;charset=utf-8',
+            });
+            const rwKey = target.reescrita?.blobKey && target.reescrita.mime?.startsWith('text/plain')
+              ? target.reescrita.blobKey
+              : `essay-rw-${uid(16)}`;
+            await saveFileBlob(rwKey, rwFile);
+            await autoSyncFileToDrive(rwFile, `REESCRITA - ${rwFile.name}`, 'Discursivas');
+            rwArquivo = rwFile.name;
+            rwBlobKey = rwKey;
+            rwMime = 'text/plain;charset=utf-8';
+          }
+
+          const hasAnyRewriteContent = Boolean(
+            rewriteText ||
+              rwArquivo ||
+              (typeof incoming?.notaFinal === 'number' && Number.isFinite(incoming.notaFinal)) ||
+              incoming?.observacoes?.trim(),
+          );
+
+          if (hasAnyRewriteContent) {
+            nextReescrita = {
+              texto: rewriteText || undefined,
+              arquivo: rwArquivo,
+              blobKey: rwBlobKey,
+              mime: rwMime,
+              notaFinal:
+                typeof incoming?.notaFinal === 'number' && Number.isFinite(incoming.notaFinal)
+                  ? incoming.notaFinal
+                  : incoming?.notaFinal === undefined
+                    ? target.reescrita?.notaFinal
+                    : undefined,
+              observacoes:
+                incoming?.observacoes !== undefined
+                  ? incoming.observacoes.trim() || undefined
+                  : target.reescrita?.observacoes,
+              linhas_escritas:
+                typeof incoming?.linhas_escritas === 'number'
+                  ? incoming.linhas_escritas
+                  : target.reescrita?.linhas_escritas,
+              atualizada_em: nowIso.slice(0, 19),
+            };
+          }
+        }
+      }
+
+      const nextRubrica =
+        options?.rubrica === null
+          ? undefined
+          : options?.rubrica !== undefined
+            ? options.rubrica
+            : target.rubrica;
+
+      const nextErrorTags =
+        options?.erros_tags !== undefined
+          ? Array.from(new Set(options.erros_tags.map((t) => t.trim()).filter(Boolean)))
+          : target.erros_tags;
+
+      const hasEvaluation = Boolean(trimmedFeedback || corrigido_arquivo || nextRubrica);
+
       const updated: EssayRecord = {
         ...target,
         feedback: trimmedFeedback,
         corrigido_arquivo,
         corrigido_blobKey,
         corrigido_mime,
-        corrigida_em: nowIso.slice(0, 19),
+        corrigida_em: hasEvaluation ? nowIso.slice(0, 19) : target.corrigida_em,
         updatedAt: nowIso,
+        banca: options?.banca !== undefined ? options.banca.trim() || undefined : target.banca,
+        tipo: options?.tipo !== undefined ? options.tipo : target.tipo,
+        disciplina:
+          options?.disciplina !== undefined
+            ? options.disciplina.trim() || undefined
+            : target.disciplina,
+        proposta:
+          options?.proposta !== undefined ? options.proposta.trim() || undefined : target.proposta,
+        espelho:
+          options?.espelho !== undefined ? options.espelho.trim() || undefined : target.espelho,
+        texto_original:
+          options?.texto_original !== undefined
+            ? options.texto_original.trim() || undefined
+            : target.texto_original,
+        linhas_escritas:
+          options?.linhas_escritas !== undefined ? options.linhas_escritas : target.linhas_escritas,
+        rubrica: nextRubrica,
+        erros_tags: nextErrorTags && nextErrorTags.length > 0 ? nextErrorTags : undefined,
+        reescrita: nextReescrita,
       };
+
       setDb((prev) => ({
         ...prev,
         essays: prev.essays.map((e) => (e.id === essayId ? updated : e)),
       }));
-      toast(`Correção de "${visibleName(updated.titulo)}" salva.`);
+      toast(`Correção e espelho de "${visibleName(updated.titulo)}" salvos.`);
       return updated;
     },
-    [autoSyncFileToDrive, db.essays, toast],
+    [autoSyncFileToDrive, toast],
   );
 
   const deleteEssay = useCallback(
@@ -15839,16 +16338,23 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (target.corrigido_blobKey) {
         await deleteFileBlob(target.corrigido_blobKey);
       }
+      if (target.reescrita?.blobKey) {
+        await deleteFileBlob(target.reescrita.blobKey);
+      }
 
       const fileIds: string[] = [];
       const names: string[] = [];
       if (target.original_blobKey?.startsWith('drive_')) fileIds.push(target.original_blobKey);
       if (target.corrigido_blobKey?.startsWith('drive_')) fileIds.push(target.corrigido_blobKey);
+      if (target.reescrita?.blobKey?.startsWith('drive_')) fileIds.push(target.reescrita.blobKey);
       if (target.original_arquivo) {
         names.push(`DISCURSIVA - ${target.original_arquivo}`, target.original_arquivo);
       }
       if (target.corrigido_arquivo) {
         names.push(`CORRECAO - ${target.corrigido_arquivo}`, target.corrigido_arquivo);
+      }
+      if (target.reescrita?.arquivo) {
+        names.push(`REESCRITA - ${target.reescrita.arquivo}`, target.reescrita.arquivo);
       }
       if (fileIds.length > 0 || names.length > 0) {
         deleteOrQueueDriveFiles({
@@ -16666,7 +17172,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deletePersonalPdf,
         deletePdfFolder,
         createSummaryFolder,
+        renameSummaryFolder,
+        deleteSummaryFolder,
         uploadSummaryFile,
+        uploadSummaryFiles,
+        saveSummaryNote,
+        saveSummaryMindMap,
         deleteSummaryFile,
         createProofBank,
         uploadProofOnly,

@@ -290,6 +290,221 @@ async function startServer() {
     }
   });
 
+  app.post('/api/ai/analyze-summary', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
+    try {
+      const { mode, subject, title, sourceText, count, banca } = (req.body || {}) as {
+        mode?: 'summary' | 'questions' | 'flashcards' | 'mindmap';
+        subject?: string;
+        title?: string;
+        sourceText?: string;
+        count?: number;
+        banca?: string;
+      };
+
+      const cleanText = String(sourceText || '').trim();
+      if (cleanText.length < 20) {
+        res.status(400).json({
+          error: 'Conteúdo muito curto para análise com IA (mínimo de 20 caracteres).',
+        });
+        return;
+      }
+
+      const safeMode = mode || 'summary';
+      const cleanSubject = String(subject || 'Geral').trim();
+      const cleanTitle = String(title || 'Material de Estudo').trim();
+      const truncated = cleanText.slice(0, 32000);
+      const ai = getAiClient();
+
+      if (safeMode === 'questions') {
+        const safeCount = Math.min(8, Math.max(2, Number(count) || 5));
+        const response = await ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [
+            `Com base EXCLUSIVAMENTE no resumo/material abaixo sobre "${cleanSubject} — ${cleanTitle}", crie ${safeCount} questões objetivas inéditas de concurso público em português${banca ? ` no estilo da banca ${banca}` : ''}.`,
+            'Cada questão deve ter 5 alternativas (A, B, C, D, E), gabarito exato (A-E) e comentário objetivo explicando por que a correta está certa e o erro principal das pegadinhas.',
+            '',
+            'MATERIAL BASE:',
+            truncated,
+          ].join('\n'),
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                questions: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      materia: { type: Type.STRING },
+                      enunciado: { type: Type.STRING },
+                      alternativas: {
+                        type: Type.OBJECT,
+                        properties: {
+                          A: { type: Type.STRING },
+                          B: { type: Type.STRING },
+                          C: { type: Type.STRING },
+                          D: { type: Type.STRING },
+                          E: { type: Type.STRING },
+                        },
+                        required: ['A', 'B', 'C', 'D', 'E'],
+                      },
+                      gabarito: { type: Type.STRING },
+                      comentario: { type: Type.STRING },
+                    },
+                    required: ['materia', 'enunciado', 'alternativas', 'gabarito', 'comentario'],
+                  },
+                },
+              },
+              required: ['questions'],
+            },
+          },
+        });
+        const parsed = JSON.parse(response.text || '{"questions":[]}') as { questions?: unknown[] };
+        res.json({ mode: 'questions', questions: Array.isArray(parsed.questions) ? parsed.questions : [] });
+        return;
+      }
+
+      if (safeMode === 'flashcards') {
+        const safeCount = Math.min(12, Math.max(3, Number(count) || 6));
+        const response = await ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [
+            `A partir do material de estudo abaixo sobre "${cleanSubject} — ${cleanTitle}", extraia ${safeCount} flashcards de revisão ativa (pergunta direta na frente, resposta concisa com fundamento/exceção no verso) focados no que mais cai em provas.`,
+            '',
+            'MATERIAL BASE:',
+            truncated,
+          ].join('\n'),
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                flashcards: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      front: { type: Type.STRING },
+                      back: { type: Type.STRING },
+                    },
+                    required: ['front', 'back'],
+                  },
+                },
+              },
+              required: ['flashcards'],
+            },
+          },
+        });
+        const parsed = JSON.parse(response.text || '{"flashcards":[]}') as { flashcards?: unknown[] };
+        res.json({ mode: 'flashcards', flashcards: Array.isArray(parsed.flashcards) ? parsed.flashcards : [] });
+        return;
+      }
+
+      if (safeMode === 'mindmap') {
+        const response = await ai.models.generateContent({
+          model: GEMINI_MODEL,
+          contents: [
+            `Transforme o material de estudo abaixo sobre "${cleanSubject} — ${cleanTitle}" em uma estrutura de Mapa Mental hierárquico para concursos públicos em português.`,
+            'Crie 1 tema central curto (rootLabel), de 3 a 6 ramos principais (branches) e de 2 a 4 subtópicos concisos em cada ramo (children), com pequenas notas objetivas (artigos, prazos ou exceções) quando útil.',
+            '',
+            'MATERIAL BASE:',
+            truncated,
+          ].join('\n'),
+          config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+              type: Type.OBJECT,
+              properties: {
+                rootLabel: { type: Type.STRING },
+                branches: {
+                  type: Type.ARRAY,
+                  items: {
+                    type: Type.OBJECT,
+                    properties: {
+                      label: { type: Type.STRING },
+                      note: { type: Type.STRING },
+                      children: {
+                        type: Type.ARRAY,
+                        items: {
+                          type: Type.OBJECT,
+                          properties: {
+                            label: { type: Type.STRING },
+                            note: { type: Type.STRING },
+                          },
+                          required: ['label'],
+                        },
+                      },
+                    },
+                    required: ['label', 'children'],
+                  },
+                },
+              },
+              required: ['rootLabel', 'branches'],
+            },
+          },
+        });
+        const parsed = JSON.parse(response.text || '{"rootLabel":"","branches":[]}') as {
+          rootLabel?: string;
+          branches?: unknown[];
+        };
+        res.json({
+          mode: 'mindmap',
+          mindmap: {
+            rootLabel: parsed.rootLabel || cleanTitle,
+            branches: Array.isArray(parsed.branches) ? parsed.branches : [],
+          },
+        });
+        return;
+      }
+
+      // Default mode: 'summary'
+      const response = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [
+          `Você é um professor especialista em concursos públicos. Transforme o material abaixo sobre "${cleanSubject} — ${cleanTitle}" em uma anotação de resumo clara, objetiva e pronta para revisão rápida.`,
+          'Organize o texto em seções curtas com títulos em linha própria (ex.: "Conceito:", "Regras principais:", "Exceções e Pegadinhas:", "Base legal / Jurisprudência:") e itens com hífen (- ). Destaque prazos, exceções e artigos relevantes.',
+          '',
+          'MATERIAL BASE:',
+          truncated,
+        ].join('\n'),
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              summaryText: { type: Type.STRING },
+              keyPoints: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: ['title', 'summaryText', 'keyPoints'],
+          },
+        },
+      });
+      const parsed = JSON.parse(response.text || '{"title":"","summaryText":"","keyPoints":[]}') as {
+        title?: string;
+        summaryText?: string;
+        keyPoints?: string[];
+      };
+      res.json({
+        mode: 'summary',
+        summary: {
+          title: parsed.title || `Resumo — ${cleanTitle}`,
+          summaryText: parsed.summaryText || '',
+          keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints : [],
+        },
+      });
+    } catch (err: any) {
+      console.error('[API /api/ai/analyze-summary] Erro:', err);
+      res.status(500).json({
+        error: err?.message || 'Erro ao processar resumo com Gemini.',
+      });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

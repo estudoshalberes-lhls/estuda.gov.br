@@ -68,3 +68,46 @@ export async function generateQuestionsWithAi(params: {
 }): Promise<{ questions: AiGeneratedQuestion[] }> {
   return postAiRoute<{ questions: AiGeneratedQuestion[] }>('/api/ai/generate-questions', params);
 }
+
+export type AiSummaryAnalysisMode = 'summary' | 'questions' | 'flashcards' | 'mindmap';
+
+export interface AiSummaryFlashcard {
+  front: string;
+  back: string;
+}
+
+export interface AiSummaryMindMapPayload {
+  rootLabel: string;
+  branches: Array<{
+    label: string;
+    note?: string;
+    children: Array<{
+      label: string;
+      note?: string;
+    }>;
+  }>;
+}
+
+export interface AiSummaryAnalysisResponse {
+  mode: AiSummaryAnalysisMode;
+  summary?: {
+    title: string;
+    summaryText: string;
+    keyPoints: string[];
+  };
+  questions?: AiGeneratedQuestion[];
+  flashcards?: AiSummaryFlashcard[];
+  mindmap?: AiSummaryMindMapPayload;
+}
+
+export async function analyzeSummaryWithAi(params: {
+  mode: AiSummaryAnalysisMode;
+  subject: string;
+  title: string;
+  sourceText: string;
+  count?: number;
+  banca?: string;
+}): Promise<AiSummaryAnalysisResponse> {
+  return postAiRoute<AiSummaryAnalysisResponse>('/api/ai/analyze-summary', params);
+}
+
