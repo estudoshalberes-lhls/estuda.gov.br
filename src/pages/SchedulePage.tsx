@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Archive,
+  ArrowRightLeft,
   BarChart3,
   Bookmark,
   Briefcase,
@@ -116,6 +117,7 @@ export const SchedulePage: React.FC = () => {
     importScheduleTxt,
     addTopicToDay,
     deleteScheduleTopic,
+    moveScheduleTopicToDay,
     completeScheduleTopic,
     archiveTopicAsIncomplete,
     archiveFullWeek,
@@ -288,6 +290,51 @@ export const SchedulePage: React.FC = () => {
     draftRef.current = nextDraft;
     setDraft(nextDraft);
     saveScheduleDay(day, currentDayTopics, true);
+  };
+
+  const handleMoveScheduleTopic = (fromDay: WeekdayName, idx: number, toDay: WeekdayName) => {
+    if (fromDay === toDay) return;
+
+    [fromDay, toDay].forEach((d) => {
+      const existingTimer = saveTimersRef.current[d];
+      if (existingTimer) {
+        window.clearTimeout(existingTimer);
+        delete saveTimersRef.current[d];
+      }
+      dirtyDaysRef.current.delete(d);
+    });
+
+    const snapshotBeforeMove: ScheduleMap = {
+      ...db.schedule,
+      ...draftRef.current,
+    };
+    const sourceTopics = [...(snapshotBeforeMove[fromDay] || [])];
+    const [moved] = sourceTopics.splice(idx, 1);
+    if (!moved) return;
+
+    const targetDate =
+      db.scheduleDayDates?.[toDay] || activeWeekDates[toDay] || moved.data || todayBr;
+    const updatedMoved: ScheduleTopic = {
+      ...moved,
+      data: targetDate,
+      data_personalizada: false,
+    };
+    const targetTopics = [...(snapshotBeforeMove[toDay] || []), updatedMoved];
+
+    if (moved.id) clearFieldDraft(`schedule_topic_${moved.id}`);
+    clearDayTopicDrafts(sourceTopics);
+    clearDayTopicDrafts(targetTopics);
+
+    const nextDraft: ScheduleMap = {
+      ...snapshotBeforeMove,
+      [fromDay]: sourceTopics,
+      [toDay]: targetTopics,
+    };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    setOpenDays((prev) => ({ ...prev, [toDay]: true }));
+
+    moveScheduleTopicToDay(fromDay, idx, toDay, snapshotBeforeMove);
   };
 
   useEffect(() => {
@@ -1024,13 +1071,43 @@ export const SchedulePage: React.FC = () => {
                                 )}
                               </div>
 
-                              <div className="flex items-center gap-1.5 text-[10.5px] text-[var(--muted)]">
+                              <div className="flex flex-wrap items-center gap-2 text-[10.5px] text-[var(--muted)]">
                                 <span>
                                   Tempo vai para:{' '}
                                   <strong className="text-[var(--text)]">
                                     {visibleName(effectiveFixedSubject || topic.materia || 'Geral')}
                                   </strong>
                                 </span>
+                                <div className="inline-flex items-center gap-1">
+                                  <ArrowRightLeft className="w-3 h-3 text-[var(--accent)] shrink-0" />
+                                  <select
+                                    aria-label={`Mover ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')} para outro dia da semana`}
+                                    title="Mover este assunto para outro dia da mesma semana sem precisar apagar"
+                                    value={day}
+                                    onChange={(e) => {
+                                      const targetDay = e.target.value as WeekdayName;
+                                      if (targetDay && targetDay !== day) {
+                                        handleMoveScheduleTopic(day, idx, targetDay);
+                                      }
+                                    }}
+                                    className="h-[26px] px-2 rounded-md border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] focus:border-[var(--accent)] focus:outline-none cursor-pointer"
+                                  >
+                                    {WEEKDAYS.map((wd) => {
+                                      const wdDate = (
+                                        db.scheduleDayDates?.[wd] ||
+                                        activeWeekDates[wd] ||
+                                        ''
+                                      ).slice(0, 5);
+                                      return (
+                                        <option key={wd} value={wd}>
+                                          {wd === day
+                                            ? `${wd} (dia atual)`
+                                            : `Mover → ${wd}${wdDate ? ` (${wdDate})` : ''}`}
+                                        </option>
+                                      );
+                                    })}
+                                  </select>
+                                </div>
                               </div>
                             </div>
 

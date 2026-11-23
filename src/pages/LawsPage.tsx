@@ -1590,19 +1590,27 @@ export const LawsPage: React.FC = () => {
             isSupported={voiceReader.isSupported}
             isPlaying={voiceReader.isPlaying}
             isPaused={voiceReader.isPaused}
+            isBuffering={voiceReader.isBuffering}
+            errorMessage={voiceReader.errorMessage}
             activeIndex={voiceReader.activeIndex}
             totalItems={filteredItems.length}
             currentItem={voiceReader.currentItem}
+            engine={voiceReader.engine}
+            neuralVoice={voiceReader.neuralVoice}
             voices={voiceReader.voices}
             rate={voiceReader.rate}
             voiceURI={voiceReader.voiceURI}
             autoMarkRead={voiceReader.autoMarkRead}
+            skipLegislativeNotes={voiceReader.skipLegislativeNotes}
             onTogglePlayPause={voiceReader.togglePlayPause}
             onStop={voiceReader.stop}
             onStepArticle={voiceReader.stepArticle}
             onChangeRate={voiceReader.setRate}
             onChangeVoice={voiceReader.setVoiceURI}
+            onChangeEngine={voiceReader.setEngine}
+            onChangeNeuralVoice={voiceReader.setNeuralVoice}
             onToggleAutoMarkRead={voiceReader.toggleAutoMarkRead}
+            onToggleSkipLegislativeNotes={voiceReader.toggleSkipLegislativeNotes}
           />
 
           {readerTab === 'continuous' ? (

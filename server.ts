@@ -505,6 +505,99 @@ async function startServer() {
     }
   });
 
+  const ALLOWED_TTS_VOICES = new Set(['Kore', 'Zephyr', 'Charon', 'Puck', 'Fenrir']);
+  const GEMINI_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
+
+  app.post('/api/ai/tts', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
+    try {
+      const { text, voiceName, style } = (req.body || {}) as {
+        text?: string;
+        voiceName?: string;
+        style?: string;
+      };
+      const cleanText = String(text || '').replace(/\s+/g, ' ').trim();
+      if (!cleanText) {
+        res.status(400).json({ error: 'Texto vazio para síntese de voz.' });
+        return;
+      }
+
+      const safeVoice =
+        typeof voiceName === 'string' && ALLOWED_TTS_VOICES.has(voiceName.trim())
+          ? voiceName.trim()
+          : 'Kore';
+
+      const safeStyle =
+        typeof style === 'string' && style.trim()
+          ? style.trim().slice(0, 300)
+          : 'Narração em português do Brasil clara, natural, cadenciada e fluida, como um professor experiente lendo legislação em voz alta, com pausas orgânicas em vírgulas e pontos finais.';
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        throw new Error('GEMINI_API_KEY não configurada no ambiente do servidor.');
+      }
+      const ai = new GoogleGenAI({
+        apiKey,
+        apiVersion: 'v1beta',
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          },
+        },
+      });
+      const response = await ai.models.generateContent({
+        model: GEMINI_TTS_MODEL,
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              {
+                text: cleanText.slice(0, 3200),
+                speechMetadata: {
+                  style: safeStyle,
+                },
+              },
+            ],
+          },
+        ],
+        config: {
+          responseModalities: ['AUDIO'],
+          speechConfig: {
+            voiceConfig: {
+              prebuiltVoiceConfig: { voiceName: safeVoice },
+            },
+          },
+        },
+      });
+
+      const parts = response.candidates?.[0]?.content?.parts || [];
+      const audioPart = parts.find((p: any) => p?.inlineData?.data);
+      const base64Audio = audioPart?.inlineData?.data;
+      const mimeType = audioPart?.inlineData?.mimeType || 'audio/wav';
+
+      if (!base64Audio) {
+        res.status(502).json({
+          error: 'O serviço de voz neural não retornou áudio para este trecho.',
+        });
+        return;
+      }
+
+      const wavBuffer = Buffer.from(base64Audio, 'base64');
+      res.setHeader('Content-Type', mimeType);
+      res.setHeader('Content-Length', String(wavBuffer.length));
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.send(wavBuffer);
+    } catch (err: any) {
+      console.error('[API /api/ai/tts] Erro:', err);
+      const status =
+        typeof err?.status === 'number' && err.status >= 400 && err.status < 600
+          ? err.status
+          : 500;
+      res.status(status).json({
+        error: err?.message || 'Erro ao gerar áudio neural com Gemini.',
+      });
+    }
+  });
+
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({

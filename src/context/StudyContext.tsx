@@ -919,6 +919,12 @@ interface StudyContextValue {
     },
   ) => void;
   deleteScheduleTopic: (day: WeekdayName, index: number) => void;
+  moveScheduleTopicToDay: (
+    fromDay: WeekdayName,
+    index: number,
+    toDay: WeekdayName,
+    currentScheduleSnapshot?: ScheduleMap,
+  ) => void;
   completeScheduleTopic: (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => void;
   archiveTopicAsIncomplete: (day: WeekdayName, index: number, currentSchedule: ScheduleMap) => void;
   archiveFullWeek: (currentSchedule: ScheduleMap) => number;
@@ -13357,6 +13363,63 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [scheduleAutoScheduleTxtSync],
   );
 
+  const moveScheduleTopicToDay = useCallback(
+    (
+      fromDay: WeekdayName,
+      index: number,
+      toDay: WeekdayName,
+      currentScheduleSnapshot?: ScheduleMap,
+    ) => {
+      if (fromDay === toDay) return;
+      const previewList = currentScheduleSnapshot?.[fromDay] || dbRef.current.schedule[fromDay] || [];
+      const previewTopic = previewList[index];
+      if (!previewTopic) return;
+
+      lastUrgentSaveMsRef.current = Date.now();
+      const movedTopicId = previewTopic.id || '';
+      const movedLabel = visibleName(previewTopic.materia || previewTopic.disciplina_fixa || 'Tópico');
+
+      setDb((prev) => {
+        const baseSchedule = currentScheduleSnapshot
+          ? { ...prev.schedule, ...currentScheduleSnapshot }
+          : prev.schedule;
+        const sourceList = [...(baseSchedule[fromDay] || [])];
+        const [moved] = sourceList.splice(index, 1);
+        if (!moved) return prev;
+
+        const targetDate =
+          prev.scheduleDayDates?.[toDay] ||
+          getCurrentWeekDates()[toDay] ||
+          moved.data ||
+          localDateBrazilian();
+
+        const updatedTopic: ScheduleTopic = {
+          ...moved,
+          data: targetDate,
+          data_personalizada: false,
+        };
+
+        const targetList = [...(baseSchedule[toDay] || []), updatedTopic];
+        const nextSchedule: ScheduleMap = {
+          ...baseSchedule,
+          [fromDay]: sourceList,
+          [toDay]: targetList,
+        };
+        return buildUpdatedWeeklyScheduleState(prev, nextSchedule, prev.scheduleDayDates);
+      });
+
+      if (movedTopicId && activeTimerTopic?.topicId === movedTopicId) {
+        setActiveTimerTopic((cur) =>
+          cur && cur.topicId === movedTopicId ? { ...cur, day: toDay } : cur,
+        );
+      }
+
+      scheduleAutoScheduleTxtSync();
+      toast(`"${movedLabel}" movido de ${fromDay} para ${toDay}.`);
+    },
+    [activeTimerTopic, scheduleAutoScheduleTxtSync, toast],
+  );
+
   const completeScheduleTopic = useCallback(
     (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => {
       lastUrgentSaveMsRef.current = Date.now();
@@ -17184,6 +17247,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deleteSavedScheduleWeek,
         addTopicToDay,
         deleteScheduleTopic,
+        moveScheduleTopicToDay,
         completeScheduleTopic,
         archiveTopicAsIncomplete,
         archiveFullWeek,
