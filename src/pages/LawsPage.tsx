@@ -1588,6 +1588,7 @@ export const LawsPage: React.FC = () => {
 
           <LawVoicePlayerBar
             isSupported={voiceReader.isSupported}
+            isLocalSupported={voiceReader.isLocalSupported}
             isPlaying={voiceReader.isPlaying}
             isPaused={voiceReader.isPaused}
             isBuffering={voiceReader.isBuffering}
@@ -1596,7 +1597,9 @@ export const LawsPage: React.FC = () => {
             totalItems={filteredItems.length}
             currentItem={voiceReader.currentItem}
             engine={voiceReader.engine}
-            neuralVoice={voiceReader.neuralVoice}
+            localVoice={voiceReader.localVoice}
+            storedLocalVoices={voiceReader.storedLocalVoices}
+            localDownloadProgress={voiceReader.localDownloadProgress}
             voices={voiceReader.voices}
             rate={voiceReader.rate}
             voiceURI={voiceReader.voiceURI}
@@ -1608,7 +1611,8 @@ export const LawsPage: React.FC = () => {
             onChangeRate={voiceReader.setRate}
             onChangeVoice={voiceReader.setVoiceURI}
             onChangeEngine={voiceReader.setEngine}
-            onChangeNeuralVoice={voiceReader.setNeuralVoice}
+            onChangeLocalVoice={voiceReader.setLocalVoice}
+            onPreloadLocalVoice={voiceReader.preloadLocalVoice}
             onToggleAutoMarkRead={voiceReader.toggleAutoMarkRead}
             onToggleSkipLegislativeNotes={voiceReader.toggleSkipLegislativeNotes}
           />

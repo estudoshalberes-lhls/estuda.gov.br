@@ -123,6 +123,20 @@ export default defineConfig(() => {
                 },
               },
             },
+            {
+              urlPattern: /^https:\/\/cdn\.jsdelivr\.net\/npm\/(?:onnxruntime-web|@diffusionstudio\/piper-wasm).*/i,
+              handler: 'CacheFirst',
+              options: {
+                cacheName: 'piper-wasm-runtime-cache',
+                expiration: {
+                  maxEntries: 12,
+                  maxAgeSeconds: 60 * 60 * 24 * 365,
+                },
+                cacheableResponse: {
+                  statuses: [0, 200],
+                },
+              },
+            },
           ],
         },
         devOptions: {
@@ -131,6 +145,12 @@ export default defineConfig(() => {
         },
       }),
     ],
+    worker: {
+      format: 'es' as const,
+    },
+    optimizeDeps: {
+      exclude: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
+    },
     resolve: {
       alias: {
         '@': path.resolve('.'),

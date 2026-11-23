@@ -2,33 +2,38 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertCircle,
   CheckSquare,
+  Cpu,
+  Download,
   Filter,
+  HardDrive,
   Loader2,
   Pause,
   Play,
   SkipBack,
   SkipForward,
-  Sparkles,
   Square,
   Volume2,
 } from 'lucide-react';
+import {
+  downloadLocalPiperVoice,
+  getStoredLocalPiperVoices,
+  isLocalPiperSupported,
+  LOCAL_PIPER_VOICES,
+  LocalPiperVoiceId,
+  synthesizeLocalPiperWav,
+  VALID_LOCAL_PIPER_IDS,
+} from '../../lib/localPiperTts';
 import { formatSequentialDeviceLabel } from '../../lib/parsers';
 import { LawItem } from '../../types/study';
 
-const VOICE_PREFS_STORAGE_KEY = 'ce-law-voice-prefs-v2';
+export { LOCAL_PIPER_VOICES };
+export type { LocalPiperVoiceId };
+
+const VOICE_PREFS_STORAGE_KEY = 'ce-law-voice-prefs-v3';
 
 const SPEED_OPTIONS = [0.85, 1, 1.1, 1.2, 1.35, 1.5, 1.75, 2] as const;
 
-export type VoiceEngineMode = 'neural' | 'browser';
-export type NeuralVoiceId = 'Kore' | 'Zephyr' | 'Charon' | 'Puck' | 'Fenrir';
-
-export const NEURAL_VOICES: ReadonlyArray<{ id: NeuralVoiceId; label: string }> = [
-  { id: 'Kore', label: 'Kore · Feminina clara' },
-  { id: 'Zephyr', label: 'Zephyr · Feminina suave' },
-  { id: 'Charon', label: 'Charon · Masculina grave' },
-  { id: 'Puck', label: 'Puck · Masculina dinâmica' },
-  { id: 'Fenrir', label: 'Fenrir · Masculina firme' },
-];
+export type VoiceEngineMode = 'local' | 'browser';
 
 export interface LawVoiceWordRange {
   itemId: string;
@@ -36,30 +41,55 @@ export interface LawVoiceWordRange {
   charLength: number;
 }
 
+export interface LocalVoiceDownloadState {
+  voiceId: LocalPiperVoiceId;
+  percent: number;
+  loadedMb: number;
+  totalMb: number;
+}
+
 interface StoredVoicePrefs {
   engine: VoiceEngineMode;
-  neuralVoice: NeuralVoiceId;
+  localVoice: LocalPiperVoiceId;
   rate: number;
   voiceURI: string;
   autoMarkRead: boolean;
   skipLegislativeNotes: boolean;
 }
 
-const VALID_NEURAL_IDS = new Set<string>(NEURAL_VOICES.map((v) => v.id));
-
 function loadVoicePrefs(): StoredVoicePrefs {
+  const defaultEngine: VoiceEngineMode = isLocalPiperSupported() ? 'local' : 'browser';
   try {
-    const raw =
-      localStorage.getItem(VOICE_PREFS_STORAGE_KEY) ||
-      localStorage.getItem('ce-law-voice-prefs-v1');
-    if (raw) {
-      const parsed = JSON.parse(raw) as Partial<StoredVoicePrefs>;
+    const rawV3 = localStorage.getItem(VOICE_PREFS_STORAGE_KEY);
+    if (rawV3) {
+      const parsed = JSON.parse(rawV3) as Partial<StoredVoicePrefs>;
+      const engine: VoiceEngineMode =
+        parsed.engine === 'local' || parsed.engine === 'browser' ? parsed.engine : defaultEngine;
       return {
-        engine: parsed.engine === 'browser' ? 'browser' : 'neural',
-        neuralVoice:
-          typeof parsed.neuralVoice === 'string' && VALID_NEURAL_IDS.has(parsed.neuralVoice)
-            ? (parsed.neuralVoice as NeuralVoiceId)
-            : 'Kore',
+        engine,
+        localVoice:
+          typeof parsed.localVoice === 'string' && VALID_LOCAL_PIPER_IDS.has(parsed.localVoice)
+            ? (parsed.localVoice as LocalPiperVoiceId)
+            : 'pt_BR-faber-medium',
+        rate:
+          typeof parsed.rate === 'number' && parsed.rate >= 0.5 && parsed.rate <= 2.5
+            ? parsed.rate
+            : 1.1,
+        voiceURI: typeof parsed.voiceURI === 'string' ? parsed.voiceURI : '',
+        autoMarkRead: Boolean(parsed.autoMarkRead),
+        skipLegislativeNotes:
+          typeof parsed.skipLegislativeNotes === 'boolean' ? parsed.skipLegislativeNotes : true,
+      };
+    }
+
+    const rawLegacy =
+      localStorage.getItem('ce-law-voice-prefs-v2') ||
+      localStorage.getItem('ce-law-voice-prefs-v1');
+    if (rawLegacy) {
+      const parsed = JSON.parse(rawLegacy) as Partial<StoredVoicePrefs>;
+      return {
+        engine: defaultEngine,
+        localVoice: 'pt_BR-faber-medium',
         rate:
           typeof parsed.rate === 'number' && parsed.rate >= 0.5 && parsed.rate <= 2.5
             ? parsed.rate
@@ -74,8 +104,8 @@ function loadVoicePrefs(): StoredVoicePrefs {
     // ignore storage errors
   }
   return {
-    engine: 'neural',
-    neuralVoice: 'Kore',
+    engine: defaultEngine,
+    localVoice: 'pt_BR-faber-medium',
     rate: 1.1,
     voiceURI: '',
     autoMarkRead: false,
@@ -301,6 +331,50 @@ export function splitIntoNaturalChunks(text: string, maxLen: number): string[] {
 // ============================================================================
 
 const MAX_NEURAL_CACHE_ENTRIES = 45;
+const PERSISTENT_TTS_CACHE_NAME = 'ce-neural-tts-audio-v1';
+
+function hashTtsKey(input: string): string {
+  let h1 = 0xdeadbeef ^ input.length;
+  let h2 = 0x41c6ce57 ^ input.length;
+  for (let i = 0; i < input.length; i++) {
+    const ch = input.charCodeAt(i);
+    h1 = Math.imul(h1 ^ ch, 2654435761);
+    h2 = Math.imul(h2 ^ ch, 1597334677);
+  }
+  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+  return `${(h2 >>> 0).toString(36)}-${(h1 >>> 0).toString(36)}-${input.length.toString(36)}`;
+}
+
+async function readPersistentTtsBlob(cacheKey: string): Promise<Blob | null> {
+  if (typeof window === 'undefined' || !('caches' in window)) return null;
+  try {
+    const cache = await window.caches.open(PERSISTENT_TTS_CACHE_NAME);
+    const url = `${window.location.origin}/__tts_cache__/${hashTtsKey(cacheKey)}`;
+    const match = await cache.match(url);
+    if (!match) return null;
+    const blob = await match.blob();
+    return blob && blob.size >= 64 ? blob : null;
+  } catch {
+    return null;
+  }
+}
+
+async function writePersistentTtsBlob(cacheKey: string, blob: Blob): Promise<void> {
+  if (typeof window === 'undefined' || !('caches' in window)) return;
+  try {
+    const cache = await window.caches.open(PERSISTENT_TTS_CACHE_NAME);
+    const url = `${window.location.origin}/__tts_cache__/${hashTtsKey(cacheKey)}`;
+    await cache.put(
+      url,
+      new Response(blob, {
+        headers: { 'Content-Type': blob.type || 'audio/wav' },
+      }),
+    );
+  } catch {
+    // ignore storage quota errors
+  }
+}
 
 export function useLawVoiceReader(options: {
   activeFolder: string;
@@ -316,10 +390,14 @@ export function useLawVoiceReader(options: {
     typeof SpeechSynthesisUtterance !== 'undefined';
 
   const isAudioSupported = typeof window !== 'undefined' && typeof Audio !== 'undefined';
+  const isLocalSupported = isAudioSupported && isLocalPiperSupported();
   const isSupported = isAudioSupported || isBrowserSpeechSupported;
 
   const [prefs, setPrefs] = useState<StoredVoicePrefs>(() => loadVoicePrefs());
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [storedLocalVoices, setStoredLocalVoices] = useState<LocalPiperVoiceId[]>([]);
+  const [localDownloadProgress, setLocalDownloadProgress] =
+    useState<LocalVoiceDownloadState | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isBuffering, setIsBuffering] = useState(false);
@@ -333,6 +411,8 @@ export function useLawVoiceReader(options: {
   prefsRef.current = prefs;
   const voicesRef = useRef(voices);
   voicesRef.current = voices;
+  const storedLocalVoicesRef = useRef(storedLocalVoices);
+  storedLocalVoicesRef.current = storedLocalVoices;
   const onPosRef = useRef(onPositionChange);
   onPosRef.current = onPositionChange;
   const onMarkReadRef = useRef(onAutoMarkItemRead);
@@ -343,7 +423,7 @@ export function useLawVoiceReader(options: {
   activeIndexRef.current = activeIndex;
   const activeChunkIdxRef = useRef(0);
 
-  // Neural audio element + cache + abort controllers
+  // Audio element + LRU cache + abort controllers (shared by Local Piper & Gemini Cloud)
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const neuralCacheRef = useRef<Map<string, string>>(new Map());
   const inflightRef = useRef<Map<string, Promise<string>>>(new Map());
@@ -357,6 +437,19 @@ export function useLawVoiceReader(options: {
       // ignore storage errors
     }
   }, [prefs]);
+
+  useEffect(() => {
+    if (!isLocalSupported) return;
+    let cancelled = false;
+    void getStoredLocalPiperVoices().then((list) => {
+      if (!cancelled) {
+        setStoredLocalVoices(list);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isLocalSupported]);
 
   useEffect(() => {
     if (!isBrowserSpeechSupported) return;
@@ -455,12 +548,31 @@ export function useLawVoiceReader(options: {
     };
   }, [clearPendingNextTimer, isBrowserSpeechSupported, stopAudioElement]);
 
-  const fetchNeuralAudioUrl = useCallback(
-    async (text: string, voiceName: NeuralVoiceId, signal?: AbortSignal): Promise<string> => {
-      const cacheKey = `${voiceName}::${text}`;
+  const putCachedAudioBlob = useCallback((cacheKey: string, blob: Blob): string => {
+    void writePersistentTtsBlob(cacheKey, blob);
+    const objectUrl = URL.createObjectURL(blob);
+    if (neuralCacheRef.current.size >= MAX_NEURAL_CACHE_ENTRIES) {
+      const oldestKey = neuralCacheRef.current.keys().next().value;
+      if (oldestKey) {
+        const oldestUrl = neuralCacheRef.current.get(oldestKey);
+        if (oldestUrl) URL.revokeObjectURL(oldestUrl);
+        neuralCacheRef.current.delete(oldestKey);
+      }
+    }
+    neuralCacheRef.current.set(cacheKey, objectUrl);
+    return objectUrl;
+  }, []);
+
+  const fetchLocalPiperAudioUrl = useCallback(
+    async (
+      text: string,
+      voiceId: LocalPiperVoiceId,
+      signal?: AbortSignal,
+      silent = false,
+    ): Promise<string> => {
+      const cacheKey = `local::${voiceId}::${text}`;
       const cached = neuralCacheRef.current.get(cacheKey);
       if (cached) {
-        // Refresh LRU position
         neuralCacheRef.current.delete(cacheKey);
         neuralCacheRef.current.set(cacheKey, cached);
         return cached;
@@ -472,97 +584,117 @@ export function useLawVoiceReader(options: {
       }
 
       const promise = (async () => {
-        const res = await fetch('/api/ai/tts', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-study-client': 'central-estudos',
+        const persistedBlob = await readPersistentTtsBlob(cacheKey);
+        if (persistedBlob) {
+          const persistedUrl = URL.createObjectURL(persistedBlob);
+          if (neuralCacheRef.current.size >= MAX_NEURAL_CACHE_ENTRIES) {
+            const oldestKey = neuralCacheRef.current.keys().next().value;
+            if (oldestKey) {
+              const oldestUrl = neuralCacheRef.current.get(oldestKey);
+              if (oldestUrl) URL.revokeObjectURL(oldestUrl);
+              neuralCacheRef.current.delete(oldestKey);
+            }
+          }
+          neuralCacheRef.current.set(cacheKey, persistedUrl);
+          return persistedUrl;
+        }
+
+        const blob = await synthesizeLocalPiperWav(
+          text,
+          voiceId,
+          (progress) => {
+            if (!silent && progress.stage === 'download' && progress.total > 0) {
+              setLocalDownloadProgress({
+                voiceId,
+                percent: progress.percent,
+                loadedMb: progress.loaded / (1024 * 1024),
+                totalMb: progress.total / (1024 * 1024),
+              });
+            }
           },
-          body: JSON.stringify({ text, voiceName }),
           signal,
-        });
+        );
 
-        if (!res.ok) {
-          let detail = `Erro ${res.status} ao sintetizar voz neural.`;
-          try {
-            const payload = (await res.json()) as { error?: string };
-            if (payload?.error) detail = payload.error;
-          } catch {
-            // keep generic detail
-          }
-          const err = new Error(detail) as Error & {
-            status?: number;
-            endpointUnavailable?: boolean;
-          };
-          err.status = res.status;
-          err.endpointUnavailable =
-            res.status === 404 ||
-            res.status === 405 ||
-            res.status === 501 ||
-            res.status === 503;
-          throw err;
+        if (!silent) {
+          setLocalDownloadProgress(null);
         }
+        setStoredLocalVoices((prev) => (prev.includes(voiceId) ? prev : [...prev, voiceId]));
 
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (contentType && !contentType.includes('audio/') && !contentType.includes('octet-stream')) {
-          const err = new Error(
-            'O servidor retornou uma resposta sem áudio para a síntese neural.',
-          ) as Error & { status?: number; endpointUnavailable?: boolean };
-          err.status = 405;
-          err.endpointUnavailable = true;
-          throw err;
-        }
-
-        const blob = await res.blob();
         if (!blob || blob.size < 64) {
-          const err = new Error('Áudio neural vazio retornado pelo servidor.') as Error & {
-            endpointUnavailable?: boolean;
-          };
-          err.endpointUnavailable = true;
-          throw err;
+          throw new Error('Áudio local vazio gerado pelo motor Piper.');
         }
-        const objectUrl = URL.createObjectURL(blob);
 
-        // LRU eviction
-        if (neuralCacheRef.current.size >= MAX_NEURAL_CACHE_ENTRIES) {
-          const oldestKey = neuralCacheRef.current.keys().next().value;
-          if (oldestKey) {
-            const oldestUrl = neuralCacheRef.current.get(oldestKey);
-            if (oldestUrl) URL.revokeObjectURL(oldestUrl);
-            neuralCacheRef.current.delete(oldestKey);
-          }
-        }
-        neuralCacheRef.current.set(cacheKey, objectUrl);
-        return objectUrl;
+        return putCachedAudioBlob(cacheKey, blob);
       })();
 
       inflightRef.current.set(cacheKey, promise);
       try {
         return await promise;
+      } catch (err) {
+        if (!silent) {
+          setLocalDownloadProgress(null);
+        }
+        throw err;
       } finally {
         inflightRef.current.delete(cacheKey);
       }
     },
-    [],
+    [putCachedAudioBlob],
   );
 
-  const prefetchItemForNeural = useCallback(
-    (itemIdx: number, voiceName: NeuralVoiceId) => {
+  const preloadLocalVoice = useCallback(
+    async (targetVoice?: LocalPiperVoiceId) => {
+      if (!isLocalSupported) return;
+      const voiceId = targetVoice || prefsRef.current.localVoice;
+      if (storedLocalVoicesRef.current.includes(voiceId)) return;
+      setErrorMessage(null);
+      setLocalDownloadProgress({
+        voiceId,
+        percent: 0,
+        loadedMb: 0,
+        totalMb: 60,
+      });
+      try {
+        await downloadLocalPiperVoice(voiceId, (progress) => {
+          if (progress.total > 0) {
+            setLocalDownloadProgress({
+              voiceId,
+              percent: progress.percent,
+              loadedMb: progress.loaded / (1024 * 1024),
+              totalMb: progress.total / (1024 * 1024),
+            });
+          }
+        });
+        setStoredLocalVoices((prev) => (prev.includes(voiceId) ? prev : [...prev, voiceId]));
+        setLocalDownloadProgress(null);
+      } catch (err) {
+        setLocalDownloadProgress(null);
+        setErrorMessage(
+          err instanceof Error
+            ? `Não foi possível baixar a voz neural local (${err.message}).`
+            : 'Não foi possível baixar a voz neural local agora.',
+        );
+      }
+    },
+    [isLocalSupported],
+  );
+
+  const prefetchNextLocalItem = useCallback(
+    (itemIdx: number, voiceId: LocalPiperVoiceId) => {
+      // Only prefetch locally once the model is already cached in OPFS (0 quota, 0 extra downloads)
+      if (!storedLocalVoicesRef.current.includes(voiceId)) return;
       const list = itemsRef.current;
       if (itemIdx < 0 || itemIdx >= list.length) return;
-      const item = list[itemIdx];
-      const spoken = buildSpokenTextForLawItem(item, {
+      const spoken = buildSpokenTextForLawItem(list[itemIdx], {
         skipLegislativeNotes: prefsRef.current.skipLegislativeNotes,
       });
       if (!spoken) return;
-      const chunks = splitIntoNaturalChunks(spoken, 1400);
-      if (chunks[0]) {
-        void fetchNeuralAudioUrl(chunks[0], voiceName).catch(() => {
-          // Silent background prefetch; errors handled if/when playback actually reaches this clip
-        });
+      const nextChunks = splitIntoNaturalChunks(spoken, 650);
+      if (nextChunks[0]) {
+        void fetchLocalPiperAudioUrl(nextChunks[0], voiceId, undefined, true).catch(() => {});
       }
     },
-    [fetchNeuralAudioUrl],
+    [fetchLocalPiperAudioUrl],
   );
 
   const speakAtIndex = useCallback(
@@ -602,7 +734,7 @@ export function useLawVoiceReader(options: {
       setActiveIndex(index);
       setIsPlaying(true);
       setIsPaused(false);
-      if (prefsRef.current.engine === 'neural') {
+      if (prefsRef.current.engine === 'local') {
         setErrorMessage(null);
       }
       setWordRange(null);
@@ -610,14 +742,15 @@ export function useLawVoiceReader(options: {
         onPosRef.current?.(articleKey);
       }
 
-      const mode =
-        prefsRef.current.engine === 'neural' && isAudioSupported ? 'neural' : 'browser';
+      const mode: VoiceEngineMode =
+        prefsRef.current.engine === 'local' && isLocalSupported ? 'local' : 'browser';
 
-      if (mode === 'neural') {
-        const chunks = splitIntoNaturalChunks(spokenText, 1400);
-        const voiceName = prefsRef.current.neuralVoice;
+      if (mode === 'local') {
+        // Local WebAssembly Piper TTS: 100% offline, 0 quota, gapless local lookahead
+        const chunks = splitIntoNaturalChunks(spokenText, 650);
+        const voiceId = prefsRef.current.localVoice;
 
-        const playNeuralChunk = async (chunkIdx: number) => {
+        const playLocalChunk = async (chunkIdx: number) => {
           if (playbackRunIdRef.current !== runId) return;
           const chunkText = chunks[chunkIdx];
           if (!chunkText) {
@@ -630,7 +763,7 @@ export function useLawVoiceReader(options: {
                 if (playbackRunIdRef.current === runId) {
                   speakAtIndex(nextIdx, 0);
                 }
-              }, 140);
+              }, 120);
             } else {
               stop();
             }
@@ -638,9 +771,8 @@ export function useLawVoiceReader(options: {
           }
 
           activeChunkIdxRef.current = chunkIdx;
-          const cacheKey = `${voiceName}::${chunkText}`;
-          const isCached = neuralCacheRef.current.has(cacheKey);
-          if (!isCached) {
+          const cacheKey = `local::${voiceId}::${chunkText}`;
+          if (!neuralCacheRef.current.has(cacheKey)) {
             setIsBuffering(true);
           }
 
@@ -648,26 +780,27 @@ export function useLawVoiceReader(options: {
           activeAbortRef.current = controller;
 
           try {
-            const url = await fetchNeuralAudioUrl(chunkText, voiceName, controller.signal);
+            const url = await fetchLocalPiperAudioUrl(chunkText, voiceId, controller.signal);
             if (playbackRunIdRef.current !== runId) return;
             setIsBuffering(false);
 
-            // Lookahead prefetch: next chunk in same article, or next article!
+            // Gapless background synthesis of next chunk / article (100% local, zero quota!)
             if (chunkIdx + 1 < chunks.length) {
-              void fetchNeuralAudioUrl(chunks[chunkIdx + 1], voiceName).catch(() => {});
+              void fetchLocalPiperAudioUrl(chunks[chunkIdx + 1], voiceId, undefined, true).catch(
+                () => {},
+              );
             } else {
-              prefetchItemForNeural(index + 1, voiceName);
+              prefetchNextLocalItem(index + 1, voiceId);
             }
 
             const audio = new Audio(url);
             audio.playbackRate = prefsRef.current.rate;
-            // Preserve natural vocal timbre when speeding up or slowing down
             (audio as HTMLAudioElement & { preservesPitch?: boolean }).preservesPitch = true;
             audioElRef.current = audio;
 
             audio.onended = () => {
               if (playbackRunIdRef.current !== runId) return;
-              void playNeuralChunk(chunkIdx + 1);
+              void playLocalChunk(chunkIdx + 1);
             };
 
             audio.onerror = () => {
@@ -675,7 +808,7 @@ export function useLawVoiceReader(options: {
               setIsBuffering(false);
               setIsPlaying(false);
               setErrorMessage(
-                'Falha ao reproduzir áudio neural. Tente novamente ou alterne para Voz do Navegador.',
+                'Falha ao reproduzir o áudio local. Tente novamente ou alterne para Voz do Navegador.',
               );
             };
 
@@ -683,27 +816,18 @@ export function useLawVoiceReader(options: {
           } catch (err: any) {
             if (playbackRunIdRef.current !== runId || err?.name === 'AbortError') return;
             setIsBuffering(false);
+            setLocalDownloadProgress(null);
 
-            const isUnavailable =
-              Boolean(err?.endpointUnavailable) ||
-              err?.status === 404 ||
-              err?.status === 405 ||
-              err?.status === 501 ||
-              err?.status === 503;
+            const detail =
+              typeof err?.message === 'string' && err.message.trim()
+                ? err.message.trim()
+                : 'erro ao inicializar o motor local';
 
-            if (isUnavailable && isBrowserSpeechSupported) {
-              // Automatically and seamlessly continue playback with the fluid Browser Voice
-              const statusNote = err?.status ? `HTTP ${err.status}` : '';
-              const serverDetail =
-                typeof err?.message === 'string' && err.message.trim()
-                  ? err.message.trim()
-                  : statusNote
-                    ? `erro ${statusNote}`
-                    : 'servidor indisponível';
+            if (isBrowserSpeechSupported) {
               prefsRef.current = { ...prefsRef.current, engine: 'browser' };
               setPrefs((prev) => ({ ...prev, engine: 'browser' }));
               setErrorMessage(
-                `Voz Neural indisponível (${serverDetail}). Leitura continuada automaticamente com Voz Fluida do Navegador.`,
+                `Voz Neural Local indisponível agora (${detail}). Leitura continuada automaticamente com a Voz Fluida do Navegador.`,
               );
               window.setTimeout(() => {
                 speakAtIndex(index, 0);
@@ -712,14 +836,11 @@ export function useLawVoiceReader(options: {
             }
 
             setIsPlaying(false);
-            setErrorMessage(
-              err?.message ||
-                'Não foi possível gerar a voz neural agora. Você pode alternar para Voz do Navegador.',
-            );
+            setErrorMessage(`Não foi possível iniciar a Voz Neural Local (${detail}).`);
           }
         };
 
-        void playNeuralChunk(Math.min(startChunkIdx, Math.max(0, chunks.length - 1)));
+        void playLocalChunk(Math.min(startChunkIdx, Math.max(0, chunks.length - 1)));
         return;
       }
 
@@ -798,11 +919,11 @@ export function useLawVoiceReader(options: {
     },
     [
       clearPendingNextTimer,
-      fetchNeuralAudioUrl,
-      isAudioSupported,
+      fetchLocalPiperAudioUrl,
       isBrowserSpeechSupported,
+      isLocalSupported,
       isSupported,
-      prefetchItemForNeural,
+      prefetchNextLocalItem,
       stop,
       stopAudioElement,
     ],
@@ -829,7 +950,7 @@ export function useLawVoiceReader(options: {
       return;
     }
 
-    if (prefsRef.current.engine === 'neural' && audioElRef.current) {
+    if (prefsRef.current.engine === 'local' && audioElRef.current) {
       if (isPaused) {
         void audioElRef.current.play().catch(() => {});
         setIsPaused(false);
@@ -883,8 +1004,8 @@ export function useLawVoiceReader(options: {
   const setRate = useCallback(
     (rate: number) => {
       setPrefs((prev) => ({ ...prev, rate }));
-      // In neural mode, update playbackRate live with zero interruption!
-      if (prefsRef.current.engine === 'neural' && audioElRef.current) {
+      // In local Piper mode, update playbackRate live with zero interruption!
+      if (prefsRef.current.engine === 'local' && audioElRef.current) {
         audioElRef.current.playbackRate = rate;
         return;
       }
@@ -918,6 +1039,7 @@ export function useLawVoiceReader(options: {
   const setEngine = useCallback(
     (engine: VoiceEngineMode) => {
       setErrorMessage(null);
+      prefsRef.current = { ...prefsRef.current, engine };
       setPrefs((prev) => ({ ...prev, engine }));
       if ((isPlaying || errorMessage) && activeIndexRef.current !== null) {
         const idx = activeIndexRef.current;
@@ -929,10 +1051,11 @@ export function useLawVoiceReader(options: {
     [errorMessage, isPlaying, speakAtIndex],
   );
 
-  const setNeuralVoice = useCallback(
-    (neuralVoice: NeuralVoiceId) => {
-      setPrefs((prev) => ({ ...prev, neuralVoice }));
-      if (prefsRef.current.engine === 'neural' && isPlaying && activeIndexRef.current !== null) {
+  const setLocalVoice = useCallback(
+    (localVoice: LocalPiperVoiceId) => {
+      prefsRef.current = { ...prefsRef.current, localVoice };
+      setPrefs((prev) => ({ ...prev, localVoice }));
+      if (prefsRef.current.engine === 'local' && isPlaying && activeIndexRef.current !== null) {
         const idx = activeIndexRef.current;
         const curChunk = activeChunkIdxRef.current;
         window.setTimeout(() => {
@@ -958,6 +1081,7 @@ export function useLawVoiceReader(options: {
 
   return {
     isSupported,
+    isLocalSupported,
     isPlaying,
     isPaused,
     isBuffering,
@@ -967,7 +1091,9 @@ export function useLawVoiceReader(options: {
     speakingItemId: isPlaying ? currentItem?.id || null : null,
     wordRange: isPlaying ? wordRange : null,
     engine: prefs.engine,
-    neuralVoice: prefs.neuralVoice,
+    localVoice: prefs.localVoice,
+    storedLocalVoices,
+    localDownloadProgress,
     voices,
     rate: prefs.rate,
     voiceURI: prefs.voiceURI,
@@ -980,7 +1106,8 @@ export function useLawVoiceReader(options: {
     setRate,
     setVoiceURI,
     setEngine,
-    setNeuralVoice,
+    setLocalVoice,
+    preloadLocalVoice,
     toggleAutoMarkRead,
     toggleSkipLegislativeNotes,
   };
@@ -988,6 +1115,7 @@ export function useLawVoiceReader(options: {
 
 interface LawVoicePlayerBarProps {
   isSupported: boolean;
+  isLocalSupported?: boolean;
   isPlaying: boolean;
   isPaused: boolean;
   isBuffering?: boolean;
@@ -996,7 +1124,9 @@ interface LawVoicePlayerBarProps {
   totalItems: number;
   currentItem: LawItem | null;
   engine?: VoiceEngineMode;
-  neuralVoice?: NeuralVoiceId;
+  localVoice?: LocalPiperVoiceId;
+  storedLocalVoices?: LocalPiperVoiceId[];
+  localDownloadProgress?: LocalVoiceDownloadState | null;
   voices: SpeechSynthesisVoice[];
   rate: number;
   voiceURI: string;
@@ -1008,13 +1138,15 @@ interface LawVoicePlayerBarProps {
   onChangeRate: (rate: number) => void;
   onChangeVoice: (voiceURI: string) => void;
   onChangeEngine?: (engine: VoiceEngineMode) => void;
-  onChangeNeuralVoice?: (voice: NeuralVoiceId) => void;
+  onChangeLocalVoice?: (voice: LocalPiperVoiceId) => void;
+  onPreloadLocalVoice?: (voice?: LocalPiperVoiceId) => void;
   onToggleAutoMarkRead: () => void;
   onToggleSkipLegislativeNotes?: () => void;
 }
 
 export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
   isSupported,
+  isLocalSupported = true,
   isPlaying,
   isPaused,
   isBuffering = false,
@@ -1022,8 +1154,10 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
   activeIndex,
   totalItems,
   currentItem,
-  engine = 'neural',
-  neuralVoice = 'Kore',
+  engine = 'local',
+  localVoice = 'pt_BR-faber-medium',
+  storedLocalVoices = [],
+  localDownloadProgress = null,
   voices,
   rate,
   voiceURI,
@@ -1035,7 +1169,8 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
   onChangeRate,
   onChangeVoice,
   onChangeEngine,
-  onChangeNeuralVoice,
+  onChangeLocalVoice,
+  onPreloadLocalVoice,
   onToggleAutoMarkRead,
   onToggleSkipLegislativeNotes,
 }) => {
@@ -1045,17 +1180,22 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
     ? formatSequentialDeviceLabel(currentItem.dispositivo, currentItem.artigo_base)
     : 'Pronto para leitura fluida em voz alta';
 
+  const isSelectedLocalCached = storedLocalVoices.includes(localVoice);
+  const activeLocalSpec =
+    LOCAL_PIPER_VOICES.find((v) => v.id === (localDownloadProgress?.voiceId || localVoice)) ||
+    LOCAL_PIPER_VOICES[0];
+
   return (
     <div className="mb-3 rounded-xl border border-[var(--accent)]/35 bg-[var(--panel)] px-3 py-2.5 flex flex-col gap-2">
       <div className="flex flex-wrap items-center justify-between gap-2.5">
         <div className="flex flex-wrap items-center gap-2 min-w-0">
           <span className="inline-flex items-center gap-1.5 text-[11.5px] font-bold text-[var(--text)]">
-            {isBuffering ? (
+            {isBuffering || localDownloadProgress ? (
               <Loader2 className="w-4 h-4 text-[var(--accent)] animate-spin" />
             ) : (
               <Volume2
                 className={`w-4 h-4 ${
-                  isPlaying && !isPaused ? 'text-[var(--good)] animate-pulse' : 'text-[var(--accent)]'
+                  isPlaying && !isPaused ? 'text-[var(--good)]' : 'text-[var(--accent)]'
                 }`}
               />
             )}
@@ -1082,7 +1222,12 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
                   : 'border-[var(--accent)] bg-[var(--accent)] text-white hover:bg-[var(--accent-hover)]'
               }`}
             >
-              {isBuffering ? (
+              {localDownloadProgress ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  Baixando {localDownloadProgress.percent}%…
+                </>
+              ) : isBuffering ? (
                 <>
                   <Loader2 className="w-3.5 h-3.5 animate-spin" />
                   Preparando áudio...
@@ -1144,23 +1289,25 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
               aria-label="Motor de voz"
               className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5"
             >
-              <button
-                type="button"
-                onClick={() => onChangeEngine('neural')}
-                title="Voz Neural com entonação humana natural e pré-carregamento sem pausas"
-                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
-                  engine === 'neural'
-                    ? 'bg-[var(--accent)] text-white'
-                    : 'text-[var(--muted)] hover:text-[var(--text)]'
-                }`}
-              >
-                <Sparkles className="w-3 h-3" />
-                Voz Neural
-              </button>
+              {isLocalSupported && (
+                <button
+                  type="button"
+                  onClick={() => onChangeEngine('local')}
+                  title="Voz Neural 100% local no navegador (Piper pt-BR · offline e sem limite de cotas)"
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                    engine === 'local'
+                      ? 'bg-[var(--accent)] text-white'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  <Cpu className="w-3 h-3" />
+                  Neural Local
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => onChangeEngine('browser')}
-                title="Voz local do navegador (funciona offline com prosódia jurídica otimizada)"
+                title="Voz nativa do navegador (instantânea, offline e sem limite de cotas)"
                 className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
                   engine === 'browser'
                     ? 'bg-[var(--accent)] text-white'
@@ -1172,19 +1319,48 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
             </div>
           )}
 
-          {engine === 'neural' && onChangeNeuralVoice ? (
-            <select
-              aria-label="Selecionar voz neural em português"
-              value={neuralVoice}
-              onChange={(e) => onChangeNeuralVoice(e.target.value as NeuralVoiceId)}
-              className="ce-select h-[30px] w-auto max-w-[185px] text-[11px] py-0.5"
-            >
-              {NEURAL_VOICES.map((v) => (
-                <option key={v.id} value={v.id}>
-                  {v.label}
-                </option>
-              ))}
-            </select>
+          {engine === 'local' && onChangeLocalVoice ? (
+            <>
+              <select
+                aria-label="Selecionar voz neural local em português"
+                value={localVoice}
+                onChange={(e) => onChangeLocalVoice(e.target.value as LocalPiperVoiceId)}
+                className="ce-select h-[30px] w-auto max-w-[205px] text-[11px] py-0.5"
+              >
+                {LOCAL_PIPER_VOICES.map((v) => {
+                  const cached = storedLocalVoices.includes(v.id);
+                  return (
+                    <option key={v.id} value={v.id}>
+                      {v.label}
+                      {cached ? ' · Offline' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+
+              {isSelectedLocalCached ? (
+                <span
+                  title="Modelo salvo no navegador — funciona offline e sem limite de cotas"
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--good)] whitespace-nowrap px-1"
+                >
+                  <HardDrive className="w-3 h-3" />
+                  Offline · Sem cota
+                </span>
+              ) : (
+                onPreloadLocalVoice &&
+                !localDownloadProgress && (
+                  <button
+                    type="button"
+                    onClick={() => onPreloadLocalVoice(localVoice)}
+                    title="Baixar modelo de voz neural uma única vez (~60 MB) para uso offline e ilimitado"
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[11px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
+                  >
+                    <Download className="w-3 h-3" />
+                    Baixar 1x (~{activeLocalSpec.sizeMb} MB)
+                  </button>
+                )
+              )}
+            </>
           ) : (
             voices.length > 0 && (
               <select
@@ -1247,6 +1423,27 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
         </div>
       </div>
 
+      {localDownloadProgress && (
+        <div className="pt-2 border-t border-[var(--line)] flex flex-col gap-1.5">
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
+            <span className="font-semibold text-[var(--text)]">
+              Baixando modelo neural local ({activeLocalSpec.shortName} · pt-BR) — salvo uma única
+              vez no navegador para uso offline e sem cotas
+            </span>
+            <span className="font-mono-num tabular-nums text-[var(--accent)] font-bold">
+              {localDownloadProgress.percent}% ({localDownloadProgress.loadedMb.toFixed(1)} /{' '}
+              {localDownloadProgress.totalMb.toFixed(1)} MB)
+            </span>
+          </div>
+          <div className="h-1.5 w-full rounded-full bg-[var(--panel-soft)] overflow-hidden">
+            <div
+              className="h-full bg-[var(--accent)] transition-all duration-200"
+              style={{ width: `${Math.max(3, localDownloadProgress.percent)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       {errorMessage && (
         <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[var(--line)] text-[11.5px] text-[var(--warning)]">
           <span className="inline-flex items-center gap-1.5 min-w-0">
@@ -1256,10 +1453,18 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
           {onChangeEngine && (
             <button
               type="button"
-              onClick={() => onChangeEngine(engine === 'neural' ? 'browser' : 'neural')}
+              onClick={() =>
+                onChangeEngine(
+                  engine === 'local'
+                    ? 'browser'
+                    : isLocalSupported
+                      ? 'local'
+                      : 'browser',
+                )
+              }
               className="px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
             >
-              {engine === 'neural' ? 'Usar Voz do Navegador' : 'Tentar Voz Neural novamente'}
+              {engine === 'local' ? 'Usar Voz do Navegador' : 'Usar Voz Neural Local'}
             </button>
           )}
         </div>

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@google/genai": "^3.4.0",
+    "@mintplex-labs/piper-tts-web": "^1.0.5",
     "@tailwindcss/vite": "^4.3.3",
     "@types/d3": "^7.4.3",
     "@vitejs/plugin-react": "^6.1.1",
@@ -22,6 +23,7 @@
     "jspdf": "^4.2.1",
     "lucide-react": "^0.546.0",
     "motion": "^12.23.24",
+    "onnxruntime-web": "^1.31.1",
     "pdf-lib": "^1.17.1",
     "pdfjs-dist": "^6.5.438",
     "react": "^19.0.1",
