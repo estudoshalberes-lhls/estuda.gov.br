@@ -1162,11 +1162,17 @@ export const EditalPage: React.FC = () => {
                                     type="button"
                                     onClick={() => {
                                       addTopicToDay(scheduleDay, {
-                                        materia: pt.materia || 'Geral',
+                                        disciplina_fixa: pt.materia || undefined,
+                                        concurso_alvo: activeContest.concurso || undefined,
+                                        materia: pt.titulo || pt.materia || 'Ponto do Edital',
                                         tempo: scheduleTime,
-                                        observacoes: `${activeContest.concurso} · Edital: ${pt.titulo}`,
+                                        observacoes: `${activeContest.concurso} · Edital (${pt.materia || 'Geral'})`,
+                                        editalContestId: activeContest.id,
+                                        editalPointId: pt.id,
                                       });
-                                      toast(`"${pt.titulo}" agendado em ${scheduleDay} (${scheduleTime}).`);
+                                      toast(
+                                        `"${pt.titulo}" agendado em ${scheduleDay} (${scheduleTime}) com sincronização automática ao concluir!`,
+                                      );
                                       setSchedulePointId(null);
                                     }}
                                     className="inline-flex items-center gap-1 h-[32px] px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"

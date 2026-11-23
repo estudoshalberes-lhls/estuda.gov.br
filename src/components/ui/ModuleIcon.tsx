@@ -25,6 +25,16 @@ function renderMinimalGovPaths(name: string): React.ReactNode {
         </>
       );
 
+    // 1b. Carreira & Mérito (Medalha Oficial de Honra)
+    case 'award':
+      return (
+        <>
+          <circle {...STROKE_PROPS} cx="12" cy="9.25" r="5" />
+          <path {...STROKE_PROPS} d="M9.25 13.5L8 20.25l4-2.1 4 2.1-1.25-6.75" />
+          <circle cx="12" cy="9.25" r="1.4" fill="currentColor" />
+        </>
+      );
+
     // 2. Monitor de Desempenho (Portal da Transparência) — Tendência Contínua
     case 'activity':
       return (

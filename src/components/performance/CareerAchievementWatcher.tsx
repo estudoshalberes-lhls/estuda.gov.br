@@ -23,6 +23,8 @@ const TIER_ACCENT: Record<MedalTier, string> = {
   ouro: '#ca8a04',
   diamante: '#0284c7',
   supremo: '#9333ea',
+  lendario: '#dc2626',
+  imortal: '#059669',
 };
 
 export const CareerAchievementWatcher: React.FC = () => {
@@ -255,7 +257,7 @@ export const CareerAchievementWatcher: React.FC = () => {
               type="button"
               onClick={() => {
                 setQueue((prev) => prev.filter((item) => item.id !== activeNotice.id));
-                setActivePage('Monitor de Desempenho');
+                setActivePage('Carreira & Mérito');
               }}
               className="text-[11.5px] font-bold text-[var(--accent)] hover:underline whitespace-nowrap cursor-pointer bg-transparent border-0 p-0"
             >

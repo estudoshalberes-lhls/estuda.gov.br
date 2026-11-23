@@ -7,7 +7,14 @@ export type MedalCategory =
   | 'consistencia'
   | 'excelencia'
   | 'dominio';
-export type MedalTier = 'bronze' | 'prata' | 'ouro' | 'diamante' | 'supremo';
+export type MedalTier =
+  | 'bronze'
+  | 'prata'
+  | 'ouro'
+  | 'diamante'
+  | 'supremo'
+  | 'lendario'
+  | 'imortal';
 
 export const MEDAL_TIER_BONUS_XP: Record<MedalTier, number> = {
   bronze: 50,
@@ -15,6 +22,8 @@ export const MEDAL_TIER_BONUS_XP: Record<MedalTier, number> = {
   ouro: 250,
   diamante: 500,
   supremo: 1000,
+  lendario: 2500,
+  imortal: 5000,
 };
 
 export const MEDAL_TIER_LABELS: Record<MedalTier, string> = {
@@ -23,16 +32,77 @@ export const MEDAL_TIER_LABELS: Record<MedalTier, string> = {
   ouro: 'Ouro',
   diamante: 'Diamante',
   supremo: 'Supremo',
+  lendario: 'Lendário',
+  imortal: 'Imortal',
 };
 
 export const WEEKLY_MISSION_XP_REWARD = 75;
+export const ELITE_WEEKLY_MISSION_XP_REWARD = 200;
 export const MAX_PINNED_MEDALS = 3;
 
+export interface CareerRankGroupMeta {
+  tierIndex: number; // 1..10
+  roman: string;
+  name: string;
+  shortName: string;
+  subtitle: string;
+  difficultyLabel: string;
+  startLevel: number;
+  endLevel: number;
+}
+
+export type MilestonePillar =
+  | 'metas'
+  | 'horas'
+  | 'questoes'
+  | 'constancia'
+  | 'simulados'
+  | 'leis'
+  | 'revisao'
+  | 'erros'
+  | 'edital'
+  | 'promocao';
+
+export interface LevelMilestoneCriterion {
+  label: string;
+  currentLabel: string;
+  targetLabel: string;
+  met: boolean;
+  progressPct: number;
+}
+
+export interface LevelMilestone {
+  level: number; // 1..100
+  id: string;
+  pillar: MilestonePillar;
+  isPromotionGate: boolean;
+  title: string;
+  requirementLabel: string;
+  detail: string;
+  current: number;
+  target: number;
+  unit: string;
+  progressPct: number;
+  progressLabel: string;
+  remainingLabel: string;
+  completed: boolean;
+  bonusXp: number;
+  difficultyMultiplier: number;
+  targetModule: ModuleName;
+  subCriteria?: LevelMilestoneCriterion[];
+}
+
 export interface CareerLevelDefinition {
-  level: number;
+  level: number; // 1..100
+  tierIndex: number; // 1..10
+  rankGroup: string;
+  difficultyLabel: string;
   title: string;
   subtitle: string;
   minXp: number;
+  xpDelta: number; // Exponential XP step from previous level
+  difficultyMultiplier: number; // Exponential factor relative to Lv. 2 step
+  isPromotionGate: boolean; // True for Lv. 10, 20, ..., 100
 }
 
 export interface MeritMedal {
@@ -66,6 +136,7 @@ export interface WeeklyMission {
   remainingLabel: string;
   completed: boolean;
   xpReward: number;
+  isElite?: boolean;
   targetModule: ModuleName;
 }
 
@@ -76,11 +147,13 @@ export interface CareerXpBreakdown {
   simulationsXp: number;
   lawsXp: number;
   errorsCorrectedXp: number;
+  spacedReviewsXp: number;
   streakXp: number;
   editalXp: number;
   caseLawXp: number;
   essaysXp: number;
   criticalPointsXp: number;
+  milestonesBonusXp: number;
   medalsBonusXp: number;
   weeklyMissionsXp: number;
 }
@@ -102,13 +175,23 @@ export interface CareerSummary {
   currentLevel: CareerLevelDefinition;
   nextLevel: CareerLevelDefinition | null;
   levelProgressPct: number;
+  overallLevel100Pct: number;
   xpIntoLevel: number;
   xpForNextLevel: number;
   xpRemaining: number;
+  xpToLevel100: number;
+  level100MinXp: number;
+  xpGrowthRatePct: number;
   allLevels: CareerLevelDefinition[];
+  rankGroups: CareerRankGroupMeta[];
+  levelMilestones: LevelMilestone[];
+  completedMilestonesCount: number;
+  nextPendingMilestone: LevelMilestone | null;
+  nextPromotionMilestone: LevelMilestone | null;
   medals: MeritMedal[];
   unlockedMedalsCount: number;
   almostThereMedals: MeritMedal[];
+  highDifficultyTargets: MeritMedal[];
   pinnedMedals: MeritMedal[];
   showcaseMedals: MeritMedal[];
   hasCustomPinnedMedals: boolean;
@@ -123,19 +206,25 @@ export interface CareerSummary {
     totalStudySeconds: number;
     totalStudyHours: number;
     maxDailyHours: number;
+    highVolumeWeeksCount: number;
     currentStreak: number;
     bestStreak: number;
     activeDaysTotal: number;
     totalAnswered: number;
     accuracyPct: number;
     completedSimulations: number;
+    eliteSimulationsCount: number;
     bestSim20Pct: number;
     bestSim30Pct: number;
+    bestSim50Pct: number;
     bestFastSimPct: number;
     bestFastSimAvgSec: number | null;
     bestEliteSpeedSimPct: number;
     bestEliteSpeedSimAvgSec: number | null;
+    bestSupersonicSimPct: number;
+    bestSupersonicSimAvgSec: number | null;
     bestCespeNetPct: number;
+    bestCespe50NetPct: number;
     bestCespeNetPoints: number;
     correctedErrors: number;
     pendingErrorsCount: number;
@@ -143,6 +232,7 @@ export interface CareerSummary {
     lawReadings: number;
     masteredSubjectsCount: number;
     eliteSubjectsCount: number;
+    grandMasterSubjectsCount: number;
     editalStudiedCount: number;
     caseLawCount: number;
     essaysCount: number;
@@ -150,68 +240,431 @@ export interface CareerSummary {
   };
 }
 
-export const CAREER_LEVELS: CareerLevelDefinition[] = [
+const ROMAN_CLASSES = ['I', 'II', 'III', 'IV', 'V', 'VI', 'VII', 'VIII', 'IX', 'X'] as const;
+
+export const CAREER_RANK_GROUPS: CareerRankGroupMeta[] = [
   {
-    level: 1,
-    title: 'Candidato Inscrito',
-    subtitle: 'Edital aberto e primeiros passos na rotina',
-    minXp: 0,
+    tierIndex: 1,
+    roman: 'I',
+    name: 'Candidato Inscrito',
+    shortName: 'Candidato',
+    subtitle: 'Edital aberto, rotina iniciada e primeiras metas homologadas',
+    difficultyLabel: 'Iniciação',
+    startLevel: 1,
+    endLevel: 10,
   },
   {
-    level: 2,
-    title: 'Estagiário de Gabinete',
-    subtitle: 'Ritmo inicial de metas e questões estabelecido',
-    minXp: 250,
+    tierIndex: 2,
+    roman: 'II',
+    name: 'Estagiário de Gabinete',
+    shortName: 'Estagiário',
+    subtitle: 'Ritmo regular de questões, revisões e horas líquidas semanais',
+    difficultyLabel: 'Base',
+    startLevel: 11,
+    endLevel: 20,
   },
   {
-    level: 3,
-    title: 'Técnico em Formação',
-    subtitle: 'Base teórica e constância semanal ganhando corpo',
-    minXp: 700,
+    tierIndex: 3,
+    roman: 'III',
+    name: 'Técnico em Formação',
+    shortName: 'Téc. Formação',
+    subtitle: 'Consolidação teórica, Lei Seca frequente e baterias estruturadas',
+    difficultyLabel: 'Intermediário',
+    startLevel: 21,
+    endLevel: 30,
   },
   {
-    level: 4,
-    title: 'Técnico Judiciário',
-    subtitle: 'Execução regular de metas, lei seca e baterias',
-    minXp: 1500,
+    tierIndex: 4,
+    roman: 'IV',
+    name: 'Técnico Judiciário',
+    shortName: 'Téc. Judiciário',
+    subtitle: 'Execução disciplinada de edital, caderno de erros e simulados',
+    difficultyLabel: 'Intermediário II',
+    startLevel: 31,
+    endLevel: 40,
   },
   {
-    level: 5,
-    title: 'Analista de Controle',
-    subtitle: 'Domínio consistente de horas líquidas e revisões',
-    minXp: 2800,
+    tierIndex: 5,
+    roman: 'V',
+    name: 'Analista de Controle',
+    shortName: 'Analista',
+    subtitle: 'Alto domínio de carga horária líquida e curva de retenção',
+    difficultyLabel: 'Avançado',
+    startLevel: 41,
+    endLevel: 50,
   },
   {
-    level: 6,
-    title: 'Auditor Fiscal Júnior',
-    subtitle: 'Alto volume de treino com disciplina diária',
-    minXp: 4800,
+    tierIndex: 6,
+    roman: 'VI',
+    name: 'Auditor Fiscal Júnior',
+    shortName: 'Auditor Jr.',
+    subtitle: 'Volume pesado de treino com consistência competitiva em provas',
+    difficultyLabel: 'Avançado II',
+    startLevel: 51,
+    endLevel: 60,
   },
   {
-    level: 7,
-    title: 'Auditor Titular',
-    subtitle: 'Desempenho competitivo em simulados e caderno de erros',
-    minXp: 7500,
+    tierIndex: 7,
+    roman: 'VII',
+    name: 'Auditor Titular',
+    shortName: 'Auditor Titular',
+    subtitle: 'Desempenho de nota de corte, ritmo cirúrgico e domínio multidisciplinar',
+    difficultyLabel: 'Alta Dificuldade',
+    startLevel: 61,
+    endLevel: 70,
   },
   {
-    level: 8,
-    title: 'Procurador de Carreira',
-    subtitle: 'Excelência sustentada nas disciplinas prioritárias',
-    minXp: 11500,
+    tierIndex: 8,
+    roman: 'VIII',
+    name: 'Procurador de Carreira',
+    shortName: 'Procurador',
+    subtitle: 'Excelência sustentada em maratonas, discursivas e provas complexas',
+    difficultyLabel: 'Elite',
+    startLevel: 71,
+    endLevel: 80,
   },
   {
-    level: 9,
-    title: 'Desembargador da Aprovação',
-    subtitle: 'Consistência de alto rendimento nível prova final',
-    minXp: 17000,
+    tierIndex: 9,
+    roman: 'IX',
+    name: 'Desembargador da Aprovação',
+    shortName: 'Desembargador',
+    subtitle: 'Constância implacável e rendimento de topo em editais extensos',
+    difficultyLabel: 'Extremo',
+    startLevel: 81,
+    endLevel: 90,
   },
   {
-    level: 10,
-    title: 'Ministro da Posse',
-    subtitle: 'Patamar máximo de constância, horas e metas batidas',
-    minXp: 25000,
+    tierIndex: 10,
+    roman: 'X',
+    name: 'Ministro Supremo da Posse',
+    shortName: 'Ministro Supremo',
+    subtitle: 'Patamar máximo de horas, precisão, constância e objetivos lendários',
+    difficultyLabel: 'Lendário · Nv. 100',
+    startLevel: 91,
+    endLevel: 100,
   },
 ];
+
+export const CAREER_XP_BASE_DELTA = 150;
+export const CAREER_XP_GROWTH_RATE = 1.055; // +5,5% composto a cada nível
+
+function roundExponentialStep(raw: number): number {
+  if (raw < 500) return Math.max(10, Math.round(raw / 10) * 10);
+  if (raw < 2000) return Math.round(raw / 25) * 25;
+  if (raw < 10000) return Math.round(raw / 50) * 50;
+  return Math.round(raw / 100) * 100;
+}
+
+function buildExponentialCareerLevels(): CareerLevelDefinition[] {
+  const levels: CareerLevelDefinition[] = [];
+  let cumulativeXp = 0;
+
+  for (let idx = 0; idx < 100; idx++) {
+    const level = idx + 1;
+    const tierIdx = Math.floor(idx / 10); // 0..9
+    const classIdx = idx % 10; // 0..9
+    const group = CAREER_RANK_GROUPS[tierIdx];
+    const isMax = level === 100;
+    const isPromotionGate = level % 10 === 0;
+
+    const xpDelta =
+      level === 1
+        ? 0
+        : roundExponentialStep(
+            CAREER_XP_BASE_DELTA * Math.pow(CAREER_XP_GROWTH_RATE, level - 2),
+          );
+    cumulativeXp += xpDelta;
+
+    const difficultyMultiplier =
+      level === 1
+        ? 1
+        : Number((xpDelta / CAREER_XP_BASE_DELTA).toFixed(1));
+
+    levels.push({
+      level,
+      tierIndex: group.tierIndex,
+      rankGroup: `${group.roman} · ${group.name}`,
+      difficultyLabel: group.difficultyLabel,
+      title: isMax
+        ? 'Ministro Supremo da Posse · Grau Máximo'
+        : `${group.name} ${ROMAN_CLASSES[classIdx]}`,
+      subtitle: group.subtitle,
+      minXp: cumulativeXp,
+      xpDelta,
+      difficultyMultiplier,
+      isPromotionGate,
+    });
+  }
+
+  return levels;
+}
+
+export const CAREER_LEVELS: CareerLevelDefinition[] = buildExponentialCareerLevels();
+
+const MILESTONE_BAND_TARGETS = {
+  metas: [1, 2, 5, 10, 22, 46, 95, 200, 440, 950],
+  horas: [2, 4, 9, 20, 44, 96, 210, 460, 1020, 2300],
+  questoes: [15, 35, 80, 180, 400, 880, 1900, 4100, 8800, 18500],
+  constancia: [2, 4, 7, 13, 24, 45, 84, 155, 290, 540],
+  simulados: [1, 2, 3, 5, 8, 13, 21, 34, 55, 88],
+  leis: [10, 22, 48, 105, 230, 500, 1080, 2350, 5100, 7800],
+  revisao: [1, 2, 4, 7, 13, 24, 44, 80, 145, 260],
+  erros: [2, 4, 7, 13, 24, 44, 80, 145, 260, 460],
+  edital: [2, 4, 8, 15, 28, 52, 96, 180, 330, 600],
+} as const;
+
+const PROMOTION_GATE_SPECS: Array<{
+  level: number;
+  title: string;
+  hours: number;
+  questions: number;
+  minAccuracy: number;
+}> = [
+  { level: 10, title: 'Exame de Promoção · Patente I → II', hours: 8, questions: 80, minAccuracy: 0 },
+  { level: 20, title: 'Exame de Promoção · Patente II → III', hours: 20, questions: 220, minAccuracy: 60 },
+  { level: 30, title: 'Exame de Promoção · Patente III → IV', hours: 50, questions: 550, minAccuracy: 65 },
+  { level: 40, title: 'Exame de Promoção · Patente IV → V', hours: 120, questions: 1300, minAccuracy: 70 },
+  { level: 50, title: 'Exame de Promoção · Patente V → VI', hours: 260, questions: 2800, minAccuracy: 74 },
+  { level: 60, title: 'Exame de Promoção · Patente VI → VII', hours: 540, questions: 5600, minAccuracy: 78 },
+  { level: 70, title: 'Exame de Promoção · Patente VII → VIII', hours: 1000, questions: 10000, minAccuracy: 81 },
+  { level: 80, title: 'Exame de Promoção · Patente VIII → IX', hours: 1700, questions: 16000, minAccuracy: 84 },
+  { level: 90, title: 'Exame de Promoção · Patente IX → X', hours: 2700, questions: 24000, minAccuracy: 87 },
+  { level: 100, title: 'Coroação Suprema · Grau Máximo (Nv. 100)', hours: 4000, questions: 35000, minAccuracy: 90 },
+];
+
+function computeMilestoneBonusXp(level: number, isPromotionGate: boolean): number {
+  const base = 25 * Math.pow(CAREER_XP_GROWTH_RATE, level - 1);
+  const multiplied = isPromotionGate ? base * 2 : base;
+  if (multiplied < 100) return Math.round(multiplied / 5) * 5;
+  if (multiplied < 500) return Math.round(multiplied / 10) * 10;
+  if (multiplied < 2000) return Math.round(multiplied / 25) * 25;
+  return Math.round(multiplied / 50) * 50;
+}
+
+function buildExponentialLevelMilestones(metrics: {
+  completedGoals: number;
+  flooredHours: number;
+  totalAnswered: number;
+  accuracyPct: number;
+  activeDaysTotal: number;
+  completedSimulations: number;
+  lawReadings: number;
+  spacedReviewCycles: number;
+  correctedErrors: number;
+  editalStudiedCount: number;
+}): LevelMilestone[] {
+  const result: LevelMilestone[] = [];
+
+  for (const lvlDef of CAREER_LEVELS) {
+    const level = lvlDef.level;
+    const band = Math.floor((level - 1) / 10); // 0..9
+    const slot = level % 10; // 1..9 regular pillars, 0 = Promotion Gate
+    const bonusXp = computeMilestoneBonusXp(level, lvlDef.isPromotionGate);
+
+    if (slot === 0) {
+      const spec = PROMOTION_GATE_SPECS[band];
+      const hoursPct = Math.min(100, Math.round((metrics.flooredHours / spec.hours) * 100));
+      const questionsPct = Math.min(100, Math.round((metrics.totalAnswered / spec.questions) * 100));
+      const hoursMet = metrics.flooredHours >= spec.hours;
+      const questionsMet = metrics.totalAnswered >= spec.questions;
+      const accMet =
+        spec.minAccuracy === 0
+          ? true
+          : metrics.totalAnswered >= spec.questions && metrics.accuracyPct >= spec.minAccuracy;
+      const accPct =
+        spec.minAccuracy === 0
+          ? 100
+          : Math.min(100, Math.round((metrics.accuracyPct / spec.minAccuracy) * 100));
+
+      const subCriteria: LevelMilestoneCriterion[] = [
+        {
+          label: 'Horas líquidas',
+          currentLabel: `${metrics.flooredHours.toLocaleString('pt-BR')}h`,
+          targetLabel: `${spec.hours.toLocaleString('pt-BR')}h`,
+          met: hoursMet,
+          progressPct: hoursPct,
+        },
+        {
+          label: 'Questões resolvidas',
+          currentLabel: metrics.totalAnswered.toLocaleString('pt-BR'),
+          targetLabel: spec.questions.toLocaleString('pt-BR'),
+          met: questionsMet,
+          progressPct: questionsPct,
+        },
+      ];
+
+      if (spec.minAccuracy > 0) {
+        subCriteria.push({
+          label: 'Precisão acumulada',
+          currentLabel: `${metrics.accuracyPct}%`,
+          targetLabel: `≥ ${spec.minAccuracy}%`,
+          met: accMet,
+          progressPct: accPct,
+        });
+      }
+
+      const completed = subCriteria.every((c) => c.met);
+      const progressPct = completed
+        ? 100
+        : Math.min(
+            99,
+            Math.round(
+              subCriteria.reduce((acc, c) => acc + c.progressPct, 0) / subCriteria.length,
+            ),
+          );
+      const metCount = subCriteria.filter((c) => c.met).length;
+      const requirementLabel =
+        spec.minAccuracy > 0
+          ? `${spec.hours.toLocaleString('pt-BR')}h · ${spec.questions.toLocaleString('pt-BR')} questões · ≥ ${spec.minAccuracy}% acerto`
+          : `${spec.hours.toLocaleString('pt-BR')}h líquidas · ${spec.questions.toLocaleString('pt-BR')} questões`;
+
+      result.push({
+        level,
+        id: `milestone-lvl-${level}`,
+        pillar: 'promocao',
+        isPromotionGate: true,
+        title: spec.title,
+        requirementLabel,
+        detail: `Marco de Promoção de Patente com exigência exponencial (${lvlDef.difficultyMultiplier.toLocaleString('pt-BR')}×).`,
+        current: metCount,
+        target: subCriteria.length,
+        unit: 'requisitos',
+        progressPct,
+        progressLabel: `${metCount}/${subCriteria.length} requisitos`,
+        remainingLabel: completed
+          ? 'Promoção homologada!'
+          : `Falta(m) ${subCriteria.length - metCount} requisito(s)`,
+        completed,
+        bonusXp,
+        difficultyMultiplier: lvlDef.difficultyMultiplier,
+        targetModule: !hoursMet ? 'Cronograma' : 'Treino Diário',
+        subCriteria,
+      });
+      continue;
+    }
+
+    let pillar: MilestonePillar = 'metas';
+    let title = '';
+    let current = 0;
+    let target = 1;
+    let unit = '';
+    let targetModule: ModuleName = 'Cronograma';
+
+    switch (slot) {
+      case 1:
+        pillar = 'metas';
+        target = MILESTONE_BAND_TARGETS.metas[band];
+        current = metrics.completedGoals;
+        unit = target === 1 ? 'meta' : 'metas';
+        title = `Cumprir ${target.toLocaleString('pt-BR')} ${unit} do cronograma`;
+        targetModule = 'Cronograma';
+        break;
+      case 2:
+        pillar = 'horas';
+        target = MILESTONE_BAND_TARGETS.horas[band];
+        current = metrics.flooredHours;
+        unit = 'h';
+        title = `Acumular ${target.toLocaleString('pt-BR')}h líquidas registradas`;
+        targetModule = 'Cronograma';
+        break;
+      case 3:
+        pillar = 'questoes';
+        target = MILESTONE_BAND_TARGETS.questoes[band];
+        current = metrics.totalAnswered;
+        unit = 'questões';
+        title = `Resolver ${target.toLocaleString('pt-BR')} questões acumuladas`;
+        targetModule = 'Treino Diário';
+        break;
+      case 4:
+        pillar = 'constancia';
+        target = MILESTONE_BAND_TARGETS.constancia[band];
+        current = metrics.activeDaysTotal;
+        unit = 'dias ativos';
+        title = `Sustentar ${target.toLocaleString('pt-BR')} dias ativos de estudo`;
+        targetModule = 'Início';
+        break;
+      case 5:
+        pillar = 'simulados';
+        target = MILESTONE_BAND_TARGETS.simulados[band];
+        current = metrics.completedSimulations;
+        unit = target === 1 ? 'simulado' : 'simulados';
+        title = `Finalizar ${target.toLocaleString('pt-BR')} ${unit} fechados`;
+        targetModule = 'Simulado Fechado';
+        break;
+      case 6:
+        pillar = 'leis';
+        target = MILESTONE_BAND_TARGETS.leis[band];
+        current = metrics.lawReadings;
+        unit = 'dispositivos';
+        title = `Registrar ${target.toLocaleString('pt-BR')} leituras de Lei Seca`;
+        targetModule = 'Lei Seca';
+        break;
+      case 7:
+        pillar = 'revisao';
+        target = MILESTONE_BAND_TARGETS.revisao[band];
+        current = metrics.spacedReviewCycles;
+        unit = target === 1 ? 'ciclo' : 'ciclos';
+        title = `Concluir ${target.toLocaleString('pt-BR')} ${unit} de revisão espaçada`;
+        targetModule = 'Início';
+        break;
+      case 8:
+        pillar = 'erros';
+        target = MILESTONE_BAND_TARGETS.erros[band];
+        current = metrics.correctedErrors;
+        unit = 'erros';
+        title = `Sanar ${target.toLocaleString('pt-BR')} erros no Caderno de Erros`;
+        targetModule = 'Caderno de Erros';
+        break;
+      case 9:
+      default:
+        pillar = 'edital';
+        target = MILESTONE_BAND_TARGETS.edital[band];
+        current = metrics.editalStudiedCount;
+        unit = 'tópicos';
+        title = `Estudar ${target.toLocaleString('pt-BR')} tópicos de edital`;
+        targetModule = 'Editais';
+        break;
+    }
+
+    const completed = current >= target;
+    const progressPct = Math.max(0, Math.min(100, Math.round((current / Math.max(1, target)) * 100)));
+    const remaining = Math.max(0, target - current);
+    const fmt = (n: number) =>
+      unit === 'h' ? `${n.toLocaleString('pt-BR')}h` : n.toLocaleString('pt-BR');
+
+    result.push({
+      level,
+      id: `milestone-lvl-${level}`,
+      pillar,
+      isPromotionGate: false,
+      title,
+      requirementLabel:
+        unit === 'h'
+          ? `${target.toLocaleString('pt-BR')}h líquidas`
+          : `${target.toLocaleString('pt-BR')} ${unit}`,
+      detail: `Marco do Nível ${level} · Dificuldade exponencial ${lvlDef.difficultyMultiplier.toLocaleString('pt-BR')}×.`,
+      current,
+      target,
+      unit,
+      progressPct,
+      progressLabel:
+        unit === 'h'
+          ? `${fmt(Math.min(current, target))} / ${fmt(target)}`
+          : `${fmt(Math.min(current, target))} / ${fmt(target)} ${unit}`,
+      remainingLabel: completed
+        ? 'Marco conquistado!'
+        : unit === 'h'
+          ? `Faltam ${remaining.toLocaleString('pt-BR')}h`
+          : `Faltam ${remaining.toLocaleString('pt-BR')} ${unit}`,
+      completed,
+      bonusXp,
+      difficultyMultiplier: lvlDef.difficultyMultiplier,
+      targetModule,
+    });
+  }
+
+  return result;
+}
 
 export function formatCareerDateBr(iso?: string): string {
   if (!iso || !/^\d{4}-\d{2}-\d{2}/.test(iso)) return '';
@@ -359,6 +812,8 @@ function buildDefaultRemainingLabel(current: number, target: number, unit: strin
     discursivas: 'discursiva',
     ciclos: 'ciclo',
     pontos: 'ponto',
+    semanas: 'semana',
+    missões: 'missão',
     'pts líq.': 'pt líq.',
   };
   if (roundedDiff === 1 && singularUnits[unit]) {
@@ -424,12 +879,18 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   let totalStudySeconds = 0;
   let weeklyStudySeconds = 0;
   const secondsByDay = new Map<string, number>();
+  const secondsByIsoWeek = new Map<string, number>();
   (db.studyTimeRecords || []).forEach((rec) => {
     const secs = (rec.allocations || []).reduce((s, a) => s + (a.seconds || 0), 0);
     totalStudySeconds += secs;
     const iso = parseBrOrIsoDateToIso(rec.date);
     if (iso && secs > 0) {
       secondsByDay.set(iso, (secondsByDay.get(iso) || 0) + secs);
+      const [y, m, d] = iso.split('-').map(Number);
+      if (y && m && d) {
+        const wk = getCurrentIsoWeekWindow(new Date(y, m - 1, d)).weekKey;
+        secondsByIsoWeek.set(wk, (secondsByIsoWeek.get(wk) || 0) + secs);
+      }
       if (isInCurrentWeek(iso)) {
         weeklyStudySeconds += secs;
       }
@@ -438,6 +899,10 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   const totalStudyHours = totalStudySeconds / 3600;
   const maxDailySeconds = secondsByDay.size ? Math.max(...secondsByDay.values()) : 0;
   const maxDailyHours = Math.floor((maxDailySeconds / 3600) * 10) / 10;
+  let highVolumeWeeksCount = 0;
+  secondsByIsoWeek.forEach((secs) => {
+    if (secs >= 30 * 3600) highVolumeWeeksCount += 1;
+  });
 
   const totalAnswered = (db.history || []).length;
   const totalCorrect = (db.history || []).filter((h) => h.correct).length;
@@ -461,32 +926,45 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   });
   let masteredSubjectsCount = 0;
   let eliteSubjectsCount = 0;
+  let grandMasterSubjectsCount = 0;
   subjectStats.forEach((st) => {
     const pct = st.total > 0 ? (st.correct / st.total) * 100 : 0;
     if (st.total >= 30 && pct >= 75) masteredSubjectsCount += 1;
     if (st.total >= 50 && pct >= 80) eliteSubjectsCount += 1;
+    if (st.total >= 100 && pct >= 85) grandMasterSubjectsCount += 1;
   });
 
   // Simulations analytics (accuracy, pacing/time per question, CESPE net score)
   const completedSims = db.completedSimulations || [];
   const completedSimulations = completedSims.length;
+  let eliteSimulationsCount = 0;
   let bestSim20Pct = 0;
   let bestSim30Pct = 0;
+  let bestSim50Pct = 0;
   let bestFastSimPct = 0;
   let bestFastSimAvgSec: number | null = null;
   let fastSimUnlocked = false;
   let bestEliteSpeedSimPct = 0;
   let bestEliteSpeedSimAvgSec: number | null = null;
   let eliteSpeedSimUnlocked = false;
+  let bestSupersonicSimPct = 0;
+  let bestSupersonicSimAvgSec: number | null = null;
+  let supersonicSimUnlocked = false;
   let bestCespeNetPct = 0;
+  let bestCespe50NetPct = 0;
   let bestCespeNetPoints = 0;
   let cespe20Unlocked = false;
+  let cespe50Unlocked = false;
 
   completedSims.forEach((sim) => {
     const qty = sim.total || sim.questoes?.length || 0;
     const acc = Math.round(sim.aproveitamento || 0);
-    if (qty >= 20) bestSim20Pct = Math.max(bestSim20Pct, acc);
+    if (qty >= 20) {
+      bestSim20Pct = Math.max(bestSim20Pct, acc);
+      if (acc >= 85) eliteSimulationsCount += 1;
+    }
     if (qty >= 30) bestSim30Pct = Math.max(bestSim30Pct, acc);
+    if (qty >= 50) bestSim50Pct = Math.max(bestSim50Pct, acc);
 
     // Pacing / average seconds per question
     const perQuestionTimed = (sim.questoes || []).filter(
@@ -525,6 +1003,19 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       }
     }
 
+    if (qty >= 30 && avgSec !== null) {
+      if (avgSec <= 70 && acc >= 90) {
+        supersonicSimUnlocked = true;
+      }
+      if (avgSec <= 70 && acc >= bestSupersonicSimPct) {
+        bestSupersonicSimPct = acc;
+        bestSupersonicSimAvgSec = avgSec;
+      } else if (bestSupersonicSimAvgSec === null && acc >= 90) {
+        bestSupersonicSimPct = acc;
+        bestSupersonicSimAvgSec = avgSec;
+      }
+    }
+
     // CESPE / Cebraspe net scoring
     const ceCount = (sim.questoes || []).filter((q) => q.tipo === 'CE').length;
     const isCespeStyle =
@@ -546,12 +1037,21 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
           cespe20Unlocked = true;
         }
       }
+      if (qty >= 50) {
+        if (netPct > bestCespe50NetPct) {
+          bestCespe50NetPct = netPct;
+        }
+        if (netPct >= 80) {
+          cespe50Unlocked = true;
+        }
+      }
     }
   });
 
-  // Error notebook, spaced repetition cycles & pending count
+  // Error notebook, spaced repetition cycles (Ouvidoria + Revisão Espaçada 24h/7d/15d/30d) & pending count
   const annotations = db.annotations || [];
   const allProofCorrections = (db.proofFiles || []).flatMap((pf) => pf.correcoes || []);
+  const topicReviews = db.topicReviews || [];
 
   const correctedAnnotations = annotations.filter((a) => Boolean(a.corrigido)).length;
   const correctedProofItems = allProofCorrections.filter((c) => Boolean(c.corrigido)).length;
@@ -561,9 +1061,14 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   const pendingProofItems = allProofCorrections.filter((c) => !c.corrigido).length;
   const pendingErrorsCount = pendingAnnotations + pendingProofItems;
 
+  const topicSpacedCycles = topicReviews.reduce(
+    (sum, r) => sum + (r.done ? 4 : Math.max(0, Number(r.stageIndex || 0))),
+    0,
+  );
   const spacedReviewCycles =
     annotations.reduce((sum, a) => sum + Math.max(0, Number(a.nivel_revisao || 0)), 0) +
-    allProofCorrections.reduce((sum, c) => sum + Math.max(0, Number(c.nivel_revisao || 0)), 0);
+    allProofCorrections.reduce((sum, c) => sum + Math.max(0, Number(c.nivel_revisao || 0)), 0) +
+    topicSpacedCycles;
 
   let weeklyErrorsActions = 0;
   annotations.forEach((a) => {
@@ -575,6 +1080,10 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     const cIso = parseBrOrIsoDateToIso(c.corrigido_em);
     const rIso = parseBrOrIsoDateToIso(c.revisado_em);
     if (isInCurrentWeek(cIso) || isInCurrentWeek(rIso)) weeklyErrorsActions += 1;
+  });
+  topicReviews.forEach((r) => {
+    const rIso = parseBrOrIsoDateToIso(r.lastReviewedIso);
+    if (isInCurrentWeek(rIso)) weeklyErrorsActions += 1;
   });
 
   const editalStudiedCount = (db.contests || []).reduce(
@@ -645,7 +1154,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     if (isInCurrentWeek(iso)) weeklyActiveDays += 1;
   });
 
-  // === WEEKLY MISSIONS (Reset every Monday, deterministic rotation by ISO week) ===
+  // === WEEKLY MISSIONS (Reset every Monday, deterministic rotation + 5th Elite High-Difficulty Mission) ===
   const weeklyHours = Math.floor((weeklyStudySeconds / 3600) * 10) / 10;
   const rotationSlot = weekWindow.weekNumber % 3;
   const questionsTarget = rotationSlot === 0 ? 60 : rotationSlot === 1 ? 80 : 100;
@@ -660,6 +1169,8 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     target: number;
     unit: string;
     targetModule: ModuleName;
+    xpReward?: number;
+    isElite?: boolean;
   }): WeeklyMission => {
     const completed = params.current >= params.target;
     const progressPct = completed
@@ -683,7 +1194,8 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
         ? 'Missão concluída'
         : buildDefaultRemainingLabel(params.current, params.target, params.unit),
       completed,
-      xpReward: WEEKLY_MISSION_XP_REWARD,
+      xpReward: params.xpReward ?? WEEKLY_MISSION_XP_REWARD,
+      isElite: params.isElite,
       targetModule: params.targetModule,
     };
   };
@@ -719,6 +1231,43 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
             targetModule: 'Cronograma',
           });
 
+  const eliteWeeklyMission: WeeklyMission =
+    rotationSlot === 0
+      ? makeWeeklyMission({
+          id: 'elite-semanal-horas',
+          title: 'Desafio de Elite · 20h Líquidas',
+          description: 'Alta dificuldade: acumule 20 horas líquidas no Ponto Eletrônico nesta semana.',
+          current: weeklyHours,
+          target: 20,
+          unit: 'h',
+          targetModule: 'Cronograma',
+          xpReward: ELITE_WEEKLY_MISSION_XP_REWARD,
+          isElite: true,
+        })
+      : rotationSlot === 1
+        ? makeWeeklyMission({
+            id: 'elite-semanal-questoes',
+            title: 'Desafio de Elite · 250 Questões',
+            description: 'Alta dificuldade: resolva 250 questões entre segunda e domingo no Treino ou Simulado.',
+            current: weeklyQuestions,
+            target: 250,
+            unit: 'questões',
+            targetModule: 'Treino Diário',
+            xpReward: ELITE_WEEKLY_MISSION_XP_REWARD,
+            isElite: true,
+          })
+        : makeWeeklyMission({
+            id: 'elite-semanal-constancia',
+            title: 'Desafio de Elite · Semana 7/7 + Pauta',
+            description: 'Alta dificuldade: registre estudo ativo todos os 7 dias da semana sem falhar.',
+            current: weeklyActiveDays,
+            target: 7,
+            unit: 'dias',
+            targetModule: 'Início',
+            xpReward: ELITE_WEEKLY_MISSION_XP_REWARD,
+            isElite: true,
+          });
+
   const weeklyMissions: WeeklyMission[] = [
     makeWeeklyMission({
       id: 'questoes-semanal',
@@ -748,6 +1297,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       targetModule: 'Início',
     }),
     rotatingFourthMission,
+    eliteWeeklyMission,
   ];
 
   const weeklyCompletedCount = weeklyMissions.filter((m) => m.completed).length;
@@ -758,10 +1308,16 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     if (m.completed) allCompletedWeeklyKeys.add(m.storageKey);
   });
   const totalCompletedWeeklyMissionsAllTime = allCompletedWeeklyKeys.size;
+  let weeklyMissionsXp = 0;
+  allCompletedWeeklyKeys.forEach((storageKey) => {
+    weeklyMissionsXp += storageKey.includes(':elite-semanal-')
+      ? ELITE_WEEKLY_MISSION_XP_REWARD
+      : WEEKLY_MISSION_XP_REWARD;
+  });
 
   const flooredHours = Math.floor(totalStudyHours * 10) / 10;
 
-  // === MERIT MEDALS (43 medals across 5 categories) ===
+  // === MERIT MEDALS (80 medals across 5 categories · Bronze to Imortal) ===
   const medals: MeritMedal[] = [
     // === METAS BATIDAS ===
     buildMedal({
@@ -1504,12 +2060,521 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       targetModule: 'Pontos Críticos',
       unlockedAtMap,
     }),
+
+    // =========================================================================
+    // OBJETIVOS DE ALTA DIFICULDADE RUMO AO NÍVEL 100 (LENDÁRIO & IMORTAL)
+    // =========================================================================
+    buildMedal({
+      id: 'meta-500',
+      title: 'Estrategista Federal (500 Metas)',
+      description: 'Conclua 500 metas no Expediente com disciplina de longo prazo.',
+      category: 'metas',
+      tier: 'lendario',
+      current: completedGoals,
+      target: 500,
+      unit: 'metas',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'meta-1000',
+      title: 'Milhar de Metas Cumpridas',
+      description: 'Desafio extremo: alcance 1.000 metas concluídas no seu cronograma.',
+      category: 'metas',
+      tier: 'imortal',
+      current: completedGoals,
+      target: 1000,
+      unit: 'metas',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'meta-1500',
+      title: 'Soberano do Expediente (1.500 Metas)',
+      description: 'Patamar máximo de execução: 1.500 metas concluídas ao longo da jornada.',
+      category: 'metas',
+      tier: 'imortal',
+      current: completedGoals,
+      target: 1500,
+      unit: 'metas',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'horas-1500',
+      title: 'Coluna de Aço (1.500h)',
+      description: 'Sustente 1.500 horas líquidas registradas no Ponto Eletrônico.',
+      category: 'horas',
+      tier: 'lendario',
+      current: flooredHours,
+      target: 1500,
+      unit: 'h',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'horas-2500',
+      title: 'Vanguarda de Longo Curso (2.500h)',
+      description: 'Desafio de elite: acumule 2.500 horas líquidas de estudo real.',
+      category: 'horas',
+      tier: 'imortal',
+      current: flooredHours,
+      target: 2500,
+      unit: 'h',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'horas-4000',
+      title: 'Legião das 4.000 Horas',
+      description: 'Marca monumental de preparação para carreiras de Estado: 4.000 horas líquidas.',
+      category: 'horas',
+      tier: 'imortal',
+      current: flooredHours,
+      target: 4000,
+      unit: 'h',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'maratona-10h',
+      title: 'Imersão Extrema (10h/dia)',
+      description: 'Registre 10 horas líquidas ou mais em um único dia de estudo intensivo.',
+      category: 'horas',
+      tier: 'lendario',
+      current: maxDailyHours,
+      target: 10,
+      unit: 'h/dia',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'semanas-30h',
+      title: 'Semanas de Alto Rendimento (12× 30h+)',
+      description: 'Complete 12 semanas distintas com pelo menos 30 horas líquidas estudadas.',
+      category: 'horas',
+      tier: 'lendario',
+      current: highVolumeWeeksCount,
+      target: 12,
+      unit: 'semanas',
+      targetModule: 'Cronograma',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'streak-180',
+      title: 'Semestre Ininterrupto (180d)',
+      description: 'Mantenha 180 dias consecutivos com estudo ativo registrado sem falhas.',
+      category: 'consistencia',
+      tier: 'lendario',
+      current: bestStreak,
+      target: 180,
+      unit: 'dias',
+      targetModule: 'Início',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'streak-365',
+      title: 'Ano Invicto · 365 Dias Seguidos',
+      description: 'Desafio máximo de disciplina: 365 dias consecutivos de preparação ativa.',
+      category: 'consistencia',
+      tier: 'imortal',
+      current: bestStreak,
+      target: 365,
+      unit: 'dias',
+      targetModule: 'Início',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'dias-ativos-365',
+      title: 'Um Ano em Campanha (365d)',
+      description: 'Acumule 365 dias distintos com atividade de estudo no calendário.',
+      category: 'consistencia',
+      tier: 'lendario',
+      current: activeDates.size,
+      target: 365,
+      unit: 'dias',
+      targetModule: 'Início',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'dias-ativos-730',
+      title: 'Biênio de Ouro (730d)',
+      description: 'Acumule 730 dias distintos de estudo consistente rumo à nomeação.',
+      category: 'consistencia',
+      tier: 'imortal',
+      current: activeDates.size,
+      target: 730,
+      unit: 'dias',
+      targetModule: 'Início',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'revisao-curva-100',
+      title: 'Arquivista da Memória (100 Ciclos)',
+      description: 'Complete 100 ciclos de revisão espaçada (24h · 7d · 15d · 30d e Ouvidoria).',
+      category: 'consistencia',
+      tier: 'lendario',
+      current: spacedReviewCycles,
+      target: 100,
+      unit: 'ciclos',
+      targetModule: 'Caderno de Erros',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'revisao-curva-250',
+      title: 'Memória Fotográfica (250 Ciclos)',
+      description: 'Consolide 250 ciclos completos de revisão espaçada ao longo da carreira.',
+      category: 'consistencia',
+      tier: 'imortal',
+      current: spacedReviewCycles,
+      target: 250,
+      unit: 'ciclos',
+      targetModule: 'Caderno de Erros',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'missoes-semanais-40',
+      title: 'Regularidade Anual (40 Missões)',
+      description: 'Conclua 40 missões semanais acumuladas ao longo da preparação.',
+      category: 'consistencia',
+      tier: 'lendario',
+      current: totalCompletedWeeklyMissionsAllTime,
+      target: 40,
+      unit: 'missões',
+      targetModule: 'Carreira & Mérito',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'missoes-semanais-120',
+      title: 'Disciplina Vitalícia (120 Missões)',
+      description: 'Conclua 120 missões semanais homologadas em sua trajetória.',
+      category: 'consistencia',
+      tier: 'imortal',
+      current: totalCompletedWeeklyMissionsAllTime,
+      target: 120,
+      unit: 'missões',
+      targetModule: 'Carreira & Mérito',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'questoes-6000',
+      title: 'Legião das 6.000 Questões',
+      description: 'Resolva 6.000 questões no Banco Oficial e em Simulados Fechados.',
+      category: 'excelencia',
+      tier: 'lendario',
+      current: totalAnswered,
+      target: 6000,
+      unit: 'questões',
+      targetModule: 'Treino Diário',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'questoes-12000',
+      title: 'Domínio Absoluto (12.000q)',
+      description: 'Resolva 12.000 questões e torne-se imune às armadilhas de banca.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: totalAnswered,
+      target: 12000,
+      unit: 'questões',
+      targetModule: 'Treino Diário',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'questoes-25000',
+      title: 'Enciclopédia de Banca (25.000q)',
+      description: 'Desafio lendário: ultrapasse 25.000 questões resolvidas no histórico.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: totalAnswered,
+      target: 25000,
+      unit: 'questões',
+      targetModule: 'Treino Diário',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'simulados-50',
+      title: 'Cinquentenário de Provas (50)',
+      description: 'Conclua 50 simulados fechados completos sob condição real de exame.',
+      category: 'excelencia',
+      tier: 'lendario',
+      current: completedSimulations,
+      target: 50,
+      unit: 'simulados',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'simulados-100',
+      title: 'Centurião dos Simulados (100)',
+      description: 'Marca suprema de resistência em prova: 100 simulados fechados concluídos.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: completedSimulations,
+      target: 100,
+      unit: 'simulados',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'simulados-elite-10',
+      title: 'Consistência de Aprovado (10× 85%+)',
+      description: 'Alcance 85% ou mais de acerto em 10 simulados fechados distintos (mín. 20q cada).',
+      category: 'excelencia',
+      tier: 'lendario',
+      current: eliteSimulationsCount,
+      target: 10,
+      unit: 'simulados',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'simulado-nota-95-50',
+      title: 'Primeiro Lugar Nacional (95%+ em 50q)',
+      description: 'Alta dificuldade: conquiste 95% ou mais em um simulado com ao menos 50 questões.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: bestSim50Pct,
+      target: 95,
+      unit: '%',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+      customLabel:
+        bestSim50Pct === 0
+          ? '0% · nenhum simulado (50+ q)'
+          : `Melhor (50+ q): ${bestSim50Pct}% / 95%`,
+      customRemainingLabel:
+        bestSim50Pct >= 95
+          ? 'Conquistada'
+          : bestSim50Pct === 0
+            ? 'Faça 1 simulado (50+ q) com 95%+'
+            : `Faltam +${95 - bestSim50Pct}% em simulado (50+ q)`,
+    }),
+    buildMedal({
+      id: 'cronometro-relampago',
+      title: 'Precisão Supersônica (≤ 1m10s/q & 90%+)',
+      description:
+        'Finalize um Simulado Fechado (mín. 30 questões) com média ≤ 1m10s/questão e 90%+ de acerto.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: supersonicSimUnlocked ? 90 : Math.min(89, bestSupersonicSimPct),
+      target: 90,
+      unit: '%',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+      extraCondition: supersonicSimUnlocked,
+      customLabel:
+        bestSupersonicSimAvgSec === null
+          ? 'Sem simulado cronometrado (30+ q)'
+          : `${bestSupersonicSimPct}% · média ${formatSecondsShort(bestSupersonicSimAvgSec)}/q`,
+      customRemainingLabel:
+        bestSupersonicSimAvgSec === null
+          ? 'Faça 1 simulado (30+ q) em ≤ 1m10s/q'
+          : bestSupersonicSimAvgSec > 70
+            ? `Reduza a média para ≤ 1m10s/q (atual ${formatSecondsShort(bestSupersonicSimAvgSec)})`
+            : `Faltam +${Math.max(1, 90 - bestSupersonicSimPct)}% mantendo ≤ 1m10s/q`,
+    }),
+    buildMedal({
+      id: 'cespe-mestre-80',
+      title: 'Mestre Cebraspe (80%+ líq. em 50q)',
+      description:
+        'Atinja 80% ou mais de aproveitamento líquido em simulado estilo CESPE/CE com 50+ questões.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: bestCespe50NetPct,
+      target: 80,
+      unit: '%',
+      targetModule: 'Simulado Fechado',
+      unlockedAtMap,
+      extraCondition: cespe50Unlocked,
+      customLabel:
+        bestCespe50NetPct === 0
+          ? '0% · nenhum CESPE/CE (50+ q)'
+          : `Melhor líquido (50+ q): ${bestCespe50NetPct}% / 80%`,
+      customRemainingLabel:
+        bestCespe50NetPct === 0
+          ? 'Faça 1 simulado CESPE/CE (50+ q)'
+          : `Faltam +${Math.max(1, 80 - bestCespe50NetPct)}% líquido em CESPE (50+ q)`,
+    }),
+    buildMedal({
+      id: 'precisao-92-2000',
+      title: 'Precisão de Ministro (92%+ em 2.000q)',
+      description: 'Desafio extremo: sustente 92%+ de acerto global após 2.000+ questões resolvidas.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: totalAnswered >= 2000 ? accuracyPct : Math.min(accuracyPct, 91),
+      target: 92,
+      unit: '%',
+      targetModule: 'Treino Diário',
+      unlockedAtMap,
+      extraCondition: totalAnswered >= 2000 && accuracyPct >= 92,
+      customLabel:
+        totalAnswered < 2000
+          ? `${accuracyPct}% · ${totalAnswered.toLocaleString('pt-BR')}/2.000 questões`
+          : `${accuracyPct}% / 92%`,
+      customRemainingLabel:
+        totalAnswered < 2000
+          ? `Faltam ${(2000 - totalAnswered).toLocaleString('pt-BR')} questões (meta 92%)`
+          : `Faltam +${Math.max(1, 92 - accuracyPct)}% de acerto geral`,
+    }),
+    buildMedal({
+      id: 'erros-150',
+      title: 'Ouvidoria Blindada (150 Erros)',
+      description: 'Neutralize e domine 150 questões erradas no Caderno de Erros.',
+      category: 'excelencia',
+      tier: 'lendario',
+      current: correctedErrors,
+      target: 150,
+      unit: 'correções',
+      targetModule: 'Caderno de Erros',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'erros-400',
+      title: 'Imunidade de Banca (400 Erros)',
+      description: 'Transforme 400 falhas históricas em domínio sólido comprovado.',
+      category: 'excelencia',
+      tier: 'imortal',
+      current: correctedErrors,
+      target: 400,
+      unit: 'correções',
+      targetModule: 'Caderno de Erros',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'lei-3500',
+      title: 'Vade Mecum Vivo (3.500 Leituras)',
+      description: 'Acumule 3.500 dispositivos lidos ou revisados no Diário Oficial (Lei Seca).',
+      category: 'dominio',
+      tier: 'lendario',
+      current: lawReadings,
+      target: 3500,
+      unit: 'leituras',
+      targetModule: 'Lei Seca',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'lei-8000',
+      title: 'Oráculo Legislativo (8.000 Leituras)',
+      description: 'Domínio absoluto da literalidade legal com 8.000 dispositivos lidos/revisados.',
+      category: 'dominio',
+      tier: 'imortal',
+      current: lawReadings,
+      target: 8000,
+      unit: 'leituras',
+      targetModule: 'Lei Seca',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'polimata-12',
+      title: 'Polímata Supremo (12 Matérias 85%+)',
+      description: 'Sustente 85%+ de acerto (mín. 100 questões cada) em 12 disciplinas distintas.',
+      category: 'dominio',
+      tier: 'imortal',
+      current: grandMasterSubjectsCount,
+      target: 12,
+      unit: 'disciplinas',
+      targetModule: 'Treino Diário',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'edital-200',
+      title: 'Varredura de Edital (200 Tópicos)',
+      description: 'Conclua 200 tópicos programáticos marcados como estudados em Editais.',
+      category: 'dominio',
+      tier: 'lendario',
+      current: editalStudiedCount,
+      target: 200,
+      unit: 'tópicos',
+      targetModule: 'Editais',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'edital-500',
+      title: 'Conquistador de Editais (500 Tópicos)',
+      description: 'Marque 500 tópicos de edital como estudados e revisados em sua carreira.',
+      category: 'dominio',
+      tier: 'imortal',
+      current: editalStudiedCount,
+      target: 500,
+      unit: 'tópicos',
+      targetModule: 'Editais',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'sumulas-80',
+      title: 'Ministro das Súmulas (80 Julgados)',
+      description: 'Catalogue e domine 80 súmulas, teses ou informativos STF/STJ.',
+      category: 'dominio',
+      tier: 'lendario',
+      current: caseLawCount,
+      target: 80,
+      unit: 'julgados',
+      targetModule: 'Súmulas e Jurisprudência',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'discursiva-20',
+      title: 'Caneta de Ouro (20 Discursivas)',
+      description: 'Produza e avalie 20 peças técnicas ou dissertações oficiais.',
+      category: 'dominio',
+      tier: 'lendario',
+      current: essaysCount,
+      target: 20,
+      unit: 'discursivas',
+      targetModule: 'Discursiva',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'discursiva-50',
+      title: 'Tratadista Oficial (50 Discursivas)',
+      description: 'Domínio redacional absoluto: 50 peças ou dissertações concluídas.',
+      category: 'dominio',
+      tier: 'imortal',
+      current: essaysCount,
+      target: 50,
+      unit: 'discursivas',
+      targetModule: 'Discursiva',
+      unlockedAtMap,
+    }),
+    buildMedal({
+      id: 'criticos-100',
+      title: 'Radar Supremo (100 Pontos Críticos)',
+      description: 'Catalogue 100 pegadinhas, prazos fatais e alertas legislativos.',
+      category: 'dominio',
+      tier: 'lendario',
+      current: criticalPointsCount,
+      target: 100,
+      unit: 'pontos',
+      targetModule: 'Pontos Críticos',
+      unlockedAtMap,
+    }),
   ];
 
   const unlockedMedals = medals.filter((m) => m.unlocked);
   const unlockedMedalsCount = unlockedMedals.length;
   const medalsBonusXp = unlockedMedals.reduce((sum, m) => sum + m.bonusXp, 0);
-  const weeklyMissionsXp = totalCompletedWeeklyMissionsAllTime * WEEKLY_MISSION_XP_REWARD;
+
+  // === 100 EXPONENTIAL PER-LEVEL MILESTONES ===
+  const levelMilestones = buildExponentialLevelMilestones({
+    completedGoals,
+    flooredHours,
+    totalAnswered,
+    accuracyPct,
+    activeDaysTotal: activeDates.size,
+    completedSimulations,
+    lawReadings,
+    spacedReviewCycles,
+    correctedErrors,
+    editalStudiedCount,
+  });
+  const completedMilestonesCount = levelMilestones.filter((m) => m.completed).length;
+  const milestonesBonusXp = levelMilestones
+    .filter((m) => m.completed)
+    .reduce((sum, m) => sum + m.bonusXp, 0);
+  const nextPendingMilestone = levelMilestones.find((m) => !m.completed) || null;
+  const nextPromotionMilestone =
+    levelMilestones.find((m) => m.isPromotionGate && !m.completed) || null;
 
   // === COMPLETE XP BREAKDOWN ===
   const xpBreakdown: CareerXpBreakdown = {
@@ -1517,13 +2582,15 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     goalsXp: completedGoals * 45,
     questionsXp: totalAnswered * 2 + totalCorrect * 2,
     simulationsXp: completedSimulations * 120,
-    lawsXp: Math.min(3500, lawReadings * 10),
+    lawsXp: Math.min(25000, lawReadings * 10),
     errorsCorrectedXp: correctedErrors * 20,
+    spacedReviewsXp: spacedReviewCycles * 15,
     streakXp: bestStreak * 30,
     editalXp: editalStudiedCount * 12,
     caseLawXp: caseLawCount * 15,
     essaysXp: essaysCount * 80,
     criticalPointsXp: criticalPointsCount * 15,
+    milestonesBonusXp,
     medalsBonusXp,
     weeklyMissionsXp,
   };
@@ -1535,11 +2602,13 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     xpBreakdown.simulationsXp +
     xpBreakdown.lawsXp +
     xpBreakdown.errorsCorrectedXp +
+    xpBreakdown.spacedReviewsXp +
     xpBreakdown.streakXp +
     xpBreakdown.editalXp +
     xpBreakdown.caseLawXp +
     xpBreakdown.essaysXp +
     xpBreakdown.criticalPointsXp +
+    xpBreakdown.milestonesBonusXp +
     xpBreakdown.medalsBonusXp +
     xpBreakdown.weeklyMissionsXp;
 
@@ -1564,13 +2633,22 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       targetModule: 'Treino Diário',
     },
     {
+      id: 'milestonesBonusXp',
+      label: 'Marcos de Nível (1 a 100)',
+      xp: xpBreakdown.milestonesBonusXp,
+      sharePct: Math.round((xpBreakdown.milestonesBonusXp / xpDenom) * 100),
+      formula: '+25 a +10.000 XP exponencial',
+      detail: `${completedMilestonesCount}/100 marcos conquistados`,
+      targetModule: 'Carreira & Mérito',
+    },
+    {
       id: 'medalsBonusXp',
       label: 'Bônus de Medalhas',
       xp: xpBreakdown.medalsBonusXp,
       sharePct: Math.round((xpBreakdown.medalsBonusXp / xpDenom) * 100),
-      formula: '50 a 1.000 XP/grau',
+      formula: '50 a 5.000 XP/grau',
       detail: `${unlockedMedalsCount} condecoração(ões)`,
-      targetModule: 'Monitor de Desempenho',
+      targetModule: 'Carreira & Mérito',
     },
     {
       id: 'goalsXp',
@@ -1586,7 +2664,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       label: 'Lei Seca & Dispositivos',
       xp: xpBreakdown.lawsXp,
       sharePct: Math.round((xpBreakdown.lawsXp / xpDenom) * 100),
-      formula: '10 XP / leitura (teto 3.500)',
+      formula: '10 XP / leitura (teto 25.000)',
       detail: `${lawReadings.toLocaleString('pt-BR')} leitura(s)`,
       targetModule: 'Lei Seca',
     },
@@ -1607,6 +2685,15 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       formula: '20 XP / correção',
       detail: `${correctedErrors.toLocaleString('pt-BR')} erro(s) sanado(s)`,
       targetModule: 'Caderno de Erros',
+    },
+    {
+      id: 'spacedReviewsXp',
+      label: 'Revisão Espaçada (24h–30d)',
+      xp: xpBreakdown.spacedReviewsXp,
+      sharePct: Math.round((xpBreakdown.spacedReviewsXp / xpDenom) * 100),
+      formula: '15 XP / ciclo concluído',
+      detail: `${spacedReviewCycles.toLocaleString('pt-BR')} ciclo(s) de retenção`,
+      targetModule: 'Início',
     },
     {
       id: 'streakXp',
@@ -1631,9 +2718,9 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       label: 'Missões da Semana',
       xp: xpBreakdown.weeklyMissionsXp,
       sharePct: Math.round((xpBreakdown.weeklyMissionsXp / xpDenom) * 100),
-      formula: `${WEEKLY_MISSION_XP_REWARD} XP / missão`,
+      formula: `${WEEKLY_MISSION_XP_REWARD} XP (Elite: ${ELITE_WEEKLY_MISSION_XP_REWARD} XP)`,
       detail: `${totalCompletedWeeklyMissionsAllTime} missão(ões) concluída(s)`,
-      targetModule: 'Monitor de Desempenho',
+      targetModule: 'Carreira & Mérito',
     },
     {
       id: 'caseLawXp',
@@ -1665,7 +2752,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
   ];
   const xpSources: CareerXpSourceItem[] = [...xpSourcesUnsorted].sort((a, b) => b.xp - a.xp);
 
-  // Determine current and next career level
+  // Determine current and next career level (1..100)
   let currentLevel = CAREER_LEVELS[0];
   let nextLevel: CareerLevelDefinition | null = CAREER_LEVELS[1] || null;
   for (let i = 0; i < CAREER_LEVELS.length; i++) {
@@ -1677,12 +2764,18 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     }
   }
 
+  const level100MinXp = CAREER_LEVELS[CAREER_LEVELS.length - 1].minXp;
   const xpIntoLevel = totalXp - currentLevel.minXp;
   const xpForNextLevel = nextLevel ? nextLevel.minXp - currentLevel.minXp : 0;
   const xpRemaining = nextLevel ? Math.max(0, nextLevel.minXp - totalXp) : 0;
+  const xpToLevel100 = Math.max(0, level100MinXp - totalXp);
   const levelProgressPct = nextLevel
     ? Math.max(0, Math.min(100, Math.round((xpIntoLevel / Math.max(1, xpForNextLevel)) * 100)))
     : 100;
+  const overallLevel100Pct = Math.max(
+    0,
+    Math.min(100, Math.round((totalXp / Math.max(1, level100MinXp)) * 100)),
+  );
 
   // "Quase Lá" — Top 3 locked medals closest to unlocking
   const tierWeight: Record<MedalTier, number> = {
@@ -1691,6 +2784,8 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     ouro: 3,
     diamante: 4,
     supremo: 5,
+    lendario: 6,
+    imortal: 7,
   };
   const almostThereMedals = medals
     .filter((m) => !m.unlocked)
@@ -1700,6 +2795,20 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       return a.target - b.target;
     })
     .slice(0, 3);
+
+  // "Rota para o Nível 100" — Top 6 locked high-difficulty objectives (Supremo, Lendário, Imortal)
+  const highDifficultyTargets = medals
+    .filter(
+      (m) =>
+        !m.unlocked &&
+        (m.tier === 'lendario' || m.tier === 'imortal' || m.tier === 'supremo'),
+    )
+    .sort((a, b) => {
+      if (b.progressPct !== a.progressPct) return b.progressPct - a.progressPct;
+      if (tierWeight[b.tier] !== tierWeight[a.tier]) return tierWeight[b.tier] - tierWeight[a.tier];
+      return b.bonusXp - a.bonusXp;
+    })
+    .slice(0, 6);
 
   // Vitrine de Honra (pinned medals up to 3, fallback to top 3 unlocked by tier)
   const medalById = new Map<string, MeritMedal>(medals.map((m) => [m.id, m]));
@@ -1723,13 +2832,23 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
     currentLevel,
     nextLevel,
     levelProgressPct,
+    overallLevel100Pct,
     xpIntoLevel,
     xpForNextLevel,
     xpRemaining,
+    xpToLevel100,
+    level100MinXp,
+    xpGrowthRatePct: Number(((CAREER_XP_GROWTH_RATE - 1) * 100).toFixed(1)),
     allLevels: CAREER_LEVELS,
+    rankGroups: CAREER_RANK_GROUPS,
+    levelMilestones,
+    completedMilestonesCount,
+    nextPendingMilestone,
+    nextPromotionMilestone,
     medals,
     unlockedMedalsCount,
     almostThereMedals,
+    highDifficultyTargets,
     pinnedMedals,
     showcaseMedals,
     hasCustomPinnedMedals,
@@ -1744,19 +2863,25 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       totalStudySeconds,
       totalStudyHours,
       maxDailyHours,
+      highVolumeWeeksCount,
       currentStreak,
       bestStreak,
       activeDaysTotal: activeDates.size,
       totalAnswered,
       accuracyPct,
       completedSimulations,
+      eliteSimulationsCount,
       bestSim20Pct,
       bestSim30Pct,
+      bestSim50Pct,
       bestFastSimPct,
       bestFastSimAvgSec,
       bestEliteSpeedSimPct,
       bestEliteSpeedSimAvgSec,
+      bestSupersonicSimPct,
+      bestSupersonicSimAvgSec,
       bestCespeNetPct,
+      bestCespe50NetPct,
       bestCespeNetPoints,
       correctedErrors,
       pendingErrorsCount,
@@ -1764,6 +2889,7 @@ export function computeCareerSummary(db: StudyDatabase): CareerSummary {
       lawReadings,
       masteredSubjectsCount,
       eliteSubjectsCount,
+      grandMasterSubjectsCount,
       editalStudiedCount,
       caseLawCount,
       essaysCount,

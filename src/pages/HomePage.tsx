@@ -38,6 +38,8 @@ import { ModuleName } from '../types/study';
 import { ModuleIcon } from '../components/ui/ModuleIcon';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { DailyGoalPacePanel } from '../components/home/DailyGoalPacePanel';
+import { TodayFocusPanel } from '../components/home/TodayFocusPanel';
+import { PreExamChecklistPanel } from '../components/home/PreExamChecklistPanel';
 import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
 import { FinalSprintReviewModal } from '../components/study/FinalSprintReviewModal';
 
@@ -521,6 +523,22 @@ export const HomePage: React.FC = () => {
         </div>
       </section>
 
+      {/* Painel Central: Foco de Hoje + Revisões Espaçadas (24h · 7d · 15d · 30d) + Retomar Lei Seca */}
+      <TodayFocusPanel
+        dueErrorsCount={dueReviews.length}
+        dueLawsCount={spacedLawReviews.length}
+        firstDueLaw={
+          spacedLawReviews[0]
+            ? {
+                folder: spacedLawReviews[0].folder,
+                articleKey: spacedLawReviews[0].firstPriorityArticle || '',
+                label: visibleName(spacedLawReviews[0].folder),
+              }
+            : null
+        }
+        onOpenFlashcards={() => setFlashcardsOpen(true)}
+      />
+
       {/* Fila de Revisão Espaçada Automática (Curva 1-7-15-30 dias) */}
       {(dueReviews.length > 0 || spacedLawReviews.length > 0) && (
         <Panel
@@ -723,6 +741,9 @@ export const HomePage: React.FC = () => {
         </section>
       )}
 
+      {/* Checklist de Pré-Prova / Reta Final por Concurso */}
+      <PreExamChecklistPanel />
+
       {/* Carteirinha Digital do Concurseiro */}
       <Panel
         title="Identidade Nacional do Concurseiro (Documento Digital)"
@@ -732,7 +753,7 @@ export const HomePage: React.FC = () => {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => setActivePage('Monitor de Desempenho')}
+              onClick={() => setActivePage('Carreira & Mérito')}
               className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] hover:border-[var(--accent)] text-[var(--text)] text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer"
             >
               <Award className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
@@ -858,14 +879,16 @@ export const HomePage: React.FC = () => {
                     ouro: '#ca8a04',
                     diamante: '#0284c7',
                     supremo: '#9333ea',
+                    lendario: '#dc2626',
+                    imortal: '#059669',
                   };
                   return (
                     <button
                       key={m.id}
                       type="button"
-                      onClick={() => setActivePage('Monitor de Desempenho')}
+                      onClick={() => setActivePage('Carreira & Mérito')}
                       className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] hover:border-[var(--accent)] text-[11.5px] transition-colors cursor-pointer"
-                      title={`${m.title} · ${MEDAL_TIER_LABELS[m.tier]} (+${m.bonusXp} XP)`}
+                      title={`${m.title} · ${MEDAL_TIER_LABELS[m.tier]} (+${m.bonusXp.toLocaleString('pt-BR')} XP)`}
                     >
                       <Award
                         className="w-3.5 h-3.5 shrink-0"
@@ -892,7 +915,7 @@ export const HomePage: React.FC = () => {
 
           <button
             type="button"
-            onClick={() => setActivePage('Monitor de Desempenho')}
+            onClick={() => setActivePage('Carreira & Mérito')}
             className="text-[11.5px] font-bold text-[var(--accent)] hover:underline whitespace-nowrap shrink-0 self-start sm:self-auto cursor-pointer bg-transparent border-0 p-0"
           >
             {careerSummary.hasCustomPinnedMedals ? 'Alterar Vitrine' : 'Personalizar Vitrine'}

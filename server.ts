@@ -536,10 +536,22 @@ async function startServer() {
           ? style.trim().slice(0, 300)
           : 'Narração em português do Brasil clara, natural, cadenciada e fluida, como um professor experiente lendo legislação em voz alta, com pausas orgânicas em vírgulas e pontos finais.';
 
-      const apiKey = process.env.GEMINI_API_KEY;
+      const apiKey = (
+        process.env.GEMINI_API_KEY ||
+        process.env.GOOGLE_API_KEY ||
+        process.env.GOOGLE_GENERATIVE_AI_API_KEY ||
+        process.env.API_KEY ||
+        process.env.VITE_GEMINI_API_KEY ||
+        ''
+      ).trim();
       if (!apiKey) {
-        throw new Error('GEMINI_API_KEY não configurada no ambiente do servidor.');
+        res.status(503).json({
+          error:
+            'GEMINI_API_KEY não encontrada no servidor. Na Vercel, salve em Settings → Environment Variables e clique em Deployments → Redeploy.',
+        });
+        return;
       }
+
       const ai = new GoogleGenAI({
         apiKey,
         apiVersion: 'v1beta',
@@ -549,30 +561,43 @@ async function startServer() {
           },
         },
       });
-      const response = await ai.models.generateContent({
-        model: GEMINI_TTS_MODEL,
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                text: cleanText.slice(0, 3200),
-                speechMetadata: {
-                  style: safeStyle,
+
+      const requestTts = (model: string) =>
+        ai.models.generateContent({
+          model,
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: cleanText.slice(0, 3200),
+                  speechMetadata: {
+                    style: safeStyle,
+                  },
                 },
+              ],
+            },
+          ],
+          config: {
+            responseModalities: ['AUDIO'],
+            speechConfig: {
+              voiceConfig: {
+                prebuiltVoiceConfig: { voiceName: safeVoice },
               },
-            ],
-          },
-        ],
-        config: {
-          responseModalities: ['AUDIO'],
-          speechConfig: {
-            voiceConfig: {
-              prebuiltVoiceConfig: { voiceName: safeVoice },
             },
           },
-        },
-      });
+        });
+
+      let response;
+      try {
+        response = await requestTts(GEMINI_TTS_MODEL);
+      } catch (primaryErr: any) {
+        if (primaryErr?.status === 503 || primaryErr?.status === 404) {
+          response = await requestTts('gemini-3.8-flash-tts');
+        } else {
+          throw primaryErr;
+        }
+      }
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       const audioPart = parts.find((p: any) => p?.inlineData?.data);

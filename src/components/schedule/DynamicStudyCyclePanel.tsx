@@ -16,7 +16,12 @@ import {
   DEFAULT_FIXED_SUBJECTS,
   WEEKDAYS,
   formatScheduleDuration,
+  goalDateIso,
+  isoWeekStartDate,
   localDateBrazilian,
+  localDateIso,
+  normalizeSearch,
+  scheduleDurationSeconds,
   uid,
   visibleName,
 } from '../../lib/parsers';
@@ -75,6 +80,56 @@ export const DynamicStudyCyclePanel: React.FC = () => {
   );
 
   const todayWeekday: WeekdayName = WEEKDAYS[(new Date().getDay() + 6) % 7];
+
+  // Smart weekly-goal recommendation: highlight cycle subject furthest behind its weekly target
+  const laggingCycleSuggestion = useMemo(() => {
+    const goals = db.preferences.weekly_subject_hours || {};
+    if (Object.keys(goals).length === 0 || cycle.items.length === 0) return null;
+    const todayIso = localDateIso();
+    const mondayIso = isoWeekStartDate(todayIso);
+    const [my, mm, md] = mondayIso.split('-').map(Number);
+    const sunDt = new Date(my, (mm || 1) - 1, (md || 1) + 6);
+    const sundayIso = `${sunDt.getFullYear()}-${String(sunDt.getMonth() + 1).padStart(2, '0')}-${String(sunDt.getDate()).padStart(2, '0')}`;
+
+    const realized = new Map<string, number>();
+    const countedTopics = new Set<string>();
+    const countedRecs = new Set<string>();
+    (db.studyTimeRecords || []).forEach((rec) => {
+      if (!rec.date || rec.date < mondayIso || rec.date > sundayIso) return;
+      if (rec.quizId) countedRecs.add(rec.quizId);
+      (rec.allocations || []).forEach((a) => {
+        if (a.topicId) countedTopics.add(a.topicId);
+        const k = normalizeSearch(a.subject);
+        realized.set(k, (realized.get(k) || 0) + (a.seconds || 0));
+      });
+    });
+    (db.completedGoals || []).forEach((g) => {
+      const gIso = goalDateIso(g.data);
+      if (!gIso || gIso < mondayIso || gIso > sundayIso) return;
+      if (g.studyRecordId && countedRecs.has(g.studyRecordId)) return;
+      if (g.topicId && countedTopics.has(g.topicId)) return;
+      const sec = Math.max(scheduleDurationSeconds(g.tempo || ''), g.estudado_segundos || 0);
+      const k = normalizeSearch(g.disciplina_fixa || g.materia);
+      realized.set(k, (realized.get(k) || 0) + sec);
+    });
+
+    let best: { idx: number; subject: string; pct: number } | null = null;
+    for (let idx = 0; idx < cycle.items.length; idx++) {
+      const it = cycle.items[idx];
+      const targetEntry = Object.entries(goals).find(
+        ([k, h]) => Number(h) > 0 && normalizeSearch(k) === normalizeSearch(it.subject),
+      );
+      if (!targetEntry) continue;
+      const targetSec = targetEntry[1] * 3600;
+      const actualSec = realized.get(normalizeSearch(it.subject)) || 0;
+      const pct = Math.min(100, Math.round((actualSec / targetSec) * 100));
+      if (pct < 100 && (!best || pct < best.pct)) {
+        best = { idx, subject: it.subject, pct };
+      }
+    }
+    if (!best || best.idx === safeActiveIndex) return null;
+    return best;
+  }, [cycle.items, db.completedGoals, db.preferences.weekly_subject_hours, db.studyTimeRecords, safeActiveIndex]);
 
   const handleGenerateFromFixedSubjects = () => {
     const list = availableSubjects.slice(0, 12);
@@ -277,6 +332,30 @@ export const DynamicStudyCyclePanel: React.FC = () => {
               Concluir e Girar Ciclo
             </button>
           </div>
+          {laggingCycleSuggestion && (
+            <div className="w-full pt-2 mt-1 border-t border-[var(--line)] flex flex-wrap items-center justify-between gap-2 text-[11.5px]">
+              <span className="text-[var(--muted)]">
+                Sugestão pela meta semanal:{' '}
+                <strong className="text-[var(--warning)]">
+                  {visibleName(laggingCycleSuggestion.subject)}
+                </strong>{' '}
+                está com <span className="font-mono-num tabular-nums font-bold">{laggingCycleSuggestion.pct}%</span> da carga semanal.
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  updateStudyCycle((prev) => ({
+                    ...prev,
+                    activeIndex: laggingCycleSuggestion.idx,
+                  }));
+                  toast(`Bloco "${visibleName(laggingCycleSuggestion.subject)}" ativado agora no Ciclo.`);
+                }}
+                className="text-[var(--accent)] font-bold hover:underline whitespace-nowrap"
+              >
+                Ativar este bloco agora
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-5 mb-4 flex flex-wrap items-center justify-between gap-3">

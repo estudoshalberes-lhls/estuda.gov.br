@@ -15,7 +15,7 @@ interface NavGroup {
 const NAV_GROUPS: NavGroup[] = [
   {
     label: 'Guichê do Cidadão-Estudante',
-    items: ['Início', 'Monitor de Desempenho'],
+    items: ['Início', 'Carreira & Mérito', 'Monitor de Desempenho'],
   },
   {
     label: 'Banca & Exames Oficiais',

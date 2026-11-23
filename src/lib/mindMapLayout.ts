@@ -4,6 +4,7 @@ import {
   MindMapLayoutMode,
   MindMapNode,
   MindMapNodeTag,
+  MindMapThemeId,
 } from '../types/study';
 import { cleanSafeName, localDateIso, localDateTimeBrazilian } from './parsers';
 import { triggerBlobDownload } from './fileStorage';
@@ -19,6 +20,254 @@ export const MINDMAP_COLORS = [
   { id: 'indigo', label: 'Índigo', hex: '#3730A3', soft: '#E0E7FF' },
   { id: 'slate', label: 'Ardósia', hex: '#334155', soft: '#F1F5F9' },
 ] as const;
+
+export const MINDMAP_NODE_BG_COLORS = [
+  { id: 'white', label: 'Branco', hex: '#FFFFFF' },
+  { id: 'ice', label: 'Azul Claro', hex: '#EFF6FF' },
+  { id: 'mint', label: 'Verde Claro', hex: '#ECFDF5' },
+  { id: 'sand', label: 'Amarelo Suave', hex: '#FEF9C3' },
+  { id: 'rose', label: 'Rosa Claro', hex: '#FFF1F2' },
+  { id: 'lavender', label: 'Lilás Suave', hex: '#F5F3FF' },
+  { id: 'cream', label: 'Sépia Claro', hex: '#FAF3E0' },
+  { id: 'slate-dark', label: 'Ardósia Escuro', hex: '#1E293B' },
+  { id: 'navy-dark', label: 'Marinho Escuro', hex: '#0F2942' },
+  { id: 'forest-dark', label: 'Verde Lousa', hex: '#14332A' },
+] as const;
+
+export const MINDMAP_CANVAS_BG_COLORS = [
+  { id: 'pure-white', label: 'Branco Puro', hex: '#FFFFFF' },
+  { id: 'gov-light', label: 'Azul Gelo', hex: '#F4F7FB' },
+  { id: 'paper-cream', label: 'Papel Creme', hex: '#FAF5E8' },
+  { id: 'soft-mint', label: 'Menta Suave', hex: '#F0F7F4' },
+  { id: 'soft-lavender', label: 'Lavanda Claro', hex: '#F5F3FF' },
+  { id: 'cool-gray', label: 'Cinza Técnico', hex: '#EDF1F7' },
+  { id: 'dark-slate', label: 'Noturno Slate', hex: '#0B1220' },
+  { id: 'chalk-green', label: 'Lousa Verde', hex: '#0F241D' },
+  { id: 'blueprint-navy', label: 'Blueprint Azul', hex: '#0A1931' },
+  { id: 'obsidian', label: 'Preto Ônix', hex: '#09090B' },
+] as const;
+
+export interface MindMapThemeSpec {
+  id: MindMapThemeId;
+  name: string;
+  description: string;
+  isDark: boolean;
+  useSystemVars?: boolean;
+  canvasBg: string;
+  exportCanvasBg: string;
+  dotColor: string;
+  cardBg: string;
+  exportCardBg: string;
+  textColor: string;
+  exportTextColor: string;
+  noteColor: string;
+  exportNoteColor: string;
+  headerBg: string;
+  headerAccent: string;
+  rootColor: string;
+  branchPalette: string[];
+}
+
+export const MINDMAP_THEMES: MindMapThemeSpec[] = [
+  {
+    id: 'padrao',
+    name: 'Padrão do Sistema',
+    description: 'Acompanha automaticamente o tema ativo do estuda.gov.br',
+    isDark: false,
+    useSystemVars: true,
+    canvasBg: 'var(--panel-soft)',
+    exportCanvasBg: '#F8FAFC',
+    dotColor: 'var(--line-strong)',
+    cardBg: 'var(--panel)',
+    exportCardBg: '#FFFFFF',
+    textColor: 'var(--text)',
+    exportTextColor: '#0F172A',
+    noteColor: 'var(--muted)',
+    exportNoteColor: '#475569',
+    headerBg: '#071D41',
+    headerAccent: '#FFCD07',
+    rootColor: '#1351B4',
+    branchPalette: ['#1351B4', '#168821', '#B45309', '#C53030', '#6D28D9', '#0F766E'],
+  },
+  {
+    id: 'institucional',
+    name: 'Institucional Gov',
+    description: 'Fundo claro azul-gelo com cartões brancos e paleta oficial',
+    isDark: false,
+    canvasBg: '#F4F7FB',
+    exportCanvasBg: '#F4F7FB',
+    dotColor: '#CBD5E1',
+    cardBg: '#FFFFFF',
+    exportCardBg: '#FFFFFF',
+    textColor: '#0F172A',
+    exportTextColor: '#0F172A',
+    noteColor: '#475569',
+    exportNoteColor: '#475569',
+    headerBg: '#071D41',
+    headerAccent: '#FFCD07',
+    rootColor: '#071D41',
+    branchPalette: ['#1351B4', '#168821', '#B45309', '#C53030', '#3730A3', '#0F766E'],
+  },
+  {
+    id: 'papel-creme',
+    name: 'Papel de Estudo (Sépia)',
+    description: 'Conforto visual para longas revisões com tons quentes de papel',
+    isDark: false,
+    canvasBg: '#FAF5E8',
+    exportCanvasBg: '#FAF5E8',
+    dotColor: '#DFD3B8',
+    cardBg: '#FFFDF7',
+    exportCardBg: '#FFFDF7',
+    textColor: '#292018',
+    exportTextColor: '#292018',
+    noteColor: '#6B5B4A',
+    exportNoteColor: '#6B5B4A',
+    headerBg: '#3E2C1E',
+    headerAccent: '#EAB308',
+    rootColor: '#7C2D12',
+    branchPalette: ['#9A3412', '#2E6F40', '#1D4E89', '#854D0E', '#6B21A8', '#0F766E'],
+  },
+  {
+    id: 'noturno-slate',
+    name: 'Noturno Executivo',
+    description: 'Fundo escuro profundo com ramos luminosos de alto destaque',
+    isDark: true,
+    canvasBg: '#0B1220',
+    exportCanvasBg: '#0B1220',
+    dotColor: '#23324D',
+    cardBg: '#131E32',
+    exportCardBg: '#131E32',
+    textColor: '#F1F5F9',
+    exportTextColor: '#F1F5F9',
+    noteColor: '#94A3B8',
+    exportNoteColor: '#94A3B8',
+    headerBg: '#0F172A',
+    headerAccent: '#38BDF8',
+    rootColor: '#0284C7',
+    branchPalette: ['#38BDF8', '#34D399', '#FBBF24', '#F87171', '#A78BFA', '#2DD4BF'],
+  },
+  {
+    id: 'lousa-verde',
+    name: 'Lousa Acadêmica',
+    description: 'Quadro verde clássico de sala de aula com traços em giz suave',
+    isDark: true,
+    canvasBg: '#0F241D',
+    exportCanvasBg: '#0F241D',
+    dotColor: '#244A3D',
+    cardBg: '#163329',
+    exportCardBg: '#163329',
+    textColor: '#F0FDF4',
+    exportTextColor: '#F0FDF4',
+    noteColor: '#A7F3D0',
+    exportNoteColor: '#A7F3D0',
+    headerBg: '#0A1A15',
+    headerAccent: '#FDE047',
+    rootColor: '#15803D',
+    branchPalette: ['#FDE047', '#6EE7B7', '#7DD3FC', '#FCA5A5', '#DDD6FE', '#FDBA74'],
+  },
+  {
+    id: 'blueprint',
+    name: 'Blueprint Técnico',
+    description: 'Estética de planta técnica em azul-marinho com linhas ciano',
+    isDark: true,
+    canvasBg: '#0A1931',
+    exportCanvasBg: '#0A1931',
+    dotColor: '#1E3A63',
+    cardBg: '#10264A',
+    exportCardBg: '#10264A',
+    textColor: '#EFF6FF',
+    exportTextColor: '#EFF6FF',
+    noteColor: '#93C5FD',
+    exportNoteColor: '#93C5FD',
+    headerBg: '#061124',
+    headerAccent: '#38BDF8',
+    rootColor: '#1D4ED8',
+    branchPalette: ['#38BDF8', '#FACC15', '#4ADE80', '#FB7185', '#C084FC', '#22D3EE'],
+  },
+  {
+    id: 'alto-contraste',
+    name: 'Alto Contraste (Impressão)',
+    description: 'Fundo branco puro e tinta preta forte ideal para impressão P&B',
+    isDark: false,
+    canvasBg: '#FFFFFF',
+    exportCanvasBg: '#FFFFFF',
+    dotColor: '#D4D4D8',
+    cardBg: '#FFFFFF',
+    exportCardBg: '#FFFFFF',
+    textColor: '#000000',
+    exportTextColor: '#000000',
+    noteColor: '#374151',
+    exportNoteColor: '#374151',
+    headerBg: '#000000',
+    headerAccent: '#FFFFFF',
+    rootColor: '#111827',
+    branchPalette: ['#111827', '#0B4F9C', '#14532D', '#991B1B', '#581C87', '#92400E'],
+  },
+];
+
+export function getMindMapTheme(themeId?: MindMapThemeId): MindMapThemeSpec {
+  return MINDMAP_THEMES.find((t) => t.id === themeId) || MINDMAP_THEMES[0];
+}
+
+export function isHexColorDark(hex?: string): boolean {
+  if (!hex) return false;
+  const cleaned = hex.trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(cleaned)) return false;
+  const full =
+    cleaned.length === 3
+      ? cleaned
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : cleaned;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+  return luminance < 0.54;
+}
+
+export function getReadableTextOnHex(hex: string): { text: string; note: string; isDark: boolean } {
+  const dark = isHexColorDark(hex);
+  return dark
+    ? { text: '#FFFFFF', note: 'rgba(241, 245, 249, 0.84)', isDark: true }
+    : { text: '#0F172A', note: '#475569', isDark: false };
+}
+
+export function applyBgColorToSubtree(node: MindMapNode, bgColor?: string): MindMapNode {
+  return {
+    ...node,
+    bgColor: bgColor || undefined,
+    children: (node.children || []).map((c) => applyBgColorToSubtree(c, bgColor)),
+  };
+}
+
+export function applyThemePaletteToTree(
+  root: MindMapNode,
+  themeId: MindMapThemeId,
+  recolorBranches: boolean,
+): MindMapNode {
+  const theme = getMindMapTheme(themeId);
+  const applyBranch = (node: MindMapNode, color: string): MindMapNode => ({
+    ...node,
+    color,
+    bgColor: undefined,
+    children: (node.children || []).map((c) => applyBranch(c, color)),
+  });
+
+  return {
+    ...root,
+    themeId,
+    canvasBg: undefined,
+    bgColor: recolorBranches ? undefined : root.bgColor,
+    color: recolorBranches ? theme.rootColor : root.color,
+    children: recolorBranches
+      ? (root.children || []).map((branch, idx) =>
+          applyBranch(branch, theme.branchPalette[idx % theme.branchPalette.length]),
+        )
+      : root.children,
+  };
+}
 
 export interface MindMapTagMeta {
   id: MindMapNodeTag;
@@ -464,7 +713,20 @@ export function wrapTextLines(text: string, maxCharsPerLine: number, maxLines: n
     }
   }
   if (current) lines.push(current);
-  return lines.slice(0, maxLines);
+  return maxLines > 0 ? lines.slice(0, maxLines) : lines;
+}
+
+function wrapMultilineText(text: string, maxCharsPerLine: number, maxTotalLines: number): string[] {
+  const paragraphs = (text || '').split(/\r?\n/);
+  const allLines: string[] = [];
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+    const wrapped = wrapTextLines(trimmed, maxCharsPerLine, 0);
+    allLines.push(...wrapped);
+    if (maxTotalLines > 0 && allLines.length >= maxTotalLines) break;
+  }
+  return maxTotalLines > 0 ? allLines.slice(0, maxTotalLines) : allLines;
 }
 
 export interface LayoutNode {
@@ -492,29 +754,99 @@ export interface ComputedMindMapLayout {
   rootCenter: { x: number; y: number };
 }
 
+export function hasAnyNodeOffset(root: MindMapNode): boolean {
+  if ((root.offsetX || 0) !== 0 || (root.offsetY || 0) !== 0) return true;
+  return (root.children || []).some((child) => hasAnyNodeOffset(child));
+}
+
+export function countOffsetNodes(root: MindMapNode): number {
+  const self = (root.offsetX || 0) !== 0 || (root.offsetY || 0) !== 0 ? 1 : 0;
+  return self + (root.children || []).reduce((acc, c) => acc + countOffsetNodes(c), 0);
+}
+
+export function resetAllNodeOffsets(root: MindMapNode): MindMapNode {
+  return {
+    ...root,
+    offsetX: undefined,
+    offsetY: undefined,
+    children: (root.children || []).map((child) => resetAllNodeOffsets(child)),
+  };
+}
+
+export function moveNodeOffsetInTree(
+  root: MindMapNode,
+  nodeId: string,
+  dx: number,
+  dy: number,
+  moveSubtree: boolean,
+): MindMapNode {
+  const rdx = Math.round(dx);
+  const rdy = Math.round(dy);
+  if (rdx === 0 && rdy === 0) return root;
+
+  const walk = (n: MindMapNode): MindMapNode => {
+    if (n.id === nodeId) {
+      const nextOffsetX = Math.round((n.offsetX || 0) + rdx);
+      const nextOffsetY = Math.round((n.offsetY || 0) + rdy);
+      const nextChildren = moveSubtree
+        ? n.children
+        : (n.children || []).map((child) => ({
+            ...child,
+            offsetX: Math.round((child.offsetX || 0) - rdx),
+            offsetY: Math.round((child.offsetY || 0) - rdy),
+          }));
+      return {
+        ...n,
+        offsetX: nextOffsetX === 0 ? undefined : nextOffsetX,
+        offsetY: nextOffsetY === 0 ? undefined : nextOffsetY,
+        children: nextChildren,
+      };
+    }
+    if (!n.children || n.children.length === 0) return n;
+    let changed = false;
+    const mapped = n.children.map((c) => {
+      const next = walk(c);
+      if (next !== c) changed = true;
+      return next;
+    });
+    return changed ? { ...n, children: mapped } : n;
+  };
+
+  return walk(root);
+}
+
 function measureNodeBox(node: MindMapNode, depth: number, mode: MindMapLayoutMode) {
   const isRoot = depth === 0;
-  const w = isRoot
-    ? mode === 'vertical'
-      ? 236
-      : 224
-    : mode === 'vertical'
-      ? 196
-      : depth === 1
-        ? 214
-        : 204;
+  const labelLen = (node.label || '').trim().length;
+  const noteLen = (node.note || '').trim().length;
+  const isLongText = labelLen > 65 || noteLen > 85;
 
-  const maxTitleChars = isRoot ? 24 : mode === 'vertical' ? 22 : 25;
-  const maxNoteChars = isRoot ? 28 : mode === 'vertical' ? 25 : 29;
-  const titleLines = wrapTextLines(node.label || 'Sem texto', maxTitleChars, 3);
-  const noteLines = node.note?.trim() ? wrapTextLines(node.note, maxNoteChars, 2) : [];
+  const baseW = isRoot
+    ? mode === 'vertical'
+      ? 248
+      : 236
+    : mode === 'vertical'
+      ? 208
+      : depth === 1
+        ? 224
+        : 214;
+  const w = isLongText ? baseW + 44 : baseW;
+
+  // Conservative char-per-line estimate to guarantee DOM height never exceeds measured height
+  const maxTitleChars = Math.max(18, Math.floor((w - 28) / (isRoot ? 8.2 : 7.5)));
+  const maxNoteChars = Math.max(22, Math.floor((w - 28) / 6.3));
+  const titleLines = wrapMultilineText(node.label || 'Sem texto', maxTitleChars, 18);
+  const noteLines = node.note?.trim() ? wrapMultilineText(node.note, maxNoteChars, 14) : [];
   const hasTag = Boolean(getTagMeta(node.tag));
 
-  const paddingY = isRoot ? 14 : 10;
-  const tagH = hasTag ? 17 : 0;
-  const titleH = Math.max(1, titleLines.length) * (isRoot ? 18 : 16);
-  const noteH = noteLines.length > 0 ? 4 + noteLines.length * 14 : 0;
-  const h = Math.max(isRoot ? 56 : 46, paddingY * 2 + tagH + titleH + noteH);
+  const paddingY = isRoot ? 15 : 11;
+  const tagH = hasTag ? 20 : 0;
+  const titleLineH = isRoot ? 19 : 17.5;
+  const noteLineH = 15;
+  const titleH = Math.max(1, titleLines.length) * titleLineH;
+  const noteH = noteLines.length > 0 ? 6 + noteLines.length * noteLineH : 0;
+  const safetyBuffer = titleLines.length + noteLines.length > 4 ? 10 : 4;
+  const h = Math.ceil(Math.max(isRoot ? 58 : 48, paddingY * 2 + tagH + titleH + noteH + safetyBuffer));
 
   return { w, h, titleLines, noteLines };
 }
@@ -815,8 +1147,29 @@ function computeBilateralLayout(root: MindMapNode): ComputedMindMapLayout {
 function computeVerticalLayout(root: MindMapNode): ComputedMindMapLayout {
   const padX = 48;
   const padY = 44;
-  const gapX = 20;
+  const gapX = 24;
   const gapY = 58;
+
+  // Pre-compute max node height per depth so tall nodes never overlap rows below
+  const maxHeightByDepth = new Map<number, number>();
+  const measureDepths = (node: MindMapNode, depth: number) => {
+    const { h } = measureNodeBox(node, depth, 'vertical');
+    maxHeightByDepth.set(depth, Math.max(maxHeightByDepth.get(depth) || 0, h));
+    if (!node.collapsed) {
+      for (const child of node.children || []) {
+        measureDepths(child, depth + 1);
+      }
+    }
+  };
+  measureDepths(root, 0);
+
+  const depthY = new Map<number, number>();
+  let accY = padY;
+  const maxDepth = Math.max(0, ...Array.from(maxHeightByDepth.keys()));
+  for (let d = 0; d <= maxDepth; d++) {
+    depthY.set(d, accY);
+    accY += (maxHeightByDepth.get(d) || 64) + gapY;
+  }
 
   const nodes: LayoutNode[] = [];
   let cursorX = padX;
@@ -831,9 +1184,7 @@ function computeVerticalLayout(root: MindMapNode): ComputedMindMapLayout {
     const { w, h, titleLines, noteLines } = measureNodeBox(node, depth, 'vertical');
     const visibleChildren = node.collapsed ? [] : node.children || [];
     const hiddenCount = node.collapsed ? countDescendants(node) : 0;
-
-    // Approximate level height spacing (generous so multi-line nodes never overlap vertically)
-    const y = padY + depth * (96 + gapY);
+    const y = depthY.get(depth) ?? padY;
 
     if (visibleChildren.length === 0) {
       const x = cursorX;
@@ -903,6 +1254,74 @@ function computeVerticalLayout(root: MindMapNode): ComputedMindMapLayout {
   return normalizeLayoutBounds(nodes, 'vertical', padX, padY, rootRes.layoutNode);
 }
 
+function applyHierarchicalOffsetsAndReanchor(
+  nodes: LayoutNode[],
+  mode: MindMapLayoutMode,
+  rootNode: LayoutNode,
+) {
+  const byId = new Map<string, LayoutNode>(nodes.map((n) => [n.node.id, n]));
+  const cumulativeCache = new Map<string, { dx: number; dy: number }>();
+
+  const getCumulativeOffset = (id: string): { dx: number; dy: number } => {
+    const cached = cumulativeCache.get(id);
+    if (cached) return cached;
+    const ln = byId.get(id);
+    if (!ln) return { dx: 0, dy: 0 };
+    const parentOff = ln.parentId ? getCumulativeOffset(ln.parentId) : { dx: 0, dy: 0 };
+    const ownDx = Number.isFinite(ln.node.offsetX) ? (ln.node.offsetX as number) : 0;
+    const ownDy = Number.isFinite(ln.node.offsetY) ? (ln.node.offsetY as number) : 0;
+    const combined = { dx: parentOff.dx + ownDx, dy: parentOff.dy + ownDy };
+    cumulativeCache.set(id, combined);
+    return combined;
+  };
+
+  let anyOffset = false;
+  for (const n of nodes) {
+    const off = getCumulativeOffset(n.node.id);
+    if (off.dx !== 0 || off.dy !== 0) {
+      anyOffset = true;
+      n.x += off.dx;
+      n.y += off.dy;
+    }
+  }
+
+  if (!anyOffset) return;
+
+  // Recompute clean edge anchors based on actual post-drag positions
+  for (const n of nodes) {
+    if (!n.parentId) continue;
+    const parent = byId.get(n.parentId);
+    if (!parent) continue;
+
+    if (mode === 'vertical') {
+      const parentCenterY = parent.y + parent.h / 2;
+      const childCenterY = n.y + n.h / 2;
+      if (childCenterY >= parentCenterY) {
+        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y + parent.h };
+        n.edgeTo = { x: n.x + n.w / 2, y: n.y };
+      } else {
+        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y };
+        n.edgeTo = { x: n.x + n.w / 2, y: n.y + n.h };
+      }
+    } else {
+      const parentCenterX = parent.x + parent.w / 2;
+      const childCenterX = n.x + n.w / 2;
+      const isRight = childCenterX >= parentCenterX;
+      n.edgeFrom = {
+        x: isRight ? parent.x + parent.w : parent.x,
+        y: parent.y + parent.h / 2,
+      };
+      n.edgeTo = {
+        x: isRight ? n.x : n.x + n.w,
+        y: n.y + n.h / 2,
+      };
+    }
+  }
+
+  // Keep root reference updated (bounds normalization runs right after)
+  void rootNode;
+}
+
 function normalizeLayoutBounds(
   nodes: LayoutNode[],
   mode: MindMapLayoutMode,
@@ -910,6 +1329,8 @@ function normalizeLayoutBounds(
   padY: number,
   rootNode: LayoutNode,
 ): ComputedMindMapLayout {
+  applyHierarchicalOffsetsAndReanchor(nodes, mode, rootNode);
+
   const minX = Math.min(...nodes.map((n) => n.x));
   const minY = Math.min(...nodes.map((n) => n.y));
   const shiftX = padX - minX;
@@ -948,6 +1369,80 @@ export function computeMindMapLayout(
   if (mode === 'horizontal') return computeHorizontalLayout(root);
   if (mode === 'vertical') return computeVerticalLayout(root);
   return computeBilateralLayout(root);
+}
+
+/**
+ * Applies an active mouse drag preview directly on top of a computed layout
+ * without re-normalizing canvas bounds, preventing any background shift during drag.
+ */
+export function applyLiveDragPreview(
+  baseLayout: ComputedMindMapLayout,
+  drag: { nodeId: string; dx: number; dy: number; moveSubtree: boolean } | null,
+): ComputedMindMapLayout {
+  if (!drag || (drag.dx === 0 && drag.dy === 0)) return baseLayout;
+
+  const movedIds = new Set<string>([drag.nodeId]);
+  if (drag.moveSubtree) {
+    // Collect all descendants present in the layout
+    let expanded = true;
+    while (expanded) {
+      expanded = false;
+      for (const n of baseLayout.nodes) {
+        if (n.parentId && movedIds.has(n.parentId) && !movedIds.has(n.node.id)) {
+          movedIds.add(n.node.id);
+          expanded = true;
+        }
+      }
+    }
+  }
+
+  const clonedNodes: LayoutNode[] = baseLayout.nodes.map((n) => {
+    const isMoved = movedIds.has(n.node.id);
+    return {
+      ...n,
+      x: isMoved ? n.x + drag.dx : n.x,
+      y: isMoved ? n.y + drag.dy : n.y,
+      edgeFrom: n.edgeFrom ? { ...n.edgeFrom } : undefined,
+      edgeTo: n.edgeTo ? { ...n.edgeTo } : undefined,
+    };
+  });
+
+  const byId = new Map<string, LayoutNode>(clonedNodes.map((n) => [n.node.id, n]));
+  for (const n of clonedNodes) {
+    if (!n.parentId) continue;
+    const parent = byId.get(n.parentId);
+    if (!parent) continue;
+    if (!movedIds.has(n.node.id) && !movedIds.has(parent.node.id)) continue;
+
+    if (baseLayout.mode === 'vertical') {
+      const parentCenterY = parent.y + parent.h / 2;
+      const childCenterY = n.y + n.h / 2;
+      if (childCenterY >= parentCenterY) {
+        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y + parent.h };
+        n.edgeTo = { x: n.x + n.w / 2, y: n.y };
+      } else {
+        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y };
+        n.edgeTo = { x: n.x + n.w / 2, y: n.y + n.h };
+      }
+    } else {
+      const parentCenterX = parent.x + parent.w / 2;
+      const childCenterX = n.x + n.w / 2;
+      const isRight = childCenterX >= parentCenterX;
+      n.edgeFrom = {
+        x: isRight ? parent.x + parent.w : parent.x,
+        y: parent.y + parent.h / 2,
+      };
+      n.edgeTo = {
+        x: isRight ? n.x : n.x + n.w,
+        y: n.y + n.h / 2,
+      };
+    }
+  }
+
+  return {
+    ...baseLayout,
+    nodes: clonedNodes,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,14 +1498,30 @@ function escapeXml(str: string): string {
     .replace(/'/g, '&apos;');
 }
 
+export interface MindMapVisualExportOptions {
+  themeId?: MindMapThemeId;
+  canvasBg?: string;
+}
+
 export function buildStandaloneMindMapSvg(
   layout: ComputedMindMapLayout,
   edgeStyle: MindMapEdgeStyle,
   title: string,
+  visualOptions?: MindMapVisualExportOptions,
 ): string {
   const headerH = 44;
   const totalW = layout.width;
   const totalH = layout.height + headerH;
+  const theme = getMindMapTheme(visualOptions?.themeId);
+  const resolvedCanvasBg = visualOptions?.canvasBg || theme.exportCanvasBg;
+  const canvasIsDark = isHexColorDark(resolvedCanvasBg);
+  const resolvedDotColor = visualOptions?.canvasBg
+    ? canvasIsDark
+      ? '#334155'
+      : '#CBD5E1'
+    : theme.useSystemVars
+      ? '#CBD5E1'
+      : theme.dotColor;
 
   const paths = layout.nodes
     .map((n) => {
@@ -1018,7 +1529,7 @@ export function buildStandaloneMindMapSvg(
       if (!d || !n.edgeTo) return '';
       const strokeW = n.depth === 1 ? 2.4 : 1.8;
       return `
-        <path d="${d}" fill="none" stroke="${n.color}" stroke-width="${strokeW}" stroke-opacity="0.72" stroke-linecap="round" />
+        <path d="${d}" fill="none" stroke="${n.color}" stroke-width="${strokeW}" stroke-opacity="0.78" stroke-linecap="round" />
         <circle cx="${n.edgeTo.x}" cy="${n.edgeTo.y}" r="3" fill="${n.color}" />
       `;
     })
@@ -1029,17 +1540,27 @@ export function buildStandaloneMindMapSvg(
       const isRoot = n.depth === 0;
       const isBranch = n.depth === 1;
       const tagMeta = getTagMeta(n.node.tag);
-      const fill = isRoot ? n.color : isBranch ? '#FFFFFF' : '#FFFFFF';
-      const textFill = isRoot ? '#FFFFFF' : '#0F172A';
-      const noteFill = isRoot ? '#E2E8F0' : '#475569';
+      const customBg = n.node.bgColor?.trim();
+      const fill = customBg || (isRoot ? n.color : theme.exportCardBg);
+      const readable = customBg
+        ? getReadableTextOnHex(customBg)
+        : isRoot
+          ? getReadableTextOnHex(n.color)
+          : {
+              text: theme.exportTextColor,
+              note: theme.exportNoteColor,
+              isDark: theme.isDark,
+            };
+      const textFill = readable.text;
+      const noteFill = readable.isDark ? '#CBD5E1' : readable.note;
       const rx = isRoot ? 14 : 10;
       const padX = 12;
       let cursorY = n.y + (isRoot ? 14 : 10);
 
       let tagSvg = '';
       if (tagMeta) {
-        const tagFill = isRoot ? 'rgba(255,255,255,0.2)' : tagMeta.bg;
-        const tagTextFill = isRoot ? '#FFFFFF' : tagMeta.color;
+        const tagFill = readable.isDark ? 'rgba(255,255,255,0.16)' : tagMeta.bg;
+        const tagTextFill = readable.isDark ? '#FFFFFF' : tagMeta.color;
         const tagW = Math.max(46, tagMeta.short.length * 6.5 + 12);
         tagSvg = `
           <rect x="${n.x + padX}" y="${cursorY - 2}" width="${tagW}" height="15" rx="4" fill="${tagFill}" />
@@ -1080,13 +1601,13 @@ export function buildStandaloneMindMapSvg(
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH}" viewBox="0 0 ${totalW} ${totalH}">
     <defs>
       <pattern id="mm-dot-grid" width="22" height="22" patternUnits="userSpaceOnUse">
-        <circle cx="2" cy="2" r="1" fill="#CBD5E1" fill-opacity="0.55" />
+        <circle cx="2" cy="2" r="1" fill="${resolvedDotColor}" fill-opacity="0.55" />
       </pattern>
     </defs>
-    <rect width="100%" height="100%" fill="#F8FAFC" />
+    <rect width="100%" height="100%" fill="${resolvedCanvasBg}" />
     <rect y="${headerH}" width="100%" height="${layout.height}" fill="url(#mm-dot-grid)" />
-    <rect width="100%" height="${headerH}" fill="#071D41" />
-    <rect y="${headerH - 2}" width="100%" height="2" fill="#FFCD07" />
+    <rect width="100%" height="${headerH}" fill="${theme.headerBg}" />
+    <rect y="${headerH - 2}" width="100%" height="2" fill="${theme.headerAccent}" />
     <text x="20" y="27" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">${safeTitle}</text>
     <text x="${totalW - 20}" y="26" text-anchor="end" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" fill="#CBD5E1">${safeDate}</text>
     <g transform="translate(0, ${headerH})">
@@ -1100,8 +1621,9 @@ export function exportMindMapSvgFile(
   layout: ComputedMindMapLayout,
   edgeStyle: MindMapEdgeStyle,
   title: string,
+  visualOptions?: MindMapVisualExportOptions,
 ): void {
-  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title);
+  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, visualOptions);
   const blob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
   const slug = cleanSafeName(title, 'mapa_mental').replace(/\s+/g, '_');
   triggerBlobDownload(blob, `${slug}_${localDateIso()}.svg`);
@@ -1112,6 +1634,7 @@ function renderSvgToDataUrl(
   width: number,
   height: number,
   scale = 2,
+  bgColor = '#F8FAFC',
 ): Promise<{ blob: Blob; dataUrl: string }> {
   return new Promise((resolve, reject) => {
     const svgBlob = new Blob([svgString], { type: 'image/svg+xml;charset=utf-8' });
@@ -1128,7 +1651,7 @@ function renderSvgToDataUrl(
         return;
       }
       ctx.scale(scale, scale);
-      ctx.fillStyle = '#F8FAFC';
+      ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0);
       const dataUrl = canvas.toDataURL('image/png');
@@ -1153,9 +1676,18 @@ export async function exportMindMapPngFile(
   layout: ComputedMindMapLayout,
   edgeStyle: MindMapEdgeStyle,
   title: string,
+  visualOptions?: MindMapVisualExportOptions,
 ): Promise<void> {
-  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title);
-  const { blob } = await renderSvgToDataUrl(svgString, layout.width, layout.height + 44, 2);
+  const theme = getMindMapTheme(visualOptions?.themeId);
+  const resolvedCanvasBg = visualOptions?.canvasBg || theme.exportCanvasBg;
+  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, visualOptions);
+  const { blob } = await renderSvgToDataUrl(
+    svgString,
+    layout.width,
+    layout.height + 44,
+    2,
+    resolvedCanvasBg,
+  );
   const slug = cleanSafeName(title, 'mapa_mental').replace(/\s+/g, '_');
   triggerBlobDownload(blob, `${slug}_${localDateIso()}.png`);
 }
@@ -1165,11 +1697,14 @@ export async function exportMindMapVisualPdfFile(
   edgeStyle: MindMapEdgeStyle,
   title: string,
   subjectLabel: string,
+  visualOptions?: MindMapVisualExportOptions,
 ): Promise<void> {
-  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title);
+  const theme = getMindMapTheme(visualOptions?.themeId);
+  const resolvedCanvasBg = visualOptions?.canvasBg || theme.exportCanvasBg;
+  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, visualOptions);
   const svgW = layout.width;
   const svgH = layout.height + 44;
-  const { dataUrl } = await renderSvgToDataUrl(svgString, svgW, svgH, 2);
+  const { dataUrl } = await renderSvgToDataUrl(svgString, svgW, svgH, 2, resolvedCanvasBg);
 
   const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();

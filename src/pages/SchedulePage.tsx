@@ -13,6 +13,7 @@ import {
   FileText,
   FileUp,
   FolderOpen,
+  Link2,
   Play,
   Plus,
   Printer,
@@ -33,6 +34,7 @@ import {
   goalDateIso,
   inferFixedSubjectFromTopic,
   isoWeekInputValue,
+  isoWeekStartDate,
   localDateBrazilian,
   localDateIso,
   scheduleDurationSeconds,
@@ -43,6 +45,8 @@ import { ScheduleMap, ScheduleTopic, WeekdayName, WeeklyScheduleFileRecord } fro
 import { PageHeader, Panel } from '../components/ui/PageHeader';
 import { ScheduleOfficialPrintSheet } from '../components/schedule/ScheduleOfficialPrintSheet';
 import { DynamicStudyCyclePanel } from '../components/schedule/DynamicStudyCyclePanel';
+import { WeeklySubjectGoalsPanel } from '../components/schedule/WeeklySubjectGoalsPanel';
+import { WeeklyCloseWizardModal } from '../components/schedule/WeeklyCloseWizardModal';
 import { useStudyTimer } from '../lib/timerTickStore';
 
 const ScheduleBannerTimerActions: React.FC<{
@@ -120,7 +124,7 @@ export const SchedulePage: React.FC = () => {
     moveScheduleTopicToDay,
     completeScheduleTopic,
     archiveTopicAsIncomplete,
-    archiveFullWeek,
+    executeGuidedWeeklyClose,
     fixedSubjects,
     addFixedSubject,
     removeFixedSubject,
@@ -164,6 +168,7 @@ export const SchedulePage: React.FC = () => {
   }, [db.weeklySchedules, db.schedule, activeWeekMeta]);
   const [showFolderPanel, setShowFolderPanel] = useState(true);
   const [showFixedSubjectsPanel, setShowFixedSubjectsPanel] = useState(true);
+  const [showCloseWeekWizard, setShowCloseWeekWizard] = useState(false);
   const [newFixedSubjectInput, setNewFixedSubjectInput] = useState('');
   const [defaultContestInput, setDefaultContestInput] = useState<string>(() => {
     for (const d of WEEKDAYS) {
@@ -439,23 +444,9 @@ export const SchedulePage: React.FC = () => {
     toast(`Edital "${clean}" vinculado aos tópicos da semana!`);
   };
 
-  const handleCloseWeek = async () => {
-    const ok = await requestConfirm({
-      title: 'Fechar semana do cronograma',
-      description:
-        'Deseja mover todos os tópicos ainda pendentes da semana para Metas Não Concluídas e limpar a grade semanal?',
-      confirmLabel: 'Arquivar semana inteira',
-    });
-    if (!ok) return;
-    WEEKDAYS.forEach((d) => {
-      clearDayTopicDrafts(draftRef.current[d] || []);
-    });
-    const count = archiveFullWeek(draftRef.current);
-    if (count === 0) {
-      toast('Nenhum tópico pendente preenchido na semana para arquivar.', true);
-    } else {
-      toast(`${count} tópico(s) arquivado(s) em Metas Não Concluídas.`);
-    }
+  const handleCloseWeek = () => {
+    flushAllDirtyDays();
+    setShowCloseWeekWizard(true);
   };
 
   const resolvedPrintDayDates = useMemo(() => {
@@ -596,6 +587,9 @@ export const SchedulePage: React.FC = () => {
 
       {/* Ciclo de Estudos Dinâmico (Rotação Automática de Matérias) */}
       <DynamicStudyCyclePanel />
+
+      {/* Metas de Carga Horária Semanal por Matéria (Planejado x Realizado) */}
+      <WeeklySubjectGoalsPanel />
 
       {/* Painel de Matérias Fixadas e Concurso/Edital Alvo */}
       <Panel className="mb-3 p-0 overflow-hidden">
@@ -1318,9 +1312,16 @@ export const SchedulePage: React.FC = () => {
                               pendingManualCreditSec > 0 ||
                               hasInvalidManualTempo ||
                               isLinked ||
-                              isCustomDate) && (
+                              isCustomDate ||
+                              Boolean(topic.editalPointId)) && (
                               <div className="mt-2 pt-1.5 border-t border-[var(--line)]/60 flex flex-wrap items-center justify-between gap-2 text-[11px]">
                                 <div className="flex flex-wrap items-center gap-2 text-[var(--muted)]">
+                                  {topic.editalPointId && (
+                                    <span className="inline-flex items-center gap-1 font-bold text-[var(--good)]">
+                                      <Link2 className="w-3 h-3" />
+                                      Sincronizado c/ Edital (marca como estudado ao concluir)
+                                    </span>
+                                  )}
                                   {isCustomDate && (
                                     <span className="inline-flex items-center gap-1.5 text-[var(--accent)] font-semibold">
                                       Data individual ({topic.data})
@@ -1434,6 +1435,32 @@ export const SchedulePage: React.FC = () => {
         fixedSubjects={fixedSubjects}
         holderName={googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal'}
       />
+
+      {showCloseWeekWizard && (() => {
+        const mondayBr = activeWeekMeta.dayDates['Segunda-feira'] || activeWeekDates['Segunda-feira'] || todayBr;
+        const sundayBr = activeWeekMeta.dayDates['Domingo'] || activeWeekDates['Domingo'] || todayBr;
+        const weekMondayIso = isoWeekStartDate(goalDateIso(mondayBr) || localDateIso());
+        return (
+          <WeeklyCloseWizardModal
+            weekKey={activeWeekMeta.weekKey}
+            weekLabel={activeWeekMeta.label}
+            weekMondayIso={weekMondayIso}
+            periodLabel={`${mondayBr} a ${sundayBr}`}
+            currentSchedule={draft}
+            completedGoals={db.completedGoals}
+            initialWeeklyNote={db.weeklyGoalNotes?.[weekMondayIso] || ''}
+            studentName={googleUser?.displayName || googleUser?.email || undefined}
+            onClose={() => setShowCloseWeekWizard(false)}
+            onConfirmClose={(params) => {
+              WEEKDAYS.forEach((d) => {
+                clearDayTopicDrafts(draftRef.current[d] || []);
+              });
+              executeGuidedWeeklyClose(params);
+              setShowCloseWeekWizard(false);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 };

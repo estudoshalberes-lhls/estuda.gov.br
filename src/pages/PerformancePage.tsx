@@ -48,9 +48,7 @@ import {
   SubjectAccuracyEvolutionD3Chart,
   WeeklyStudyHoursD3Chart,
 } from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
-import { CareerAchievementsBanner } from '../components/performance/CareerAchievementsBanner';
-import { CareerOfficialPrintSheet } from '../components/print/CareerOfficialPrintSheet';
-import { MAX_PINNED_MEDALS, computeCareerSummary } from '../lib/careerGamification';
+import { computeCareerSummary } from '../lib/careerGamification';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
 
@@ -277,41 +275,6 @@ export const PerformancePage: React.FC = () => {
   }, [db.completedGoals, db.studyTimeRecords]);
 
   const careerSummary = useMemo(() => computeCareerSummary(db), [db]);
-  const pinnedMedalIds = db.preferences?.career_meta?.pinned_medals || [];
-  const holderName =
-    googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal';
-
-  const handleTogglePinMedal = useCallback(
-    (medalId: string) => {
-      const meta = db.preferences?.career_meta || {};
-      const current = Array.isArray(meta.pinned_medals) ? meta.pinned_medals : [];
-      if (current.includes(medalId)) {
-        updatePreferences({
-          career_meta: {
-            ...meta,
-            pinned_medals: current.filter((id) => id !== medalId),
-          },
-        });
-        toast('Medalha removida da Vitrine de Honra.');
-        return;
-      }
-      if (current.length >= MAX_PINNED_MEDALS) {
-        toast(
-          `Limite de ${MAX_PINNED_MEDALS} medalhas na Vitrine de Honra. Desafixe uma antes de adicionar outra.`,
-          true,
-        );
-        return;
-      }
-      updatePreferences({
-        career_meta: {
-          ...meta,
-          pinned_medals: [...current, medalId],
-        },
-      });
-      toast('Medalha fixada na Vitrine de Honra (visível na tela inicial e na Certidão PDF).');
-    },
-    [db.preferences?.career_meta, toast, updatePreferences],
-  );
 
   const [subjectFilter, setSubjectFilter] = useState('Todas');
   const [historySearch, setHistorySearch] = useState('');
@@ -1139,14 +1102,57 @@ export const PerformancePage: React.FC = () => {
         </div>
       )}
 
-      {/* Níveis de Carreira e Medalhas de Mérito */}
-      <CareerAchievementsBanner
-        db={db}
-        onNavigate={setActivePage}
-        onPrintOfficial={() => window.print()}
-        pinnedMedalIds={pinnedMedalIds}
-        onTogglePinMedal={handleTogglePinMedal}
-      />
+      {/* Resumo compacto com acesso direto à aba dedicada Carreira & Medalhas */}
+      <section
+        aria-label="Resumo da Carreira do Concurseiro"
+        className="ce-panel rounded-xl px-4 py-3 mb-4 flex flex-wrap items-center justify-between gap-3"
+      >
+        <div className="flex items-center gap-3 min-w-0 flex-1">
+          <div className="w-10 h-10 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] grid place-items-center shrink-0">
+            <Award className="w-5 h-5 text-[var(--accent)]" aria-hidden="true" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px]">
+              <span className="font-mono-num font-extrabold text-[var(--accent)]">
+                Nível {careerSummary.currentLevel.level}/{careerSummary.allLevels.length}
+              </span>
+              <span className="text-[var(--muted)]" aria-hidden="true">·</span>
+              <strong className="text-[var(--text)] truncate">
+                {careerSummary.currentLevel.title}
+              </strong>
+              <span className="text-[var(--muted)]" aria-hidden="true">·</span>
+              <span className="font-mono-num font-bold text-[var(--text)]">
+                {careerSummary.totalXp.toLocaleString('pt-BR')} XP
+              </span>
+              <span className="text-[var(--muted)]" aria-hidden="true">·</span>
+              <span className="font-mono-num text-[var(--muted)]">
+                {careerSummary.unlockedMedalsCount}/{careerSummary.medals.length} medalhas
+              </span>
+            </div>
+            <div className="mt-1.5 max-w-[420px] flex items-center gap-2">
+              <div className="h-1.5 flex-1 rounded-full bg-[var(--panel-soft)] border border-[var(--line)] overflow-hidden">
+                <div
+                  className="h-full rounded-full bg-[var(--accent)] transition-all"
+                  style={{ width: `${Math.max(3, careerSummary.levelProgressPct)}%` }}
+                />
+              </div>
+              <span className="font-mono-num text-[10.5px] font-bold text-[var(--muted)] shrink-0">
+                {careerSummary.nextLevel
+                  ? `faltam ${careerSummary.xpRemaining.toLocaleString('pt-BR')} XP p/ Nv. ${careerSummary.nextLevel.level}`
+                  : 'Nível 100 alcançado'}
+              </span>
+            </div>
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={() => setActivePage('Carreira & Mérito')}
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[12px] font-bold whitespace-nowrap transition-colors cursor-pointer"
+        >
+          <Award className="w-3.5 h-3.5" />
+          Abrir Carreira &amp; Medalhas
+        </button>
+      </section>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
         <article className="ce-panel p-4">
@@ -1802,8 +1808,6 @@ export const PerformancePage: React.FC = () => {
         )}
       </Panel>
     </div>
-
-    <CareerOfficialPrintSheet summary={careerSummary} holderName={holderName} />
     </>
   );
 };

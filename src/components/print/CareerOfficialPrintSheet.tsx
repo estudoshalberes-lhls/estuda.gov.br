@@ -91,10 +91,10 @@ export const CareerOfficialPrintSheet: React.FC<CareerOfficialPrintSheetProps> =
           </div>
           <div className="px-3 py-1.5">
             <div className="text-[7pt] font-bold uppercase tracking-[0.06em] text-[#3D4F6B]">
-              Condecorações
+              Marcos &amp; Condecorações
             </div>
             <div className="font-bold text-[#071D41] mt-0.5 leading-tight font-mono">
-              {summary.unlockedMedalsCount} / {summary.medals.length} medalhas
+              {summary.completedMilestonesCount}/100 marcos · {summary.unlockedMedalsCount}/{summary.medals.length} medalhas
             </div>
           </div>
         </div>

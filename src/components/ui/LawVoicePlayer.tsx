@@ -693,11 +693,17 @@ export function useLawVoiceReader(options: {
 
             if (isUnavailable && isBrowserSpeechSupported) {
               // Automatically and seamlessly continue playback with the fluid Browser Voice
-              const statusNote = err?.status ? ` (HTTP ${err.status})` : '';
+              const statusNote = err?.status ? `HTTP ${err.status}` : '';
+              const serverDetail =
+                typeof err?.message === 'string' && err.message.trim()
+                  ? err.message.trim()
+                  : statusNote
+                    ? `erro ${statusNote}`
+                    : 'servidor indisponível';
               prefsRef.current = { ...prefsRef.current, engine: 'browser' };
               setPrefs((prev) => ({ ...prev, engine: 'browser' }));
               setErrorMessage(
-                `Voz Neural indisponível neste servidor${statusNote}. Leitura continuada automaticamente com Voz Fluida do Navegador.`,
+                `Voz Neural indisponível (${serverDetail}). Leitura continuada automaticamente com Voz Fluida do Navegador.`,
               );
               window.setTimeout(() => {
                 speakAtIndex(index, 0);

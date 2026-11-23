@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   ArrowDown,
   ArrowUp,
+  Check,
   ChevronDown,
   ChevronRight,
   Clock,
@@ -13,12 +14,15 @@ import {
   Focus,
   Gavel,
   GitBranch,
+  GripVertical,
   Keyboard,
   LayoutGrid,
   Lightbulb,
   Maximize2,
   Minimize2,
+  Move,
   Network,
+  PaintBucket,
   Palette,
   Plus,
   Redo2,
@@ -42,17 +46,25 @@ import {
   MindMapLayoutMode,
   MindMapNode,
   MindMapNodeTag,
+  MindMapThemeId,
   SummaryFile,
 } from '../../types/study';
 import { flattenMindMapToOutline, getSummaryDisplayTitle } from '../../lib/summaryPdfExport';
 import {
+  MINDMAP_CANVAS_BG_COLORS,
   MINDMAP_COLORS,
+  MINDMAP_NODE_BG_COLORS,
   MINDMAP_TAGS,
   MINDMAP_TEMPLATES,
+  MINDMAP_THEMES,
+  applyBgColorToSubtree,
   applyColorToSubtree,
+  applyLiveDragPreview,
+  applyThemePaletteToTree,
   buildEdgePath,
   cloneSubtreeWithNewIds,
   computeMindMapLayout,
+  countOffsetNodes,
   createDefaultMindMap,
   deleteNodeFromTree,
   exportMindMapPngFile,
@@ -60,12 +72,17 @@ import {
   exportMindMapVisualPdfFile,
   findNode,
   findParentOf,
+  getMindMapTheme,
   getNodeBreadcrumb,
+  getReadableTextOnHex,
   getTagMeta,
   getTreeMetrics,
   insertSiblingInTree,
+  isHexColorDark,
   makeNodeId,
+  moveNodeOffsetInTree,
   moveSiblingInTree,
+  resetAllNodeOffsets,
   searchMatchingNodeIds,
   setAllNodesCollapsed,
   updateNodeInTree,
@@ -147,14 +164,44 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   const viewportRef = useRef<HTMLDivElement | null>(null);
   const inlineInputRef = useRef<HTMLInputElement | null>(null);
 
+  // Node drag-and-drop state (move groups + subgroups freely with the mouse)
+  const [dragMoveSubtree, setDragMoveSubtree] = useState<boolean>(true);
+  const [dragPreview, setDragPreview] = useState<{
+    nodeId: string;
+    dx: number;
+    dy: number;
+    moveSubtree: boolean;
+  } | null>(null);
+  const nodeDragRef = useRef<{
+    nodeId: string;
+    startClientX: number;
+    startClientY: number;
+    dx: number;
+    dy: number;
+    moved: boolean;
+    moveSubtree: boolean;
+  } | null>(null);
+  const suppressNextNodeClickRef = useRef<boolean>(false);
+
   // UI popovers & modes
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showTemplatesMenu, setShowTemplatesMenu] = useState(false);
+  const [showThemesMenu, setShowThemesMenu] = useState(false);
+  const [applyThemeBranchColors, setApplyThemeBranchColors] = useState(true);
   const [showExportMenu, setShowExportMenu] = useState(false);
   const [showShortcuts, setShowShortcuts] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
+
+  const activeTheme = useMemo(() => getMindMapTheme(tree.themeId), [tree.themeId]);
+  const resolvedCanvasBg = tree.canvasBg || activeTheme.canvasBg;
+  const resolvedCanvasDotColor = useMemo(() => {
+    if (tree.canvasBg) {
+      return isHexColorDark(tree.canvasBg) ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.16)';
+    }
+    return activeTheme.dotColor;
+  }, [activeTheme.dotColor, tree.canvasBg]);
 
   // Sync when switching to another saved map or AI-generated map
   useEffect(() => {
@@ -166,6 +213,8 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
       setMapTitle(initialTitle || initialTree.label || `Mapa Mental — ${subjectLabel}`);
       setSelectedId(initialTree.id);
       setInlineEditingId(null);
+      setDragPreview(null);
+      nodeDragRef.current = null;
       setPast([]);
       setFuture([]);
       setDirty(false);
@@ -180,7 +229,12 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     }
   }, [inlineEditingId]);
 
-  const layout = useMemo(() => computeMindMapLayout(tree, layoutMode), [tree, layoutMode]);
+  const baseLayout = useMemo(() => computeMindMapLayout(tree, layoutMode), [tree, layoutMode]);
+  const layout = useMemo(
+    () => applyLiveDragPreview(baseLayout, dragPreview),
+    [baseLayout, dragPreview],
+  );
+  const movedNodesCount = useMemo(() => countOffsetNodes(tree), [tree]);
   const selectedNode = useMemo(() => findNode(tree, selectedId) || tree, [tree, selectedId]);
   const selectedParentInfo = useMemo(
     () => (selectedNode.id === tree.id ? null : findParentOf(tree, selectedNode.id)),
@@ -410,9 +464,40 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   const handlePropagateColor = useCallback(
     (nodeId: string, color: string) => {
       commitTree((prev) => updateNodeInTree(prev, nodeId, (n) => applyColorToSubtree(n, color)));
-      onNotify('Cor aplicada ao ramo e a todos os subtópicos.');
+      onNotify('Cor do ramo aplicada ao grupo e a todos os subtópicos.');
     },
     [commitTree, onNotify],
+  );
+
+  const handlePropagateBgColor = useCallback(
+    (nodeId: string, bgColor?: string) => {
+      commitTree((prev) => updateNodeInTree(prev, nodeId, (n) => applyBgColorToSubtree(n, bgColor)));
+      onNotify(
+        bgColor
+          ? 'Cor de fundo aplicada à célula e a todos os subtópicos.'
+          : 'Fundo padrão do tema restaurado para este grupo e subtópicos.',
+      );
+    },
+    [commitTree, onNotify],
+  );
+
+  const handleSelectTheme = useCallback(
+    (themeId: MindMapThemeId) => {
+      const themeSpec = getMindMapTheme(themeId);
+      commitTree((prev) => applyThemePaletteToTree(prev, themeId, applyThemeBranchColors));
+      onNotify(`Tema "${themeSpec.name}" aplicado ao mapa mental.`);
+    },
+    [applyThemeBranchColors, commitTree, onNotify],
+  );
+
+  const handleCanvasBgChange = useCallback(
+    (canvasBg?: string) => {
+      commitTree((prev) => ({
+        ...prev,
+        canvasBg: canvasBg || undefined,
+      }));
+    },
+    [commitTree],
   );
 
   const handleApplyTemplate = (templateId: string) => {
@@ -507,6 +592,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
           return;
         }
         if (showTemplatesMenu) setShowTemplatesMenu(false);
+        if (showThemesMenu) setShowThemesMenu(false);
         if (showExportMenu) setShowExportMenu(false);
         if (isFullscreen) setIsFullscreen(false);
         return;
@@ -566,9 +652,114 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     selectedParentInfo,
     showExportMenu,
     showTemplatesMenu,
+    showThemesMenu,
     startInlineEdit,
     tree.id,
   ]);
+
+  // Mouse drag-and-drop for moving groups and subgroups freely across the canvas
+  const handleNodeMouseDown = (e: React.MouseEvent<HTMLDivElement>, nodeId: string) => {
+    if (e.button !== 0) return;
+    if (inlineEditingId === nodeId) return;
+    const target = e.target as HTMLElement;
+    if (target.closest('button') || target.closest('input') || target.closest('textarea')) {
+      return;
+    }
+    e.stopPropagation();
+    setShowTemplatesMenu(false);
+    setShowThemesMenu(false);
+    setShowExportMenu(false);
+
+    // Holding Alt temporarily inverts subtree/single-cell drag mode
+    const effectiveMoveSubtree = e.altKey ? !dragMoveSubtree : dragMoveSubtree;
+    nodeDragRef.current = {
+      nodeId,
+      startClientX: e.clientX,
+      startClientY: e.clientY,
+      dx: 0,
+      dy: 0,
+      moved: false,
+      moveSubtree: effectiveMoveSubtree,
+    };
+  };
+
+  useEffect(() => {
+    const onWindowMouseMove = (e: MouseEvent) => {
+      const active = nodeDragRef.current;
+      if (!active) return;
+      const rawDx = e.clientX - active.startClientX;
+      const rawDy = e.clientY - active.startClientY;
+      if (!active.moved && Math.hypot(rawDx, rawDy) < 4) return;
+      active.moved = true;
+      const scaledDx = Math.round(rawDx / Math.max(0.25, zoom));
+      const scaledDy = Math.round(rawDy / Math.max(0.25, zoom));
+      active.dx = scaledDx;
+      active.dy = scaledDy;
+      setDragPreview({
+        nodeId: active.nodeId,
+        dx: scaledDx,
+        dy: scaledDy,
+        moveSubtree: active.moveSubtree,
+      });
+    };
+
+    const onWindowMouseUp = () => {
+      const active = nodeDragRef.current;
+      if (!active) return;
+      nodeDragRef.current = null;
+
+      if (active.moved && (active.dx !== 0 || active.dy !== 0)) {
+        suppressNextNodeClickRef.current = true;
+        const oldNodePos = baseLayout.nodes.find((n) => n.node.id === active.nodeId);
+        const nextTree = moveNodeOffsetInTree(
+          tree,
+          active.nodeId,
+          active.dx,
+          active.dy,
+          active.moveSubtree,
+        );
+        // Compensate pan if normalized canvas origin shifted, preventing any visual jump on drop
+        if (oldNodePos) {
+          const nextLayout = computeMindMapLayout(nextTree, layoutMode);
+          const newNodePos = nextLayout.nodes.find((n) => n.node.id === active.nodeId);
+          if (newNodePos) {
+            const expectedX = oldNodePos.x + active.dx;
+            const expectedY = oldNodePos.y + active.dy;
+            const shiftX = newNodePos.x - expectedX;
+            const shiftY = newNodePos.y - expectedY;
+            if (shiftX !== 0 || shiftY !== 0) {
+              setPan((p) => ({
+                x: Math.round(p.x - shiftX * zoom),
+                y: Math.round(p.y - shiftY * zoom),
+              }));
+            }
+          }
+        }
+        commitTree(nextTree);
+        setSelectedId(active.nodeId);
+      }
+      setDragPreview(null);
+    };
+
+    window.addEventListener('mousemove', onWindowMouseMove);
+    window.addEventListener('mouseup', onWindowMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onWindowMouseMove);
+      window.removeEventListener('mouseup', onWindowMouseUp);
+    };
+  }, [baseLayout.nodes, commitTree, layoutMode, tree, zoom]);
+
+  const handleResetAllPositions = () => {
+    if (movedNodesCount === 0) return;
+    commitTree((prev) => resetAllNodeOffsets(prev));
+    onNotify('Posições de todos os grupos e subgrupos realinhadas ao layout automático.');
+  };
+
+  const handleResetSelectedNodePosition = () => {
+    if ((selectedNode.offsetX || 0) === 0 && (selectedNode.offsetY || 0) === 0) return;
+    handleUpdateNode(selectedNode.id, { offsetX: undefined, offsetY: undefined }, true);
+    onNotify(`Posição de "${selectedNode.label}" restaurada.`);
+  };
 
   // Canvas pointer pan & wheel zoom
   const handleCanvasMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -579,6 +770,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
       return;
     }
     setShowTemplatesMenu(false);
+    setShowThemesMenu(false);
     setShowExportMenu(false);
     setIsPanning(true);
     panStartRef.current = {
@@ -612,12 +804,20 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     }
   };
 
+  const exportVisualOptions = useMemo(
+    () => ({
+      themeId: tree.themeId,
+      canvasBg: tree.canvasBg,
+    }),
+    [tree.canvasBg, tree.themeId],
+  );
+
   // Exports
   const handleExportPng = async () => {
     setShowExportMenu(false);
     setExporting(true);
     try {
-      await exportMindMapPngFile(layout, edgeStyle, mapTitle || tree.label);
+      await exportMindMapPngFile(layout, edgeStyle, mapTitle || tree.label, exportVisualOptions);
       onNotify('Imagem PNG em alta resolução baixada.');
     } catch (err) {
       onNotify((err as Error).message, true);
@@ -630,7 +830,13 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     setShowExportMenu(false);
     setExporting(true);
     try {
-      await exportMindMapVisualPdfFile(layout, edgeStyle, mapTitle || tree.label, subjectLabel);
+      await exportMindMapVisualPdfFile(
+        layout,
+        edgeStyle,
+        mapTitle || tree.label,
+        subjectLabel,
+        exportVisualOptions,
+      );
       onNotify('PDF Visual (A4 Paisagem) do mapa mental baixado.');
     } catch (err) {
       onNotify((err as Error).message, true);
@@ -641,7 +847,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
 
   const handleExportSvg = () => {
     setShowExportMenu(false);
-    exportMindMapSvgFile(layout, edgeStyle, mapTitle || tree.label);
+    exportMindMapSvgFile(layout, edgeStyle, mapTitle || tree.label, exportVisualOptions);
     onNotify('Arquivo SVG vetorial baixado.');
   };
 
@@ -811,6 +1017,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
               type="button"
               onClick={() => {
                 setShowTemplatesMenu((v) => !v);
+                setShowThemesMenu(false);
                 setShowExportMenu(false);
               }}
               className="inline-flex items-center gap-1.5 h-[36px] px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
@@ -838,6 +1045,156 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                     </div>
                   </button>
                 ))}
+              </div>
+            )}
+          </div>
+
+          {/* Standardized Themes & Canvas Background Picker */}
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => {
+                setShowThemesMenu((v) => !v);
+                setShowTemplatesMenu(false);
+                setShowExportMenu(false);
+              }}
+              className={`inline-flex items-center gap-1.5 h-[36px] px-2.5 rounded-lg border text-[11.5px] font-bold whitespace-nowrap transition-colors ${
+                showThemesMenu || (tree.themeId && tree.themeId !== 'padrao') || tree.canvasBg
+                  ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                  : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+              }`}
+            >
+              <Palette className="w-3.5 h-3.5 text-[var(--accent)]" />
+              <span>Temas</span>
+              <ChevronDown className="w-3 h-3 text-[var(--muted)]" />
+            </button>
+
+            {showThemesMenu && (
+              <div className="absolute right-0 mt-1.5 w-[328px] max-h-[480px] overflow-y-auto rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] shadow-xl p-2.5 z-40">
+                <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--line)]">
+                  <span className="text-[11.5px] font-extrabold text-[var(--text)]">
+                    Temas padronizados do mapa
+                  </span>
+                  <label className="inline-flex items-center gap-1.5 text-[10.5px] font-semibold text-[var(--muted)] cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={applyThemeBranchColors}
+                      onChange={(e) => setApplyThemeBranchColors(e.target.checked)}
+                      className="accent-[var(--accent)] w-3 h-3"
+                    />
+                    Colorir ramos
+                  </label>
+                </div>
+
+                <div className="flex flex-col gap-1.5">
+                  {MINDMAP_THEMES.map((themeItem) => {
+                    const isActive = (tree.themeId || 'padrao') === themeItem.id && !tree.canvasBg;
+                    return (
+                      <button
+                        key={themeItem.id}
+                        type="button"
+                        onClick={() => handleSelectTheme(themeItem.id)}
+                        className={`w-full flex items-center gap-2.5 px-2.5 py-2 rounded-lg border text-left transition-colors ${
+                          isActive
+                            ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+                            : 'border-[var(--line)] bg-[var(--panel-soft)]/55 hover:border-[var(--line-strong)] hover:bg-[var(--panel-soft)]'
+                        }`}
+                      >
+                        {/* Mini Visual Preview Swatch */}
+                        <div
+                          className="w-11 h-8 rounded-md border border-black/15 shrink-0 p-1 flex flex-col justify-between"
+                          style={{ backgroundColor: themeItem.exportCanvasBg }}
+                        >
+                          <div className="flex items-center gap-1">
+                            <span
+                              className="w-3.5 h-2 rounded-xs"
+                              style={{ backgroundColor: themeItem.rootColor }}
+                            />
+                            <span
+                              className="flex-1 h-2 rounded-xs border"
+                              style={{
+                                backgroundColor: themeItem.exportCardBg,
+                                borderColor: themeItem.branchPalette[0],
+                              }}
+                            />
+                          </div>
+                          <div className="flex items-center gap-1">
+                            {themeItem.branchPalette.slice(0, 4).map((hex) => (
+                              <span
+                                key={hex}
+                                className="w-1.5 h-1.5 rounded-full"
+                                style={{ backgroundColor: hex }}
+                              />
+                            ))}
+                          </div>
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center justify-between gap-1.5">
+                            <span className="text-[12px] font-bold text-[var(--text)] truncate">
+                              {themeItem.name}
+                            </span>
+                            {isActive && <Check className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />}
+                          </div>
+                          <div className="text-[10.5px] text-[var(--muted)] leading-snug truncate">
+                            {themeItem.description}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                {/* Custom Canvas Background Section */}
+                <div className="mt-3 pt-2.5 border-t border-[var(--line)]">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-[11px] font-extrabold text-[var(--text)]">
+                      Cor de fundo do quadro
+                    </span>
+                    {tree.canvasBg && (
+                      <button
+                        type="button"
+                        onClick={() => handleCanvasBgChange(undefined)}
+                        className="text-[10.5px] font-bold text-[var(--accent)] hover:underline"
+                      >
+                        Usar padrão do tema
+                      </button>
+                    )}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {MINDMAP_CANVAS_BG_COLORS.map((bg) => {
+                      const active = tree.canvasBg?.toLowerCase() === bg.hex.toLowerCase();
+                      return (
+                        <button
+                          key={bg.id}
+                          type="button"
+                          title={bg.label}
+                          aria-label={`Fundo do quadro ${bg.label}`}
+                          onClick={() => handleCanvasBgChange(bg.hex)}
+                          className={`w-6 h-6 rounded-md border transition-transform ${
+                            active
+                              ? 'scale-110 ring-2 ring-[var(--accent)] border-[var(--accent)]'
+                              : 'border-[var(--line-strong)] hover:scale-105'
+                          }`}
+                          style={{ backgroundColor: bg.hex }}
+                        />
+                      );
+                    })}
+                    <label
+                      title="Escolher qualquer cor personalizada para o fundo do quadro"
+                      className="inline-flex items-center justify-center w-6 h-6 rounded-md border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] cursor-pointer relative overflow-hidden"
+                    >
+                      <PaintBucket className="w-3 h-3 pointer-events-none" />
+                      <input
+                        type="color"
+                        aria-label="Cor personalizada do fundo do quadro"
+                        value={tree.canvasBg || activeTheme.exportCanvasBg}
+                        onChange={(e) => handleCanvasBgChange(e.target.value)}
+                        className="absolute inset-0 opacity-0 cursor-pointer"
+                      />
+                    </label>
+                  </div>
+                </div>
               </div>
             )}
           </div>
@@ -872,6 +1229,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
               onClick={() => {
                 setShowExportMenu((v) => !v);
                 setShowTemplatesMenu(false);
+                setShowThemesMenu(false);
               }}
               className="inline-flex items-center gap-1.5 h-[36px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap disabled:opacity-60"
             >
@@ -965,8 +1323,8 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             isFullscreen ? 'h-full min-h-[460px]' : 'h-[580px]'
           } ${isPanning ? 'cursor-grabbing' : 'cursor-grab'}`}
           style={{
-            backgroundColor: 'var(--panel-soft)',
-            backgroundImage: 'radial-gradient(circle, var(--line-strong) 1px, transparent 1px)',
+            backgroundColor: resolvedCanvasBg,
+            backgroundImage: `radial-gradient(circle, ${resolvedCanvasDotColor} 1px, transparent 1px)`,
             backgroundSize: '22px 22px',
             backgroundPosition: `${pan.x % 22}px ${pan.y % 22}px`,
           }}
@@ -1076,11 +1434,25 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             {layout.nodes.map((n) => {
               const isSelected = n.node.id === selectedNode.id;
               const isEditingThis = inlineEditingId === n.node.id;
+              const isDraggingThis = dragPreview?.nodeId === n.node.id;
+              const hasCustomOffset = (n.node.offsetX || 0) !== 0 || (n.node.offsetY || 0) !== 0;
               const isRoot = n.depth === 0;
               const isBranch = n.depth === 1;
               const hasChildren = (n.node.children || []).length > 0;
               const isSearchHit = searchMatchSet.has(n.node.id);
               const tagMeta = getTagMeta(n.node.tag);
+
+              const customBg = n.node.bgColor?.trim();
+              const resolvedCardBg = customBg || (isRoot ? n.color : activeTheme.cardBg);
+              const readable = customBg
+                ? getReadableTextOnHex(customBg)
+                : isRoot
+                  ? getReadableTextOnHex(n.color)
+                  : {
+                      text: activeTheme.textColor,
+                      note: activeTheme.noteColor,
+                      isDark: activeTheme.isDark,
+                    };
 
               // Position quick action handle on the outward edge
               const isLeftSide = n.side === 'left';
@@ -1090,8 +1462,13 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                 <div
                   key={n.node.id}
                   data-mm-node="true"
+                  onMouseDown={(e) => handleNodeMouseDown(e, n.node.id)}
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (suppressNextNodeClickRef.current) {
+                      suppressNextNodeClickRef.current = false;
+                      return;
+                    }
                     if (inlineEditingId && inlineEditingId !== n.node.id) {
                       commitInlineEdit();
                     }
@@ -1101,34 +1478,59 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                     e.stopPropagation();
                     startInlineEdit(n.node);
                   }}
-                  className={`group absolute px-3 flex flex-col justify-center cursor-pointer transition-shadow ${
+                  className={`group absolute px-3 flex flex-col justify-center transition-shadow ${
+                    isEditingThis
+                      ? 'cursor-text'
+                      : isDraggingThis
+                        ? 'cursor-grabbing z-30 shadow-2xl'
+                        : 'cursor-grab active:cursor-grabbing'
+                  } ${
                     isRoot ? 'rounded-2xl py-2.5' : 'rounded-xl py-2'
                   } ${
-                    isSelected
-                      ? 'ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--panel-soft)] shadow-lg z-10'
-                      : isSearchHit
-                        ? 'ring-2 ring-[var(--warning)] ring-offset-1 ring-offset-[var(--panel-soft)] shadow-md z-10'
-                        : 'hover:shadow-md'
+                    isDraggingThis
+                      ? 'ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--panel-soft)]'
+                      : isSelected
+                        ? 'ring-2 ring-[var(--accent)] ring-offset-2 ring-offset-[var(--panel-soft)] shadow-lg z-10'
+                        : isSearchHit
+                          ? 'ring-2 ring-[var(--warning)] ring-offset-1 ring-offset-[var(--panel-soft)] shadow-md z-10'
+                          : 'hover:shadow-md hover:z-10'
                   }`}
                   style={{
                     left: `${n.x}px`,
                     top: `${n.y}px`,
                     width: `${n.w}px`,
                     minHeight: `${n.h}px`,
-                    backgroundColor: isRoot ? n.color : 'var(--panel)',
+                    backgroundColor: resolvedCardBg,
                     borderStyle: 'solid',
                     borderColor: n.color,
                     borderWidth: isRoot ? '2px' : isBranch ? '2px' : '1.5px',
-                    color: isRoot ? '#FFFFFF' : 'var(--text)',
+                    color: readable.text,
                   }}
                 >
+                  {/* Subtle Drag Grip Indicator on hover / moved nodes */}
+                  {!isEditingThis && (
+                    <span
+                      aria-hidden="true"
+                      title="Arraste com o mouse para mover este grupo ou subgrupo"
+                      className={`absolute top-1.5 right-1.5 pointer-events-none transition-opacity ${
+                        isDraggingThis || isSelected
+                          ? 'opacity-70'
+                          : hasCustomOffset
+                            ? 'opacity-45 group-hover:opacity-80'
+                            : 'opacity-0 group-hover:opacity-65'
+                      }`}
+                    >
+                      <GripVertical className="w-3 h-3" />
+                    </span>
+                  )}
+
                   {/* Semantic Tag Line (Icon + Text, dual-coded) */}
                   {tagMeta && (
                     <div
                       className="inline-flex items-center gap-1 self-start text-[9.5px] font-extrabold tracking-wide mb-1 px-1.5 py-0.5 rounded"
                       style={{
-                        backgroundColor: isRoot ? 'rgba(255,255,255,0.18)' : tagMeta.bg,
-                        color: isRoot ? '#FFFFFF' : tagMeta.color,
+                        backgroundColor: readable.isDark ? 'rgba(255,255,255,0.18)' : tagMeta.bg,
+                        color: readable.isDark ? '#FFFFFF' : tagMeta.color,
                       }}
                     >
                       {renderTagIcon(tagMeta.id, 'w-2.5 h-2.5')}
@@ -1155,9 +1557,9 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                         }
                       }}
                       className={`w-full rounded px-1.5 py-0.5 text-[12.5px] font-bold outline-none ${
-                        isRoot
+                        readable.isDark
                           ? 'bg-white/20 text-white placeholder:text-white/70'
-                          : 'bg-[var(--panel-soft)] text-[var(--text)] ring-1 ring-[var(--accent)]'
+                          : 'bg-[var(--panel-soft)] text-[#0F172A] ring-1 ring-[var(--accent)]'
                       }`}
                     />
                   ) : (
@@ -1177,9 +1579,8 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                   {/* Multi-Line Note */}
                   {n.node.note?.trim() && !isEditingThis && (
                     <div
-                      className={`text-[10.5px] leading-[1.3] mt-1 break-words ${
-                        isRoot ? 'text-white/85' : 'text-[var(--muted)]'
-                      }`}
+                      className="text-[10.5px] leading-[1.3] mt-1 break-words"
+                      style={{ color: readable.note }}
                     >
                       {n.node.note}
                     </div>
@@ -1300,6 +1701,36 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
               <UnfoldHorizontal className="w-3.5 h-3.5" />
               <span className="hidden md:inline">Recolher</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => setDragMoveSubtree((v) => !v)}
+              title={
+                dragMoveSubtree
+                  ? 'Ao arrastar um grupo, todos os seus subgrupos se movem juntos (segure Alt para mover só a célula)'
+                  : 'Ao arrastar uma célula, apenas ela se move (segure Alt para mover o grupo inteiro)'
+              }
+              className={`inline-flex items-center gap-1.5 h-[32px] px-2.5 rounded-lg border text-[11px] font-bold shadow-xs transition-colors ${
+                dragMoveSubtree
+                  ? 'border-[var(--accent)]/60 bg-[var(--accent-soft)] text-[var(--accent)]'
+                  : 'border-[var(--line-strong)] bg-[var(--panel)]/95 text-[var(--text)] hover:border-[var(--accent)]'
+              }`}
+            >
+              <Move className="w-3.5 h-3.5 shrink-0" />
+              <span>{dragMoveSubtree ? 'Arrastar: Grupo + filhos' : 'Arrastar: Só célula'}</span>
+            </button>
+
+            {movedNodesCount > 0 && (
+              <button
+                type="button"
+                onClick={handleResetAllPositions}
+                title={`Restaurar o alinhamento automático de ${movedNodesCount} célula(s) movida(s)`}
+                className="inline-flex items-center gap-1.5 h-[32px] px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)]/95 backdrop-blur-xs text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] shadow-xs"
+              >
+                <RotateCcw className="w-3.5 h-3.5 text-[var(--accent)]" />
+                <span>Realinhar ({movedNodesCount})</span>
+              </button>
+            )}
           </div>
 
           {/* Subtle Canvas Hint Bottom-Right */}
@@ -1307,7 +1738,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             data-mm-control="true"
             className="hidden lg:block absolute bottom-3 right-3 z-20 text-[11px] text-[var(--muted)] bg-[var(--panel)]/85 backdrop-blur-xs px-2.5 py-1 rounded-md border border-[var(--line)]"
           >
-            Duplo clique no nó edita · Arraste o fundo para mover · Ctrl+Roda aproxima
+            Arraste qualquer grupo/subgrupo para mover · Duplo clique edita · Alt alterna célula única
           </div>
         </div>
 
@@ -1427,42 +1858,177 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             </div>
           </div>
 
-          {/* Color Palette + Subtree Propagation */}
-          <div className="border-t border-[var(--line)] pt-3">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[11.5px] font-bold text-[var(--text)]">Cor do ramo</span>
-              {(selectedNode.children?.length || 0) > 0 && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    handlePropagateColor(selectedNode.id, selectedNode.color || '#1351B4')
-                  }
-                  className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] hover:underline"
-                >
-                  <Palette className="w-3 h-3" />
-                  Aplicar aos filhos
-                </button>
-              )}
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {MINDMAP_COLORS.map((c) => {
-                const active = (selectedNode.color || '#1351B4') === c.hex;
-                return (
+          {/* Branch Color + Cell Background + Canvas Background */}
+          <div className="border-t border-[var(--line)] pt-3 flex flex-col gap-3">
+            {/* Cor do ramo (borda/linha) */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[11.5px] font-bold text-[var(--text)]">Cor do ramo</span>
+                {(selectedNode.children?.length || 0) > 0 && (
                   <button
-                    key={c.id}
                     type="button"
-                    title={c.label}
-                    aria-label={`Cor ${c.label}`}
-                    onClick={() => handleUpdateNode(selectedNode.id, { color: c.hex }, true)}
-                    className={`w-6 h-6 rounded-full border-2 transition-transform ${
-                      active
-                        ? 'scale-115 border-[var(--text)]'
-                        : 'border-transparent opacity-80 hover:opacity-100'
-                    }`}
-                    style={{ backgroundColor: c.hex }}
+                    onClick={() =>
+                      handlePropagateColor(selectedNode.id, selectedNode.color || '#1351B4')
+                    }
+                    className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] hover:underline"
+                  >
+                    <Palette className="w-3 h-3" />
+                    Aplicar aos filhos
+                  </button>
+                )}
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {MINDMAP_COLORS.map((c) => {
+                  const active = (selectedNode.color || '#1351B4').toLowerCase() === c.hex.toLowerCase();
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      title={c.label}
+                      aria-label={`Cor do ramo ${c.label}`}
+                      onClick={() => handleUpdateNode(selectedNode.id, { color: c.hex }, true)}
+                      className={`w-6 h-6 rounded-full border-2 transition-transform ${
+                        active
+                          ? 'scale-115 border-[var(--text)]'
+                          : 'border-transparent opacity-85 hover:opacity-100'
+                      }`}
+                      style={{ backgroundColor: c.hex }}
+                    />
+                  );
+                })}
+                <label
+                  title="Escolher cor personalizada para o ramo"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded-full border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] cursor-pointer relative overflow-hidden"
+                >
+                  <Plus className="w-3 h-3 pointer-events-none" />
+                  <input
+                    type="color"
+                    aria-label="Cor personalizada do ramo"
+                    value={selectedNode.color || '#1351B4'}
+                    onChange={(e) => handleUpdateNode(selectedNode.id, { color: e.target.value }, true)}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
                   />
-                );
-              })}
+                </label>
+              </div>
+            </div>
+
+            {/* Cor de fundo da célula */}
+            <div className="pt-2.5 border-t border-[var(--line)]">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11.5px] font-bold text-[var(--text)]">
+                  Cor de fundo da célula
+                </span>
+                <div className="flex items-center gap-2">
+                  {selectedNode.bgColor && (
+                    <button
+                      type="button"
+                      onClick={() => handleUpdateNode(selectedNode.id, { bgColor: undefined }, true)}
+                      className="text-[10.5px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
+                    >
+                      Padrão
+                    </button>
+                  )}
+                  {(selectedNode.children?.length || 0) > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handlePropagateBgColor(selectedNode.id, selectedNode.bgColor)}
+                      className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline"
+                    >
+                      <PaintBucket className="w-3 h-3" />
+                      Nos filhos
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {MINDMAP_NODE_BG_COLORS.map((bg) => {
+                  const active = selectedNode.bgColor?.toLowerCase() === bg.hex.toLowerCase();
+                  return (
+                    <button
+                      key={bg.id}
+                      type="button"
+                      title={bg.label}
+                      aria-label={`Fundo da célula ${bg.label}`}
+                      onClick={() => handleUpdateNode(selectedNode.id, { bgColor: bg.hex }, true)}
+                      className={`w-6 h-6 rounded-md border transition-transform ${
+                        active
+                          ? 'scale-110 ring-2 ring-[var(--accent)] border-[var(--accent)]'
+                          : 'border-[var(--line-strong)] hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: bg.hex }}
+                    />
+                  );
+                })}
+                <label
+                  title="Escolher qualquer cor personalizada para o fundo desta célula"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded-md border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] cursor-pointer relative overflow-hidden"
+                >
+                  <PaintBucket className="w-3 h-3 pointer-events-none" />
+                  <input
+                    type="color"
+                    aria-label="Cor personalizada de fundo da célula"
+                    value={selectedNode.bgColor || activeTheme.exportCardBg}
+                    onChange={(e) => handleUpdateNode(selectedNode.id, { bgColor: e.target.value }, true)}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                </label>
+              </div>
+            </div>
+
+            {/* Cor de fundo do quadro (Canvas) */}
+            <div className="pt-2.5 border-t border-[var(--line)]">
+              <div className="flex items-center justify-between gap-2 mb-2">
+                <span className="text-[11.5px] font-bold text-[var(--text)]">
+                  Fundo do quadro
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10.5px] text-[var(--muted)] truncate max-w-[115px]">
+                    {tree.canvasBg ? 'Personalizado' : activeTheme.name}
+                  </span>
+                  {tree.canvasBg && (
+                    <button
+                      type="button"
+                      onClick={() => handleCanvasBgChange(undefined)}
+                      className="text-[10.5px] font-bold text-[var(--accent)] hover:underline"
+                    >
+                      Padrão
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                {MINDMAP_CANVAS_BG_COLORS.slice(0, 8).map((bg) => {
+                  const active = tree.canvasBg?.toLowerCase() === bg.hex.toLowerCase();
+                  return (
+                    <button
+                      key={bg.id}
+                      type="button"
+                      title={bg.label}
+                      aria-label={`Fundo do quadro ${bg.label}`}
+                      onClick={() => handleCanvasBgChange(bg.hex)}
+                      className={`w-6 h-6 rounded-md border transition-transform ${
+                        active
+                          ? 'scale-110 ring-2 ring-[var(--accent)] border-[var(--accent)]'
+                          : 'border-[var(--line-strong)] hover:scale-105'
+                      }`}
+                      style={{ backgroundColor: bg.hex }}
+                    />
+                  );
+                })}
+                <label
+                  title="Escolher cor personalizada para o fundo do quadro"
+                  className="inline-flex items-center justify-center w-6 h-6 rounded-md border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--muted)] hover:border-[var(--accent)] hover:text-[var(--accent)] cursor-pointer relative overflow-hidden"
+                >
+                  <PaintBucket className="w-3 h-3 pointer-events-none" />
+                  <input
+                    type="color"
+                    aria-label="Cor personalizada do fundo do quadro"
+                    value={tree.canvasBg || activeTheme.exportCanvasBg}
+                    onChange={(e) => handleCanvasBgChange(e.target.value)}
+                    className="absolute inset-0 opacity-0 cursor-pointer"
+                  />
+                </label>
+              </div>
             </div>
           </div>
 
@@ -1534,6 +2100,21 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                 Remover
               </button>
             </div>
+
+            {((selectedNode.offsetX || 0) !== 0 || (selectedNode.offsetY || 0) !== 0) && (
+              <div className="mt-2 pt-2 border-t border-[var(--line)] flex items-center justify-between gap-2 text-[11px]">
+                <span className="font-mono-num text-[var(--muted)]">
+                  Posição manual ({selectedNode.offsetX || 0}, {selectedNode.offsetY || 0})
+                </span>
+                <button
+                  type="button"
+                  onClick={handleResetSelectedNodePosition}
+                  className="font-bold text-[var(--accent)] hover:underline whitespace-nowrap"
+                >
+                  Restaurar posição
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Collapsible Keyboard Shortcuts + Reset */}

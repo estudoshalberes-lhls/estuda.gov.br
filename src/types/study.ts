@@ -9,6 +9,7 @@ export type ThemeId =
 
 export type ModuleName =
   | 'Início'
+  | 'Carreira & Mérito'
   | 'Treino Diário'
   | 'Simulado Fechado'
   | 'Simulados Realizados'
@@ -359,16 +360,29 @@ export type SummaryItemKind = 'note' | 'pdf' | 'mindmap' | 'image';
 export type MindMapNodeTag = 'lei' | 'sumula' | 'excecao' | 'prazo' | 'pegadinha' | 'dica';
 export type MindMapLayoutMode = 'bilateral' | 'horizontal' | 'vertical';
 export type MindMapEdgeStyle = 'curved' | 'orthogonal';
+export type MindMapThemeId =
+  | 'padrao'
+  | 'institucional'
+  | 'papel-creme'
+  | 'noturno-slate'
+  | 'lousa-verde'
+  | 'blueprint'
+  | 'alto-contraste';
 
 export interface MindMapNode {
   id: string;
   label: string;
   note?: string;
   color?: string;
+  bgColor?: string;
   tag?: MindMapNodeTag | '';
   collapsed?: boolean;
   layout?: MindMapLayoutMode;
   edgeStyle?: MindMapEdgeStyle;
+  themeId?: MindMapThemeId;
+  canvasBg?: string;
+  offsetX?: number;
+  offsetY?: number;
   children: MindMapNode[];
 }
 

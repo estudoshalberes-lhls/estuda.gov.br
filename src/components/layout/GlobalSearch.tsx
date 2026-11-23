@@ -37,6 +37,10 @@ interface SearchResultItem {
 
 const MODULE_DESCRIPTIONS: Record<ModuleName, { desc: string; keywords: string }> = {
   'Início': { desc: 'Visão geral, resumo do dia e atalhos principais', keywords: 'home dashboard inicio resumo' },
+  'Carreira & Mérito': {
+    desc: 'Trilha de carreira até o nível 100, medalhas de mérito, objetivos de alta dificuldade e missões semanais',
+    keywords: 'carreira merito medalhas nivel 100 xp patente missoes trofeus condecoracoes portaria',
+  },
   'Treino Diário': { desc: 'Responder questões do banco com filtro por disciplina', keywords: 'questoes resolver pratica banco estudo' },
   'Simulado Fechado': { desc: 'Provas fechadas, modo CESPE (certo/errado) e ABCDE', keywords: 'simulado prova cespe multipla escolha exame' },
   'Simulados Realizados': { desc: 'Histórico, notas líquidas, acertos e revisão de provas', keywords: 'historico notas cespe pontos liquidos desempenho' },

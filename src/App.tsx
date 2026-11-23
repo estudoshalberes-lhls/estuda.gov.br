@@ -152,6 +152,7 @@ const CompletedSimulationsPage = lazyWithRetry(() =>
   import('./pages/CompletedSimulationsPage').then((m) => ({ default: m.CompletedSimulationsPage })),
 );
 const PerformancePage = lazyWithRetry(() => import('./pages/PerformancePage').then((m) => ({ default: m.PerformancePage })));
+const CareerPage = lazyWithRetry(() => import('./pages/CareerPage').then((m) => ({ default: m.CareerPage })));
 const DiscursivePage = lazyWithRetry(() => import('./pages/DiscursivePage').then((m) => ({ default: m.DiscursivePage })));
 const ProofsPage = lazyWithRetry(() => import('./pages/ProofsPage').then((m) => ({ default: m.ProofsPage })));
 const ErrorNotebookPage = lazyWithRetry(() =>
@@ -198,6 +199,8 @@ function renderActivePage(page: ModuleName): React.ReactNode {
   switch (page) {
     case 'Início':
       return <HomePage />;
+    case 'Carreira & Mérito':
+      return <CareerPage />;
     case 'Treino Diário':
       return <TrainingPage />;
     case 'Simulado Fechado':

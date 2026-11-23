@@ -13,6 +13,7 @@ import {
 
 export const MODULES: ReadonlyArray<{ name: ModuleName; icon: string }> = [
   { name: 'Início', icon: 'home' },
+  { name: 'Carreira & Mérito', icon: 'award' },
   { name: 'Treino Diário', icon: 'target' },
   { name: 'Simulado Fechado', icon: 'clipboard' },
   { name: 'Simulados Realizados', icon: 'chart' },
@@ -38,6 +39,7 @@ export const MODULES: ReadonlyArray<{ name: ModuleName; icon: string }> = [
 
 export const GOV_MODULE_LABELS: Record<ModuleName, string> = {
   'Início': 'Meu Cadastro (Início)',
+  'Carreira & Mérito': 'Carreira & Medalhas',
   'Monitor de Desempenho': 'Portal da Transparência',
   'Treino Diário': 'Banco Oficial de Questões',
   'Simulado Fechado': 'Prova Lacrada (Simulado)',
