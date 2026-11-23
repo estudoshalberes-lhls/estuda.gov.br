@@ -938,6 +938,7 @@ interface StudyContextValue {
   syncUncountedCompletedGoals: () => number;
   saveWeeklyGoalNote: (weekMondayIso: string, notes: string, silent?: boolean) => void;
   completeIncompleteGoal: (id: string) => void;
+  restoreIncompleteGoalToSchedule: (id: string, targetDay: WeekdayName) => void;
   deleteIncompleteGoal: (id: string) => void;
 
   // Laws & Incidence Matrix
@@ -13557,6 +13558,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               tempo: topic.tempo,
               observacoes: topic.observacoes,
               arquivado_em: archivedAt,
+              ...(topic.disciplina_fixa ? { disciplina_fixa: topic.disciplina_fixa } : {}),
+              ...(topic.concurso_alvo ? { concurso_alvo: topic.concurso_alvo } : {}),
+              ...(topic.id ? { topicId: topic.id } : {}),
+              ...(topic.estudado_segundos ? { estudado_segundos: topic.estudado_segundos } : {}),
             })),
             ...prev.incompleteGoals,
           ],
@@ -14046,6 +14051,55 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     },
     [db.incompleteGoals, toast],
+  );
+
+  const restoreIncompleteGoalToSchedule = useCallback(
+    (id: string, targetDay: WeekdayName) => {
+      const target = dbRef.current.incompleteGoals.find((g) => g.id === id);
+      if (!target) return;
+
+      const currentWeekDates = getCurrentWeekDates();
+      const targetDateBr =
+        dbRef.current.scheduleDayDates?.[targetDay] ||
+        currentWeekDates[targetDay] ||
+        localDateBrazilian();
+
+      setDb((prev) => {
+        const nextDayDates: Partial<Record<WeekdayName, string>> = {
+          ...currentWeekDates,
+          ...(prev.scheduleDayDates || {}),
+        };
+        const resolvedDate = nextDayDates[targetDay] || targetDateBr;
+        const restoredTopic: ScheduleTopic = {
+          id: target.topicId || uid(10),
+          materia: target.materia,
+          tempo: target.tempo,
+          observacoes: target.observacoes,
+          data: resolvedDate,
+          ...(target.disciplina_fixa ? { disciplina_fixa: target.disciplina_fixa } : {}),
+          ...(target.concurso_alvo ? { concurso_alvo: target.concurso_alvo } : {}),
+          ...(target.estudado_segundos ? { estudado_segundos: target.estudado_segundos } : {}),
+        };
+
+        const nextSchedule: ScheduleMap = {
+          ...prev.schedule,
+          [targetDay]: [...(prev.schedule[targetDay] || []), restoredTopic],
+        };
+
+        const withRemovedIncomplete: StudyDatabase = {
+          ...prev,
+          incompleteGoals: prev.incompleteGoals.filter((g) => g.id !== id),
+        };
+
+        return buildUpdatedWeeklyScheduleState(withRemovedIncomplete, nextSchedule, nextDayDates);
+      });
+
+      scheduleAutoScheduleTxtSync();
+      toast(
+        `"${visibleName(target.materia || 'Meta')}" adicionada de volta ao Expediente em ${targetDay} (${targetDateBr}).`,
+      );
+    },
+    [scheduleAutoScheduleTxtSync, toast],
   );
 
   const deleteIncompleteGoal = useCallback(
@@ -17140,6 +17194,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         syncUncountedCompletedGoals,
         saveWeeklyGoalNote,
         completeIncompleteGoal,
+        restoreIncompleteGoalToSchedule,
         deleteIncompleteGoal,
         createLawFolder,
         uploadLawFile,

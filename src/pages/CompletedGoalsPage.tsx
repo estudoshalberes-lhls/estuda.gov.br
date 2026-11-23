@@ -1,18 +1,34 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Clock3, Pencil, RotateCcw, Save, Trash2, X } from 'lucide-react';
+import {
+  CalendarPlus,
+  ChevronDown,
+  Clock3,
+  ExternalLink,
+  FileDown,
+  Pencil,
+  RotateCcw,
+  Save,
+  Search,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import {
   WEEKDAYS,
+  buildScheduleWeekMetadata,
   dateInputToBrazilian,
   formatScheduleDuration,
+  getCurrentWeekDates,
   goalDateIso,
   isoWeekInputValue,
   isoWeekStartDate,
   localDateIso,
   scheduleDurationSeconds,
+  visibleName,
 } from '../lib/parsers';
+import { exportWeeklyCompletedReportPdf } from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
-import { CompletedGoal } from '../types/study';
+import { CompletedGoal, IncompleteGoal, WeekdayName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
 function addDaysIso(isoDate: string, days: number): string {
@@ -24,9 +40,12 @@ function addDaysIso(isoDate: string, days: number): string {
 export const CompletedGoalsPage: React.FC = () => {
   const {
     db,
+    googleUser,
+    setActivePage,
     deleteCompletedGoal,
     updateCompletedGoal,
     reopenCompletedGoal,
+    restoreIncompleteGoalToSchedule,
     syncUncountedCompletedGoals,
     saveWeeklyGoalNote,
     toast,
@@ -56,6 +75,8 @@ export const CompletedGoalsPage: React.FC = () => {
   const [dateFrom, setDateFrom] = useState('');
   const [dateTo, setDateTo] = useState('');
   const [weekValue, setWeekValue] = useState(() => isoWeekInputValue(localDateIso()));
+  const [pendingTargetDays, setPendingTargetDays] = useState<Record<string, WeekdayName>>({});
+  const [pendingSearch, setPendingSearch] = useState('');
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMateria, setEditMateria] = useState('');
@@ -64,11 +85,25 @@ export const CompletedGoalsPage: React.FC = () => {
   const [editTempo, setEditTempo] = useState('');
   const [editObservacoes, setEditObservacoes] = useState('');
 
+  const effectiveWeekValue = weekValue || isoWeekInputValue(localDateIso());
   const weekMondayIso = useMemo(
-    () => isoWeekStartDate(weekValue) || isoWeekStartDate(isoWeekInputValue(localDateIso())),
-    [weekValue],
+    () => isoWeekStartDate(effectiveWeekValue) || isoWeekStartDate(isoWeekInputValue(localDateIso())),
+    [effectiveWeekValue],
   );
   const weekSundayIso = useMemo(() => addDaysIso(weekMondayIso, 6), [weekMondayIso]);
+  const selectedWeekMeta = useMemo(
+    () => buildScheduleWeekMetadata(effectiveWeekValue),
+    [effectiveWeekValue],
+  );
+
+  const currentWeekDates = useMemo(
+    () => ({ ...getCurrentWeekDates(), ...(db.scheduleDayDates || {}) }),
+    [db.scheduleDayDates],
+  );
+  const todayWeekday = useMemo<WeekdayName>(
+    () => WEEKDAYS[(new Date().getDay() + 6) % 7] || 'Segunda-feira',
+    [],
+  );
 
   const [weeklyNoteDraft, setWeeklyNoteDraft] = useState(
     () =>
@@ -127,6 +162,68 @@ export const CompletedGoalsPage: React.FC = () => {
     };
   }, [flushWeeklyDraft]);
 
+  const weekCompletedItems = useMemo(() => {
+    return db.completedGoals.filter((g) => {
+      const iso = goalDateIso(g.data);
+      return Boolean(iso && iso >= weekMondayIso && iso <= weekSundayIso);
+    });
+  }, [db.completedGoals, weekMondayIso, weekSundayIso]);
+
+  const weekCompletedSeconds = useMemo(
+    () =>
+      weekCompletedItems.reduce(
+        (sum, g) => sum + Math.max(scheduleDurationSeconds(g.tempo || ''), g.estudado_segundos || 0),
+        0,
+      ),
+    [weekCompletedItems],
+  );
+
+  const filteredIncompleteGoals = useMemo(() => {
+    const q = pendingSearch.trim().toLowerCase();
+    if (!q) return db.incompleteGoals;
+    return db.incompleteGoals.filter((g) =>
+      [g.materia, g.disciplina_fixa || '', g.dia_semana || '', g.data || '', g.observacoes || '']
+        .join(' ')
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [db.incompleteGoals, pendingSearch]);
+
+  const resolvePendingTargetDay = useCallback(
+    (goal: IncompleteGoal): WeekdayName => {
+      if (pendingTargetDays[goal.id]) return pendingTargetDays[goal.id];
+      const original = goal.dia_semana?.trim() as WeekdayName;
+      if (WEEKDAYS.includes(original)) return original;
+      return todayWeekday;
+    },
+    [pendingTargetDays, todayWeekday],
+  );
+
+  const handleRestoreIncomplete = (goal: IncompleteGoal) => {
+    const targetDay = resolvePendingTargetDay(goal);
+    restoreIncompleteGoalToSchedule(goal.id, targetDay);
+    setPendingTargetDays((prev) => {
+      if (!(goal.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[goal.id];
+      return next;
+    });
+  };
+
+  const handleDownloadWeeklyPdf = () => {
+    flushWeeklyDraft();
+    const periodLabel = `${dateInputToBrazilian(weekMondayIso)} a ${dateInputToBrazilian(weekSundayIso)}`;
+    exportWeeklyCompletedReportPdf({
+      weekKey: selectedWeekMeta.weekKey,
+      weekLabel: selectedWeekMeta.label,
+      periodLabel,
+      weeklyNote: weeklyNoteDraft,
+      completedItems: weekCompletedItems,
+      studentName: googleUser?.displayName || googleUser?.email || 'Estudante',
+    });
+    toast(`PDF semanal baixado (${selectedWeekMeta.label}).`);
+  };
+
   const filtered = useMemo(() => {
     return db.completedGoals.filter((g) => {
       const iso = goalDateIso(g.data);
@@ -183,7 +280,17 @@ export const CompletedGoalsPage: React.FC = () => {
       <PageHeader
         eyebrow="ATESTADO DE CUMPRIMENTO · METAS"
         title="Histórico de metas concluídas e notas semanais"
-        description="Filtre por período, revise metas arquivadas por data e registre balanços oficiais de rendimento semanal."
+        description="Filtre por período, revise metas concluídas, devolva metas não concluídas ao Expediente vigente e baixe o relatório semanal em PDF."
+        actions={
+          <button
+            type="button"
+            onClick={handleDownloadWeeklyPdf}
+            className="inline-flex items-center gap-1.5 h-[36px] px-3.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+          >
+            <FileDown className="w-3.5 h-3.5" />
+            Baixar PDF da semana
+          </button>
+        }
       />
 
       {uncountedSummary.count > 0 && (
@@ -243,20 +350,29 @@ export const CompletedGoalsPage: React.FC = () => {
         </Panel>
 
         <Panel
-          title="Observações semanais"
+          title="Notas e observações semanais"
           subtitle={`${dateInputToBrazilian(weekMondayIso)} a ${dateInputToBrazilian(weekSundayIso)}`}
         >
           <div className="flex flex-col gap-2.5">
-            <input
-              type="week"
-              aria-label="Selecionar semana ISO"
-              value={weekValue}
-              onChange={(e) => {
-                flushWeeklyDraft();
-                setWeekValue(e.target.value);
-              }}
-              className="ce-input font-mono-num"
-            />
+            <div className="flex flex-wrap items-center gap-2.5">
+              <input
+                type="week"
+                aria-label="Selecionar semana ISO"
+                value={weekValue}
+                onChange={(e) => {
+                  flushWeeklyDraft();
+                  setWeekValue(e.target.value);
+                }}
+                className="ce-input font-mono-num flex-1 min-w-[170px]"
+              />
+              <span className="text-[11.5px] text-[var(--muted)] font-mono-num tabular-nums whitespace-nowrap">
+                <strong className="text-[var(--text)]">{weekCompletedItems.length}</strong>{' '}
+                {weekCompletedItems.length === 1 ? 'meta' : 'metas'}
+                {weekCompletedSeconds > 0
+                  ? ` · ${formatScheduleDuration(weekCompletedSeconds)}`
+                  : ''}
+              </span>
+            </div>
             <textarea
               value={weeklyNoteDraft}
               onChange={(e) => setWeeklyNoteDraft(e.target.value)}
@@ -265,24 +381,170 @@ export const CompletedGoalsPage: React.FC = () => {
               placeholder="Balanço semanal, pontos fortes e ajustes para a semana seguinte..."
               className="ce-textarea min-h-[68px]"
             />
-            <div className="flex items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="text-[11px] text-[var(--muted)]">
                 {weeklyNoteDraft.trim() !== (db.weeklyGoalNotes[weekMondayIso] || '').trim()
                   ? 'Salvando automaticamente…'
                   : 'Nota semanal sincronizada'}
               </span>
-              <button
-                type="button"
-                onClick={() => saveWeeklyGoalNote(weekMondayIso, weeklyNoteDraft)}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap"
-              >
-                <Save className="w-3.5 h-3.5" />
-                Salvar nota semanal
-              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleDownloadWeeklyPdf}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)]/55 bg-[var(--accent-soft)] text-[var(--accent)] text-[12px] font-bold hover:bg-[var(--accent)] hover:text-white whitespace-nowrap cursor-pointer"
+                >
+                  <FileDown className="w-3.5 h-3.5" />
+                  Baixar PDF da semana
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveWeeklyGoalNote(weekMondayIso, weeklyNoteDraft)}
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+                >
+                  <Save className="w-3.5 h-3.5" />
+                  Salvar nota semanal
+                </button>
+              </div>
             </div>
           </div>
         </Panel>
       </div>
+
+      {/* Return Incomplete Goals to Current Week's Expediente */}
+      <details
+        open={db.incompleteGoals.length > 0 && db.incompleteGoals.length <= 6}
+        className="ce-panel overflow-hidden group mb-4"
+      >
+        <summary className="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 cursor-pointer select-none hover:bg-[var(--panel-soft)] transition-colors">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0">
+            <CalendarPlus className="w-4 h-4 text-[var(--accent)] shrink-0" />
+            <strong className="text-[13.5px] font-extrabold text-[var(--text)]">
+              Metas não concluídas — retornar ao Expediente (Semana vigente)
+            </strong>
+            <span className="text-[12px] text-[var(--muted)] font-mono-num tabular-nums">
+              · {db.incompleteGoals.length}{' '}
+              {db.incompleteGoals.length === 1 ? 'pendência' : 'pendências'}
+              {currentWeekDates['Segunda-feira'] && currentWeekDates['Domingo']
+                ? ` · Vigente: ${currentWeekDates['Segunda-feira']} a ${currentWeekDates['Domingo']}`
+                : ''}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                setActivePage('Cronograma');
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+            >
+              <ExternalLink className="w-3 h-3 text-[var(--accent)]" />
+              Abrir Expediente
+            </button>
+            <ChevronDown className="w-4 h-4 text-[var(--muted)] group-open:rotate-180 transition-transform" />
+          </div>
+        </summary>
+
+        <div className="px-4 pb-4 pt-3 border-t border-[var(--line)] flex flex-col gap-2.5">
+          {db.incompleteGoals.length === 0 ? (
+            <p className="m-0 text-[12.5px] text-[var(--muted)]">
+              Nenhuma meta não concluída arquivada no momento. Quando houver metas pendentes, você
+              poderá escolher o dia da semana vigente e adicioná-las de volta ao Expediente por aqui.
+            </p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <p className="m-0 text-[12px] text-[var(--muted)]">
+                  Selecione o dia desejado da semana vigente para recolocar a meta no Expediente
+                  (Cronograma).
+                </p>
+                {db.incompleteGoals.length > 4 && (
+                  <div className="relative">
+                    <Search className="w-3.5 h-3.5 text-[var(--muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                    <input
+                      type="text"
+                      value={pendingSearch}
+                      onChange={(e) => setPendingSearch(e.target.value)}
+                      placeholder="Filtrar pendência..."
+                      className="ce-input pl-8 h-[32px] w-[200px] text-[12px]"
+                    />
+                  </div>
+                )}
+              </div>
+
+              {filteredIncompleteGoals.length === 0 ? (
+                <p className="m-0 text-[12.5px] text-[var(--muted)]">
+                  Nenhuma pendência encontrada para o filtro informado.
+                </p>
+              ) : (
+                filteredIncompleteGoals.map((goal) => {
+                  const chosenDay = resolvePendingTargetDay(goal);
+                  return (
+                    <div
+                      key={goal.id}
+                      className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+                          <strong className="text-[13.5px] font-bold text-[var(--text)]">
+                            {visibleName(goal.materia)}
+                          </strong>
+                          {(goal.dia_semana || goal.data) && (
+                            <span className="text-[11.5px] text-[var(--muted)] font-mono-num">
+                              · {[goal.dia_semana, goal.data].filter(Boolean).join(' · ')}
+                            </span>
+                          )}
+                          {goal.tempo && (
+                            <span className="font-mono-num text-[11.5px] font-semibold text-[var(--warning)]">
+                              · {goal.tempo}
+                            </span>
+                          )}
+                        </div>
+                        {goal.observacoes && (
+                          <p className="mt-1 mb-0 text-[12px] text-[var(--muted)] leading-relaxed">
+                            {goal.observacoes}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
+                        <select
+                          aria-label={`Dia da semana vigente para ${goal.materia}`}
+                          value={chosenDay}
+                          onChange={(e) =>
+                            setPendingTargetDays((prev) => ({
+                              ...prev,
+                              [goal.id]: e.target.value as WeekdayName,
+                            }))
+                          }
+                          className="ce-input h-[34px] py-0 text-[12px] font-mono-num w-auto min-w-[195px]"
+                        >
+                          {WEEKDAYS.map((day) => (
+                            <option key={day} value={day}>
+                              {day}
+                              {currentWeekDates[day] ? ` (${currentWeekDates[day]})` : ''}
+                            </option>
+                          ))}
+                        </select>
+                        <button
+                          type="button"
+                          onClick={() => handleRestoreIncomplete(goal)}
+                          className="inline-flex items-center gap-1.5 h-[34px] px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+                        >
+                          <CalendarPlus className="w-3.5 h-3.5" />
+                          Adicionar ao Expediente
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </>
+          )}
+        </div>
+      </details>
 
       <div className="flex flex-col gap-3">
         {groupedByDate.length ? (

@@ -1,11 +1,25 @@
 import { jsPDF } from 'jspdf';
 import {
+  CompletedGoal,
   ErrorNotebookEntry,
   HighlightColorKey,
+  IncompleteGoal,
   LawHighlight,
   LawItem,
 } from '../types/study';
-import { cleanSafeName, formatIsoDateBr, formatSequentialDeviceLabel, localDateBrazilian, localDateIso, localDateTimeBrazilian, normalizeSearch, visibleName } from './parsers';
+import {
+  WEEKDAYS,
+  cleanSafeName,
+  formatIsoDateBr,
+  formatScheduleDuration,
+  formatSequentialDeviceLabel,
+  localDateBrazilian,
+  localDateIso,
+  localDateTimeBrazilian,
+  normalizeSearch,
+  scheduleDurationSeconds,
+  visibleName,
+} from './parsers';
 import { LegalBlockKind, normalizePdfLegalText, segmentLegalText } from './legalTextFormatter';
 import type { CapturedD3Chart } from './d3SvgCapture';
 
@@ -2104,3 +2118,533 @@ export function exportSimulationPreliminaryResultPdf(params: SimulationPrelimina
 
   doc.save(`edital_resultado_${cleanSafeName(params.titulo).replace(/\s+/g, '_')}.pdf`);
 }
+
+export interface IncompleteGoalsWeekGroupPdf {
+  weekKey: string;
+  label: string;
+  items: IncompleteGoal[];
+}
+
+export function exportIncompleteGoalsWeekPdf(params: {
+  groups: IncompleteGoalsWeekGroupPdf[];
+  studentName?: string;
+}): void {
+  const validGroups = params.groups.filter((g) => g.items.length > 0);
+  if (validGroups.length === 0) return;
+
+  const ctx = createDoc();
+  const { doc, margin, maxWidth, pageWidth, pageHeight } = ctx;
+  const isSingleWeek = validGroups.length === 1;
+  const allItems = validGroups.flatMap((g) => g.items);
+  const totalSeconds = allItems.reduce((sum, item) => sum + scheduleDurationSeconds(item.tempo || ''), 0);
+  const distinctSubjects = new Set(
+    allItems.map((g) => visibleName(g.disciplina_fixa || g.materia || '').trim()).filter(Boolean),
+  ).size;
+
+  // Header
+  doc.setFillColor(7, 29, 65);
+  doc.rect(0, 0, pageWidth, 30, 'F');
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, 30, third, 1.8, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(third, 30, third, 1.8, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, 30, pageWidth - third * 2, 1.8, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  doc.setTextColor(255, 205, 7);
+  doc.text('ESTUDA.GOV.BR · DIVIDA ATIVA DE ESTUDOS · CRONOGRAMA SEMANAL', margin, 9.5);
+
+  doc.setFontSize(13);
+  doc.setTextColor(255, 255, 255);
+  doc.text(
+    normalizePdfLegalText(
+      isSingleWeek
+        ? `PENDENCIAS ARQUIVADAS — ${validGroups[0].label.toUpperCase()}`
+        : 'PENDENCIAS ARQUIVADAS DO CRONOGRAMA (TODAS AS SEMANAS)',
+    ).slice(0, 88),
+    margin,
+    18,
+  );
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(215, 226, 244);
+  doc.text(
+    normalizePdfLegalText(
+      `Estudante: ${params.studentName || 'Estudante'} · Emitido em ${localDateTimeBrazilian()}`,
+    ),
+    margin,
+    25.5,
+  );
+
+  ctx.y = 38;
+
+  // KPI summary bar
+  doc.setFillColor(246, 248, 252);
+  doc.setDrawColor(186, 202, 224);
+  doc.rect(margin, ctx.y, maxWidth, 14, 'FD');
+
+  const kpis: Array<[string, string]> = [
+    ['SEMANAS', String(validGroups.length)],
+    ['PENDENCIAS', String(allItems.length)],
+    ['CARGA PENDENTE', totalSeconds > 0 ? formatScheduleDuration(totalSeconds) : '—'],
+    ['MATERIAS', String(distinctSubjects)],
+  ];
+  const colW = maxWidth / kpis.length;
+  kpis.forEach(([label, val], idx) => {
+    const x = margin + idx * colW;
+    if (idx > 0) {
+      doc.setDrawColor(210, 220, 235);
+      doc.line(x, ctx.y + 2, x, ctx.y + 12);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(80, 95, 118);
+    doc.text(label, x + 3, ctx.y + 5.2);
+    doc.setFontSize(10.5);
+    doc.setTextColor(7, 29, 65);
+    doc.text(normalizePdfLegalText(val), x + 3, ctx.y + 11.2);
+  });
+
+  ctx.y += 20;
+
+  validGroups.forEach((group, groupIdx) => {
+    if (groupIdx > 0) {
+      ctx.y += 4;
+    }
+    const groupSeconds = group.items.reduce(
+      (sum, item) => sum + scheduleDurationSeconds(item.tempo || ''),
+      0,
+    );
+
+    ctx.ensureSpace(16);
+    doc.setFillColor(232, 239, 249);
+    doc.setDrawColor(7, 29, 65);
+    doc.rect(margin, ctx.y, maxWidth, 8.5, 'FD');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.8);
+    doc.setTextColor(7, 29, 65);
+    doc.text(normalizePdfLegalText(group.label), margin + 3, ctx.y + 5.7);
+
+    const groupStats = `${group.items.length} pendencia(s)${
+      groupSeconds > 0 ? ` · ${formatScheduleDuration(groupSeconds)}` : ''
+    }`;
+    doc.setFontSize(8.2);
+    doc.setTextColor(19, 81, 180);
+    doc.text(normalizePdfLegalText(groupStats), margin + maxWidth - 3, ctx.y + 5.7, {
+      align: 'right',
+    });
+
+    ctx.y += 12;
+
+    // Group items inside the week by weekday order (Segunda-feira -> Domingo -> Outros)
+    const dayBuckets = new Map<string, IncompleteGoal[]>();
+    WEEKDAYS.forEach((d) => dayBuckets.set(d, []));
+    const otherDayItems: IncompleteGoal[] = [];
+
+    group.items.forEach((goal) => {
+      const dayKey = goal.dia_semana?.trim();
+      if (dayKey && dayBuckets.has(dayKey)) {
+        dayBuckets.get(dayKey)!.push(goal);
+      } else {
+        otherDayItems.push(goal);
+      }
+    });
+
+    const orderedDays: Array<[string, IncompleteGoal[]]> = [
+      ...WEEKDAYS.map((d) => [d, dayBuckets.get(d) || []] as [string, IncompleteGoal[]]),
+      ...(otherDayItems.length > 0
+        ? [['Outros / Sem dia definido', otherDayItems] as [string, IncompleteGoal[]]]
+        : []),
+    ].filter(([, list]) => list.length > 0);
+
+    orderedDays.forEach(([dayName, dayItems]) => {
+      const sampleDate = dayItems.find((i) => i.data?.trim())?.data?.trim() || '';
+      const dayTitle = sampleDate ? `${dayName} (${sampleDate})` : dayName;
+
+      ctx.ensureSpace(12);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(19, 81, 180);
+      doc.text(normalizePdfLegalText(dayTitle.toUpperCase()), margin, ctx.y);
+      doc.setDrawColor(203, 213, 225);
+      doc.line(margin, ctx.y + 1.4, margin + maxWidth, ctx.y + 1.4);
+      ctx.y += 5.5;
+
+      dayItems.forEach((goal) => {
+        const subjectLine = `[ ] ${visibleName(goal.materia || 'Sem titulo')}`;
+        const metaParts: string[] = [];
+        if (goal.disciplina_fixa) metaParts.push(`Disciplina: ${visibleName(goal.disciplina_fixa)}`);
+        if (goal.concurso_alvo) metaParts.push(`Concurso: ${visibleName(goal.concurso_alvo)}`);
+        if (goal.tempo) metaParts.push(`Tempo: ${goal.tempo}`);
+        if (goal.arquivado_em) metaParts.push(`Arquivado: ${goal.arquivado_em}`);
+
+        const titleLines = doc.splitTextToSize(
+          normalizePdfLegalText(subjectLine),
+          maxWidth - 4,
+        ) as string[];
+        const metaLines = metaParts.length
+          ? (doc.splitTextToSize(normalizePdfLegalText(metaParts.join(' · ')), maxWidth - 8) as string[])
+          : [];
+        const obsLines = goal.observacoes?.trim()
+          ? (doc.splitTextToSize(
+              normalizePdfLegalText(`Obs.: ${goal.observacoes.trim()}`),
+              maxWidth - 8,
+            ) as string[])
+          : [];
+
+        const neededHeight =
+          titleLines.length * 4.5 +
+          metaLines.length * 3.8 +
+          obsLines.length * 4.1 +
+          4.5;
+        ctx.ensureSpace(neededHeight);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.4);
+        doc.setTextColor(15, 23, 42);
+        titleLines.forEach((line) => {
+          doc.text(line, margin + 2, ctx.y);
+          ctx.y += 4.5;
+        });
+
+        if (metaLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(71, 85, 105);
+          metaLines.forEach((line) => {
+            doc.text(line, margin + 6, ctx.y);
+            ctx.y += 3.8;
+          });
+        }
+
+        if (obsLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.4);
+          doc.setTextColor(30, 41, 59);
+          obsLines.forEach((line) => {
+            doc.text(line, margin + 6, ctx.y);
+            ctx.y += 4.1;
+          });
+        }
+
+        ctx.y += 2.6;
+      });
+
+      ctx.y += 1.5;
+    });
+  });
+
+  // Page numbers footer
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(203, 213, 225);
+    doc.line(margin, pageHeight - 11, pageWidth - margin, pageHeight - 11);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      normalizePdfLegalText(
+        isSingleWeek
+          ? `estuda.gov.br · Pendencias do Cronograma · ${validGroups[0].label}`
+          : 'estuda.gov.br · Pendencias Arquivadas do Cronograma',
+      ),
+      margin,
+      pageHeight - 6.5,
+    );
+    doc.text(`Pagina ${i} de ${totalPages}`, pageWidth - margin, pageHeight - 6.5, {
+      align: 'right',
+    });
+  }
+
+  const fileName = isSingleWeek
+    ? `pendencias_cronograma_${cleanSafeName(validGroups[0].weekKey || validGroups[0].label, 'semana').replace(/\s+/g, '_')}.pdf`
+    : `pendencias_cronograma_todas_semanas_${localDateIso()}.pdf`;
+  doc.save(fileName);
+}
+
+export interface WeeklyCompletedReportPdfParams {
+  weekKey: string;
+  weekLabel: string;
+  periodLabel: string;
+  weeklyNote: string;
+  completedItems: CompletedGoal[];
+  studentName?: string;
+}
+
+export function exportWeeklyCompletedReportPdf(params: WeeklyCompletedReportPdfParams): void {
+  const ctx = createDoc();
+  const { doc, margin, maxWidth, pageWidth, pageHeight } = ctx;
+  const items = params.completedItems || [];
+  const totalSeconds = items.reduce(
+    (sum, item) => sum + Math.max(scheduleDurationSeconds(item.tempo || ''), item.estudado_segundos || 0),
+    0,
+  );
+  const distinctSubjects = new Set(
+    items.map((g) => visibleName(g.disciplina_fixa || g.materia || '').trim()).filter(Boolean),
+  ).size;
+  const activeDays = new Set(
+    items.map((g) => (g.data || g.dia_semana || '').trim()).filter(Boolean),
+  ).size;
+
+  // Header
+  doc.setFillColor(7, 29, 65);
+  doc.rect(0, 0, pageWidth, 30, 'F');
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, 30, third, 1.8, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(third, 30, third, 1.8, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, 30, pageWidth - third * 2, 1.8, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.2);
+  doc.setTextColor(255, 205, 7);
+  doc.text('ESTUDA.GOV.BR · ATESTADO DE CUMPRIMENTO · BALANCO SEMANAL', margin, 9.5);
+
+  doc.setFontSize(13);
+  doc.setTextColor(255, 255, 255);
+  doc.text(
+    normalizePdfLegalText(`NOTAS E CUMPRIMENTO — ${params.weekLabel.toUpperCase()}`).slice(0, 88),
+    margin,
+    18,
+  );
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.2);
+  doc.setTextColor(215, 226, 244);
+  doc.text(
+    normalizePdfLegalText(
+      `Estudante: ${params.studentName || 'Estudante'} · Periodo: ${params.periodLabel} · Emitido em ${localDateTimeBrazilian()}`,
+    ),
+    margin,
+    25.5,
+  );
+
+  ctx.y = 38;
+
+  // KPI summary bar
+  doc.setFillColor(246, 248, 252);
+  doc.setDrawColor(186, 202, 224);
+  doc.rect(margin, ctx.y, maxWidth, 14, 'FD');
+
+  const kpis: Array<[string, string]> = [
+    ['METAS CONCLUIDAS', String(items.length)],
+    ['TEMPO CUMPRIDO', totalSeconds > 0 ? formatScheduleDuration(totalSeconds) : '—'],
+    ['DIAS ATIVOS', String(activeDays)],
+    ['MATERIAS', String(distinctSubjects)],
+  ];
+  const colW = maxWidth / kpis.length;
+  kpis.forEach(([label, val], idx) => {
+    const x = margin + idx * colW;
+    if (idx > 0) {
+      doc.setDrawColor(210, 220, 235);
+      doc.line(x, ctx.y + 2, x, ctx.y + 12);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7);
+    doc.setTextColor(80, 95, 118);
+    doc.text(label, x + 3, ctx.y + 5.2);
+    doc.setFontSize(10.5);
+    doc.setTextColor(7, 29, 65);
+    doc.text(normalizePdfLegalText(val), x + 3, ctx.y + 11.2);
+  });
+
+  ctx.y += 20;
+
+  // Section 1: Weekly Notes / Balanço da Semana
+  ctx.ensureSpace(22);
+  doc.setFillColor(232, 239, 249);
+  doc.setDrawColor(7, 29, 65);
+  doc.rect(margin, ctx.y, maxWidth, 8, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(7, 29, 65);
+  doc.text('1. NOTAS E OBSERVACOES DA SEMANA', margin + 3, ctx.y + 5.4);
+  ctx.y += 11.5;
+
+  const cleanNote = params.weeklyNote.trim();
+  if (cleanNote) {
+    const blocks = segmentLegalText(cleanNote);
+    blocks.forEach((block) => {
+      const combined = block.leadBold ? `${block.leadBold} ${block.body}`.trim() : block.body;
+      const lines = doc.splitTextToSize(normalizePdfLegalText(combined), maxWidth - 6) as string[];
+      ctx.ensureSpace(lines.length * 4.6 + 3);
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.3);
+      doc.setTextColor(22, 33, 52);
+      lines.forEach((line) => {
+        doc.text(line, margin + 3, ctx.y);
+        ctx.y += 4.6;
+      });
+      ctx.y += 1.5;
+    });
+  } else {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(8.8);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Nenhuma observacao geral registrada para esta semana.', margin + 3, ctx.y);
+    ctx.y += 6;
+  }
+
+  ctx.y += 4;
+
+  // Section 2: Completed Goals in the Week (grouped by day)
+  ctx.ensureSpace(16);
+  doc.setFillColor(232, 239, 249);
+  doc.setDrawColor(7, 29, 65);
+  doc.rect(margin, ctx.y, maxWidth, 8, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(7, 29, 65);
+  doc.text('2. O QUE FOI FEITO NA SEMANA E OBSERVACOES', margin + 3, ctx.y + 5.4);
+  ctx.y += 12;
+
+  if (items.length === 0) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text('Nenhuma meta concluida registrada nesta semana.', margin + 3, ctx.y);
+    ctx.y += 6;
+  } else {
+    const dayBuckets = new Map<string, CompletedGoal[]>();
+    WEEKDAYS.forEach((d) => dayBuckets.set(d, []));
+    const otherItems: CompletedGoal[] = [];
+
+    items.forEach((goal) => {
+      const dayKey = goal.dia_semana?.trim();
+      if (dayKey && dayBuckets.has(dayKey)) {
+        dayBuckets.get(dayKey)!.push(goal);
+      } else {
+        otherItems.push(goal);
+      }
+    });
+
+    const orderedDays: Array<[string, CompletedGoal[]]> = [
+      ...WEEKDAYS.map((d) => [d, dayBuckets.get(d) || []] as [string, CompletedGoal[]]),
+      ...(otherItems.length > 0
+        ? [['Outros registros da semana', otherItems] as [string, CompletedGoal[]]]
+        : []),
+    ].filter(([, list]) => list.length > 0);
+
+    orderedDays.forEach(([dayName, dayItems]) => {
+      const sampleDate = dayItems.find((i) => i.data?.trim())?.data?.trim() || '';
+      const dayTitle = sampleDate ? `${dayName} (${sampleDate})` : dayName;
+      const daySec = dayItems.reduce(
+        (s, i) => s + Math.max(scheduleDurationSeconds(i.tempo || ''), i.estudado_segundos || 0),
+        0,
+      );
+
+      ctx.ensureSpace(12);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9);
+      doc.setTextColor(19, 81, 180);
+      doc.text(normalizePdfLegalText(dayTitle.toUpperCase()), margin, ctx.y);
+      if (daySec > 0) {
+        doc.setFontSize(8);
+        doc.setTextColor(22, 136, 33);
+        doc.text(
+          normalizePdfLegalText(`Total: ${formatScheduleDuration(daySec)}`),
+          margin + maxWidth,
+          ctx.y,
+          { align: 'right' },
+        );
+      }
+      doc.setDrawColor(203, 213, 225);
+      doc.line(margin, ctx.y + 1.4, margin + maxWidth, ctx.y + 1.4);
+      ctx.y += 5.5;
+
+      dayItems.forEach((goal) => {
+        const titleLine = `[CONCLUIDA] ${visibleName(goal.materia || 'Meta concluida')}`;
+        const metaParts: string[] = [];
+        if (goal.disciplina_fixa && visibleName(goal.disciplina_fixa) !== visibleName(goal.materia)) {
+          metaParts.push(`Disciplina: ${visibleName(goal.disciplina_fixa)}`);
+        }
+        if (goal.concurso_alvo) metaParts.push(`Concurso: ${visibleName(goal.concurso_alvo)}`);
+        if (goal.tempo) metaParts.push(`Tempo: ${goal.tempo}`);
+        else if (goal.estudado_segundos) metaParts.push(`Tempo: ${formatScheduleDuration(goal.estudado_segundos)}`);
+        if (goal.data) metaParts.push(`Data: ${goal.data}`);
+
+        const titleLines = doc.splitTextToSize(
+          normalizePdfLegalText(titleLine),
+          maxWidth - 4,
+        ) as string[];
+        const metaLines = metaParts.length
+          ? (doc.splitTextToSize(normalizePdfLegalText(metaParts.join(' · ')), maxWidth - 8) as string[])
+          : [];
+        const obsLines = goal.observacoes?.trim()
+          ? (doc.splitTextToSize(
+              normalizePdfLegalText(`Observacoes: ${goal.observacoes.trim()}`),
+              maxWidth - 8,
+            ) as string[])
+          : [];
+
+        const needed =
+          titleLines.length * 4.5 + metaLines.length * 3.8 + obsLines.length * 4.2 + 4.5;
+        ctx.ensureSpace(needed);
+
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.4);
+        doc.setTextColor(15, 23, 42);
+        titleLines.forEach((line) => {
+          doc.text(line, margin + 2, ctx.y);
+          ctx.y += 4.5;
+        });
+
+        if (metaLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(71, 85, 105);
+          metaLines.forEach((line) => {
+            doc.text(line, margin + 6, ctx.y);
+            ctx.y += 3.8;
+          });
+        }
+
+        if (obsLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.5);
+          doc.setTextColor(30, 41, 59);
+          obsLines.forEach((line) => {
+            doc.text(line, margin + 6, ctx.y);
+            ctx.y += 4.2;
+          });
+        }
+
+        ctx.y += 2.6;
+      });
+
+      ctx.y += 1.5;
+    });
+  }
+
+  // Page numbers footer
+  const totalPages = doc.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i);
+    doc.setDrawColor(203, 213, 225);
+    doc.line(margin, pageHeight - 11, pageWidth - margin, pageHeight - 11);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      normalizePdfLegalText(`estuda.gov.br · Atestado de Cumprimento · ${params.weekLabel}`),
+      margin,
+      pageHeight - 6.5,
+    );
+    doc.text(`Pagina ${i} de ${totalPages}`, pageWidth - margin, pageHeight - 6.5, {
+      align: 'right',
+    });
+  }
+
+  const slug = cleanSafeName(params.weekKey || params.weekLabel, 'semana').replace(/\s+/g, '_');
+  doc.save(`atestado_semanal_${slug}.pdf`);
+}
+
+
