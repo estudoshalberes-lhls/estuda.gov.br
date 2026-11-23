@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   ChevronDown,
   ChevronUp,
@@ -7,10 +7,10 @@ import {
   Eye,
   FileDown,
   FileText,
-  FileUp,
   FolderPlus,
   GitBranch,
   Loader2,
+  Paperclip,
   Pencil,
   Save,
   Search,
@@ -33,12 +33,13 @@ import {
 } from '../lib/summaryPdfExport';
 import { MindMapNode, Question, SummaryFile, SummaryItemKind } from '../types/study';
 import { MindMapBuilder } from '../components/summaries/MindMapBuilder';
+import { PdfAttachmentPanel } from '../components/summaries/PdfAttachmentPanel';
 import { SummaryAiStudioModal } from '../components/summaries/SummaryAiStudioModal';
 import { FilePreview } from '../components/ui/FilePreview';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { StructuredLegalText } from '../components/ui/StructuredLegalText';
 
-type ActiveTab = 'notes' | 'mindmap' | 'downloads';
+type ActiveTab = 'notes' | 'attachments' | 'mindmap' | 'downloads';
 type KindFilter = 'all' | SummaryItemKind;
 
 interface FolderItemEntry {
@@ -58,6 +59,7 @@ export const SummariesPage: React.FC = () => {
     saveSummaryNote,
     saveSummaryMindMap,
     deleteSummaryFile,
+    moveSummaryFileToFolder,
     importParsedQuestions,
     addAnnotation,
     requestConfirm,
@@ -94,11 +96,6 @@ export const SummariesPage: React.FC = () => {
   const [noteContent, setNoteContent] = useState('');
   const [savingNote, setSavingNote] = useState(false);
   const [noteEditorExpanded, setNoteEditorExpanded] = useState(true);
-
-  // PDF multi-upload state
-  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
-  const [uploading, setUploading] = useState(false);
-  const uploadRef = useRef<HTMLInputElement | null>(null);
 
   // Mind map builder state
   const [mindMapEditing, setMindMapEditing] = useState<{
@@ -260,28 +257,6 @@ export const SummariesPage: React.FC = () => {
     setNoteTitle('');
     setNoteTagsInput('');
     setNoteContent('');
-  };
-
-  const handleUploadFiles = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!targetWriteFolder) {
-      toast('Crie ou selecione uma matéria primeiro.', true);
-      return;
-    }
-    if (uploadFiles.length === 0) {
-      toast('Selecione um ou mais arquivos PDF (ou imagens) para anexar.', true);
-      return;
-    }
-    setUploading(true);
-    try {
-      await uploadSummaryFiles(targetWriteFolder, uploadFiles);
-      setUploadFiles([]);
-      if (uploadRef.current) uploadRef.current.value = '';
-    } catch (err) {
-      toast((err as Error).message, true);
-    } finally {
-      setUploading(false);
-    }
   };
 
   const handleDownloadIndividual = async (folder: string, item: SummaryFile) => {
@@ -482,11 +457,11 @@ export const SummariesPage: React.FC = () => {
 
           {/* Active Subject Controls & Mode Tabs */}
           <div className="pt-2.5 border-t border-[var(--line)] flex flex-wrap items-center justify-between gap-2.5">
-            <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
+            <div className="inline-flex flex-wrap rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
               <button
                 type="button"
                 onClick={() => setActiveTab('notes')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors cursor-pointer ${
                   activeTab === 'notes'
                     ? 'bg-[var(--accent)] text-white'
                     : 'text-[var(--muted)] hover:text-[var(--text)]'
@@ -497,8 +472,21 @@ export const SummariesPage: React.FC = () => {
               </button>
               <button
                 type="button"
+                onClick={() => setActiveTab('attachments')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors cursor-pointer ${
+                  activeTab === 'attachments'
+                    ? 'bg-[var(--accent)] text-white'
+                    : 'text-[var(--muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                <Paperclip className="w-3.5 h-3.5" />
+                Anexos PDF{' '}
+                <span className="font-mono-num tabular-nums opacity-80">({totalCounts.pdfs})</span>
+              </button>
+              <button
+                type="button"
                 onClick={() => setActiveTab('mindmap')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors cursor-pointer ${
                   activeTab === 'mindmap'
                     ? 'bg-[var(--accent)] text-white'
                     : 'text-[var(--muted)] hover:text-[var(--text)]'
@@ -510,7 +498,7 @@ export const SummariesPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setActiveTab('downloads')}
-                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors ${
+                className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors cursor-pointer ${
                   activeTab === 'downloads'
                     ? 'bg-[var(--accent)] text-white'
                     : 'text-[var(--muted)] hover:text-[var(--text)]'
@@ -579,174 +567,163 @@ export const SummariesPage: React.FC = () => {
       {/* TAB 1: NOTES & ATTACHED PDFs */}
       {activeTab === 'notes' && (
         <div className="flex flex-col gap-4">
-          {!hideUpload && folderNames.length > 0 && (
-            <div className="grid grid-cols-1 xl:grid-cols-[1.45fr_1fr] gap-3.5 items-start">
-              {/* Written Note Composer */}
-              <Panel
-                title={
-                  editingNoteId
-                    ? `Editando anotação em ${visibleName(targetWriteFolder)}`
-                    : `Nova anotação de resumo · ${visibleName(targetWriteFolder)}`
-                }
-                action={
-                  <button
-                    type="button"
-                    onClick={() => setNoteEditorExpanded((prev) => !prev)}
-                    className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
-                  >
-                    {noteEditorExpanded ? (
-                      <>
-                        Recolher <ChevronUp className="w-3.5 h-3.5" />
-                      </>
-                    ) : (
-                      <>
-                        Expandir <ChevronDown className="w-3.5 h-3.5" />
-                      </>
-                    )}
-                  </button>
-                }
-              >
-                {noteEditorExpanded && (
-                  <form onSubmit={handleSaveNote} className="flex flex-col gap-2.5">
-                    {activeFolder === '__ALL__' && (
-                      <div>
-                        <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                          Salvar na matéria
-                        </label>
-                        <select
-                          value={targetWriteFolder}
-                          onChange={(e) => setSelectedFolder(e.target.value)}
-                          className="ce-input"
-                        >
-                          {folderNames.map((f) => (
-                            <option key={f} value={f}>
-                              {visibleName(f)}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    )}
-
-                    <div className="grid grid-cols-1 sm:grid-cols-[1.35fr_1fr] gap-2.5">
-                      <div>
-                        <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                          Título da anotação *
-                        </label>
-                        <input
-                          type="text"
-                          value={noteTitle}
-                          onChange={(e) => setNoteTitle(e.target.value)}
-                          placeholder="Ex.: Poderes Administrativos — Poder de Polícia"
-                          className="ce-input"
-                        />
-                      </div>
-                      <div>
-                        <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                          Tópicos / Etiquetas (separados por vírgula)
-                        </label>
-                        <input
-                          type="text"
-                          value={noteTagsInput}
-                          onChange={(e) => setNoteTagsInput(e.target.value)}
-                          placeholder="Ex.: Art. 78 CTN, Decoreba, FGV"
-                          className="ce-input"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
-                        <label className="text-[11px] font-bold text-[var(--muted)]">
-                          Conteúdo do resumo / anotações
-                        </label>
-                        <button
-                          type="button"
-                          disabled={!noteContent.trim()}
-                          onClick={() => {
-                            setNoteContent(formatCorrectionTextStructured(noteContent));
-                            toast('Anotação estruturada com quebras de artigos e tópicos.');
-                          }}
-                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45"
-                        >
-                          <Wand2 className="w-3 h-3" />
-                          Estruturar texto
-                        </button>
-                      </div>
-                      <textarea
-                        value={noteContent}
-                        onChange={(e) => setNoteContent(e.target.value)}
-                        rows={6}
-                        placeholder="Anote conceitos, regras, exceções, artigos de lei, súmulas e pegadinhas da banca..."
-                        className="ce-textarea leading-relaxed"
-                      />
-                    </div>
-
-                    <div className="flex flex-wrap items-center justify-end gap-2">
-                      {editingNoteId && (
-                        <button
-                          type="button"
-                          onClick={handleCancelEditNote}
-                          className="h-[36px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
-                        >
-                          Cancelar edição
-                        </button>
-                      )}
-                      <button
-                        type="submit"
-                        disabled={savingNote}
-                        className="inline-flex items-center gap-1.5 h-[36px] px-4 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap"
-                      >
-                        <Save className="w-3.5 h-3.5" />
-                        {savingNote
-                          ? 'Salvando…'
-                          : editingNoteId
-                            ? 'Atualizar anotação'
-                            : 'Salvar anotação'}
-                      </button>
-                    </div>
-                  </form>
-                )}
-              </Panel>
-
-              {/* PDF Attachment Uploader */}
-              <Panel title={`Anexar PDFs · ${visibleName(targetWriteFolder)}`}>
-                <form onSubmit={handleUploadFiles} className="flex flex-col gap-2.5">
-                  <div>
-                    <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
-                      Selecione um ou vários arquivos (.pdf, .png, .jpg, .webp)
-                    </label>
-                    <input
-                      ref={uploadRef}
-                      type="file"
-                      multiple
-                      accept=".pdf,.png,.jpg,.jpeg,.webp"
-                      onChange={(e) => setUploadFiles(Array.from(e.target.files || []))}
-                      className="ce-input file:mr-3 file:rounded-md file:border-0 file:bg-[var(--panel-raised)] file:px-2.5 file:py-1 file:text-[11px] file:font-bold file:text-[var(--text)]"
-                    />
-                  </div>
-
-                  {uploadFiles.length > 0 && (
-                    <div className="rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-2.5 py-2 text-[11.5px] text-[var(--text)]">
-                      <strong>{uploadFiles.length} arquivo(s) selecionado(s):</strong>{' '}
-                      {uploadFiles.map((f) => f.name).join(', ')}
-                    </div>
-                  )}
-
-                  <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
-                    <span className="text-[11.5px] text-[var(--muted)]">
-                      PDFs anexados entram no download por matéria e no gerador de IA.
-                    </span>
+          {!hideUpload && (
+            <div
+              className={
+                folderNames.length > 0
+                  ? 'grid grid-cols-1 xl:grid-cols-[1.35fr_1fr] gap-3.5 items-start'
+                  : 'flex flex-col gap-3.5'
+              }
+            >
+              {/* Written Note Composer (shown when at least one subject folder exists) */}
+              {folderNames.length > 0 && (
+                <Panel
+                  title={
+                    editingNoteId
+                      ? `Editando anotação em ${visibleName(targetWriteFolder)}`
+                      : `Nova anotação de resumo · ${visibleName(targetWriteFolder)}`
+                  }
+                  action={
                     <button
-                      type="submit"
-                      disabled={uploading || uploadFiles.length === 0}
-                      className="inline-flex items-center gap-1.5 h-[36px] px-4 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-55 whitespace-nowrap"
+                      type="button"
+                      onClick={() => setNoteEditorExpanded((prev) => !prev)}
+                      className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
                     >
-                      <FileUp className="w-3.5 h-3.5" />
-                      {uploading ? 'Anexando…' : 'Anexar arquivo(s)'}
+                      {noteEditorExpanded ? (
+                        <>
+                          Recolher <ChevronUp className="w-3.5 h-3.5" />
+                        </>
+                      ) : (
+                        <>
+                          Expandir <ChevronDown className="w-3.5 h-3.5" />
+                        </>
+                      )}
                     </button>
-                  </div>
-                </form>
-              </Panel>
+                  }
+                >
+                  {noteEditorExpanded && (
+                    <form onSubmit={handleSaveNote} className="flex flex-col gap-2.5">
+                      {activeFolder === '__ALL__' && (
+                        <div>
+                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                            Salvar na matéria
+                          </label>
+                          <select
+                            value={targetWriteFolder}
+                            onChange={(e) => setSelectedFolder(e.target.value)}
+                            className="ce-input"
+                          >
+                            {folderNames.map((f) => (
+                              <option key={f} value={f}>
+                                {visibleName(f)}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-[1.35fr_1fr] gap-2.5">
+                        <div>
+                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                            Título da anotação *
+                          </label>
+                          <input
+                            type="text"
+                            value={noteTitle}
+                            onChange={(e) => setNoteTitle(e.target.value)}
+                            placeholder="Ex.: Poderes Administrativos — Poder de Polícia"
+                            className="ce-input"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                            Tópicos / Etiquetas (separados por vírgula)
+                          </label>
+                          <input
+                            type="text"
+                            value={noteTagsInput}
+                            onChange={(e) => setNoteTagsInput(e.target.value)}
+                            placeholder="Ex.: Art. 78 CTN, Decoreba, FGV"
+                            className="ce-input"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <div className="flex flex-wrap items-center justify-between gap-2 mb-1">
+                          <label className="text-[11px] font-bold text-[var(--muted)]">
+                            Conteúdo do resumo / anotações
+                          </label>
+                          <button
+                            type="button"
+                            disabled={!noteContent.trim()}
+                            onClick={() => {
+                              setNoteContent(formatCorrectionTextStructured(noteContent));
+                              toast('Anotação estruturada com quebras de artigos e tópicos.');
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45"
+                          >
+                            <Wand2 className="w-3 h-3" />
+                            Estruturar texto
+                          </button>
+                        </div>
+                        <textarea
+                          value={noteContent}
+                          onChange={(e) => setNoteContent(e.target.value)}
+                          rows={6}
+                          placeholder="Anote conceitos, regras, exceções, artigos de lei, súmulas e pegadinhas da banca..."
+                          className="ce-textarea leading-relaxed"
+                        />
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-end gap-2">
+                        {editingNoteId && (
+                          <button
+                            type="button"
+                            onClick={handleCancelEditNote}
+                            className="h-[36px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
+                          >
+                            Cancelar edição
+                          </button>
+                        )}
+                        <button
+                          type="submit"
+                          disabled={savingNote}
+                          className="inline-flex items-center gap-1.5 h-[36px] px-4 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          {savingNote
+                            ? 'Salvando…'
+                            : editingNoteId
+                              ? 'Atualizar anotação'
+                              : 'Salvar anotação'}
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </Panel>
+              )}
+
+              {/* Dedicated PDF Attachment Component (always accessible, with explicit discipline selector) */}
+              <PdfAttachmentPanel
+                summaryFolders={db.summaryFolders}
+                disciplines={disciplines}
+                activeFolder={activeFolder}
+                hideUpload={hideUpload}
+                mode="compact"
+                previewItemId={previewItem?.id || null}
+                onCreateFolder={createSummaryFolder}
+                onUploadFiles={uploadSummaryFiles}
+                onMoveFile={moveSummaryFileToFolder}
+                onPreviewItem={(item) =>
+                  setPreviewItem(previewItem?.id === item.id ? null : item)
+                }
+                onDownloadItem={handleDownloadIndividual}
+                onOpenAiStudio={(folder, item) => setAiModalTarget({ folder, item })}
+                onDeleteItem={handleDeleteItem}
+                onOpenFullAttachmentsTab={() => setActiveTab('attachments')}
+                onNotify={toast}
+              />
             </div>
           )}
 
@@ -960,7 +937,41 @@ export const SummariesPage: React.FC = () => {
         </div>
       )}
 
-      {/* TAB 2: VISUAL MIND MAP BUILDER */}
+      {/* TAB 2: DEDICATED PDF ATTACHMENTS */}
+      {activeTab === 'attachments' && (
+        <div className="flex flex-col gap-4">
+          {previewItem && (
+            <FilePreview
+              blobKey={previewItem.blobKey}
+              filename={previewItem.name}
+              mimeType={previewItem.mimeType}
+              title={getSummaryDisplayTitle(previewItem)}
+              onClose={() => setPreviewItem(null)}
+            />
+          )}
+
+          <PdfAttachmentPanel
+            summaryFolders={db.summaryFolders}
+            disciplines={disciplines}
+            activeFolder={activeFolder}
+            hideUpload={hideUpload}
+            mode="full"
+            previewItemId={previewItem?.id || null}
+            onCreateFolder={createSummaryFolder}
+            onUploadFiles={uploadSummaryFiles}
+            onMoveFile={moveSummaryFileToFolder}
+            onPreviewItem={(item) =>
+              setPreviewItem(previewItem?.id === item.id ? null : item)
+            }
+            onDownloadItem={handleDownloadIndividual}
+            onOpenAiStudio={(folder, item) => setAiModalTarget({ folder, item })}
+            onDeleteItem={handleDeleteItem}
+            onNotify={toast}
+          />
+        </div>
+      )}
+
+      {/* TAB 3: VISUAL MIND MAP BUILDER */}
       {activeTab === 'mindmap' && (
         <Panel
           title={

@@ -1029,6 +1029,7 @@ interface StudyContextValue {
     payload: { id?: string; title: string; mindMap: MindMapNode; tags?: string[] },
   ) => Promise<SummaryFile>;
   deleteSummaryFile: (folder: string, fileId: string) => Promise<void>;
+  moveSummaryFileToFolder: (fromFolder: string, fileId: string, toFolder: string) => void;
 
   // Proofs
   createProofBank: (name: string) => string;
@@ -15788,6 +15789,30 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [deleteOrQueueDriveFiles, toast],
   );
 
+  const moveSummaryFileToFolder = useCallback(
+    (fromFolder: string, fileId: string, toFolder: string) => {
+      if (!fromFolder || !toFolder || fromFolder === toFolder) return;
+      const sourceItem = (dbRef.current.summaryFolders[fromFolder] || []).find((f) => f.id === fileId);
+      if (!sourceItem) return;
+      setDb((prev) => {
+        const fromList = prev.summaryFolders[fromFolder] || [];
+        const target = fromList.find((f) => f.id === fileId);
+        if (!target) return prev;
+        const toList = prev.summaryFolders[toFolder] || [];
+        return {
+          ...prev,
+          summaryFolders: {
+            ...prev.summaryFolders,
+            [fromFolder]: fromList.filter((f) => f.id !== fileId),
+            [toFolder]: [target, ...toList],
+          },
+        };
+      });
+      toast(`"${visibleName(sourceItem.title || sourceItem.name)}" movido para ${visibleName(toFolder)}.`);
+    },
+    [toast],
+  );
+
   // Proofs
   const createProofBank = useCallback(
     (rawName: string): string => {
@@ -17298,6 +17323,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         saveSummaryNote,
         saveSummaryMindMap,
         deleteSummaryFile,
+        moveSummaryFileToFolder,
         createProofBank,
         uploadProofOnly,
         uploadProofWithAnswer,
