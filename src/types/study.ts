@@ -210,6 +210,8 @@ export interface ScheduleTopic {
   tempo: string;
   observacoes: string;
   estudado_segundos?: number;
+  editalContestId?: string;
+  editalPointId?: string;
 }
 
 export type ScheduleMap = Record<WeekdayName, ScheduleTopic[]>;
@@ -226,6 +228,8 @@ export interface CompletedGoal {
   topicId?: string;
   studyRecordId?: string;
   estudado_segundos?: number;
+  editalContestId?: string;
+  editalPointId?: string;
 }
 
 export interface IncompleteGoal {
@@ -240,6 +244,23 @@ export interface IncompleteGoal {
   concurso_alvo?: string;
   topicId?: string;
   estudado_segundos?: number;
+  editalContestId?: string;
+  editalPointId?: string;
+}
+
+export interface TopicSpacedReview {
+  id: string;
+  subject: string;
+  topic: string;
+  source: 'schedule' | 'edital';
+  sourceId?: string;
+  contestId?: string;
+  contestName?: string;
+  completedAt: string; // DD/MM/YYYY
+  nextReviewIso: string; // YYYY-MM-DD
+  stageIndex: number; // 0 = 24h (1d), 1 = 7d, 2 = 15d, 3 = 30d
+  lastReviewedIso?: string;
+  done?: boolean;
 }
 
 export type IncidenceGrade =
@@ -335,12 +356,19 @@ export interface PersonalPdfFile {
 
 export type SummaryItemKind = 'note' | 'pdf' | 'mindmap' | 'image';
 
+export type MindMapNodeTag = 'lei' | 'sumula' | 'excecao' | 'prazo' | 'pegadinha' | 'dica';
+export type MindMapLayoutMode = 'bilateral' | 'horizontal' | 'vertical';
+export type MindMapEdgeStyle = 'curved' | 'orthogonal';
+
 export interface MindMapNode {
   id: string;
   label: string;
   note?: string;
   color?: string;
+  tag?: MindMapNodeTag | '';
   collapsed?: boolean;
+  layout?: MindMapLayoutMode;
+  edgeStyle?: MindMapEdgeStyle;
   children: MindMapNode[];
 }
 
@@ -527,6 +555,7 @@ export interface AppPreferences {
   career_meta?: CareerMeta;
   daily_hours_goal?: number;
   daily_questions_goal?: number;
+  weekly_subject_hours?: Record<string, number>;
   final_review_margin_days?: number;
   target_exam_contest_id?: string;
   pomodoro_focus_minutes?: number;
@@ -612,6 +641,7 @@ export interface StudyDatabase {
   studyCycle?: StudyCycleConfig;
   completedGoals: CompletedGoal[];
   incompleteGoals: IncompleteGoal[];
+  topicReviews?: TopicSpacedReview[];
   weeklyGoalNotes: Record<string, string>;
   laws: Record<string, LawFolderData>;
   lawHighlights: Record<string, LawHighlight[]>;

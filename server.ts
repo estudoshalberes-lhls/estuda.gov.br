@@ -508,6 +508,11 @@ async function startServer() {
   const ALLOWED_TTS_VOICES = new Set(['Kore', 'Zephyr', 'Charon', 'Puck', 'Fenrir']);
   const GEMINI_TTS_MODEL = 'gemini-3.8-flash-lite-tts';
 
+  app.options('/api/ai/tts', (_req: Request, res: Response) => {
+    res.setHeader('Allow', 'POST, OPTIONS');
+    res.status(204).end();
+  });
+
   app.post('/api/ai/tts', requireAuthorizedStudyClient, async (req: Request, res: Response) => {
     try {
       const { text, voiceName, style } = (req.body || {}) as {

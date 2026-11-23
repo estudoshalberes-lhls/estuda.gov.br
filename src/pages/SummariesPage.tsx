@@ -1006,6 +1006,17 @@ export const SummariesPage: React.FC = () => {
               initialId={mindMapEditing.id}
               initialTitle={mindMapEditing.title}
               initialTree={mindMapEditing.tree}
+              savedMaps={(
+                db.summaryFolders[mindMapEditing.folder || targetWriteFolder] || []
+              ).filter((it) => getSummaryItemKind(it) === 'mindmap' && it.mindMap)}
+              onSelectSavedMap={(item) =>
+                handleOpenMindMap(mindMapEditing.folder || targetWriteFolder, item)
+              }
+              onStartNewMap={() =>
+                setMindMapEditing({
+                  folder: mindMapEditing.folder || targetWriteFolder,
+                })
+              }
               onSave={async (payload) => {
                 const folderToSave = mindMapEditing.folder || targetWriteFolder;
                 const saved = await saveSummaryMindMap(folderToSave, payload);

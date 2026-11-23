@@ -490,10 +490,37 @@ export function useLawVoiceReader(options: {
           } catch {
             // keep generic detail
           }
-          throw new Error(detail);
+          const err = new Error(detail) as Error & {
+            status?: number;
+            endpointUnavailable?: boolean;
+          };
+          err.status = res.status;
+          err.endpointUnavailable =
+            res.status === 404 ||
+            res.status === 405 ||
+            res.status === 501 ||
+            res.status === 503;
+          throw err;
+        }
+
+        const contentType = (res.headers.get('content-type') || '').toLowerCase();
+        if (contentType && !contentType.includes('audio/') && !contentType.includes('octet-stream')) {
+          const err = new Error(
+            'O servidor retornou uma resposta sem áudio para a síntese neural.',
+          ) as Error & { status?: number; endpointUnavailable?: boolean };
+          err.status = 405;
+          err.endpointUnavailable = true;
+          throw err;
         }
 
         const blob = await res.blob();
+        if (!blob || blob.size < 64) {
+          const err = new Error('Áudio neural vazio retornado pelo servidor.') as Error & {
+            endpointUnavailable?: boolean;
+          };
+          err.endpointUnavailable = true;
+          throw err;
+        }
         const objectUrl = URL.createObjectURL(blob);
 
         // LRU eviction
@@ -575,7 +602,9 @@ export function useLawVoiceReader(options: {
       setActiveIndex(index);
       setIsPlaying(true);
       setIsPaused(false);
-      setErrorMessage(null);
+      if (prefsRef.current.engine === 'neural') {
+        setErrorMessage(null);
+      }
       setWordRange(null);
       if (articleKey) {
         onPosRef.current?.(articleKey);
@@ -654,6 +683,28 @@ export function useLawVoiceReader(options: {
           } catch (err: any) {
             if (playbackRunIdRef.current !== runId || err?.name === 'AbortError') return;
             setIsBuffering(false);
+
+            const isUnavailable =
+              Boolean(err?.endpointUnavailable) ||
+              err?.status === 404 ||
+              err?.status === 405 ||
+              err?.status === 501 ||
+              err?.status === 503;
+
+            if (isUnavailable && isBrowserSpeechSupported) {
+              // Automatically and seamlessly continue playback with the fluid Browser Voice
+              const statusNote = err?.status ? ` (HTTP ${err.status})` : '';
+              prefsRef.current = { ...prefsRef.current, engine: 'browser' };
+              setPrefs((prev) => ({ ...prev, engine: 'browser' }));
+              setErrorMessage(
+                `Voz Neural indisponível neste servidor${statusNote}. Leitura continuada automaticamente com Voz Fluida do Navegador.`,
+              );
+              window.setTimeout(() => {
+                speakAtIndex(index, 0);
+              }, 20);
+              return;
+            }
+
             setIsPlaying(false);
             setErrorMessage(
               err?.message ||
@@ -1196,13 +1247,13 @@ export const LawVoicePlayerBar: React.FC<LawVoicePlayerBarProps> = ({
             <AlertCircle className="w-3.5 h-3.5 shrink-0" />
             <span>{errorMessage}</span>
           </span>
-          {engine === 'neural' && onChangeEngine && (
+          {onChangeEngine && (
             <button
               type="button"
-              onClick={() => onChangeEngine('browser')}
+              onClick={() => onChangeEngine(engine === 'neural' ? 'browser' : 'neural')}
               className="px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
             >
-              Usar Voz do Navegador
+              {engine === 'neural' ? 'Usar Voz do Navegador' : 'Tentar Voz Neural novamente'}
             </button>
           )}
         </div>

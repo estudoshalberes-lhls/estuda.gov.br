@@ -272,9 +272,55 @@ import {
   SubmittedSimulation,
   SummaryFile,
   ToastMessage,
+  TopicSpacedReview,
   WeekdayName,
   WeeklyScheduleFileRecord,
 } from '../types/study';
+
+const TOPIC_REVIEW_INTERVALS_DAYS = [1, 7, 15, 30] as const;
+
+function upsertTopicSpacedReview(
+  existing: TopicSpacedReview[],
+  input: {
+    subject: string;
+    topic: string;
+    source: 'schedule' | 'edital';
+    sourceId?: string;
+    contestId?: string;
+    contestName?: string;
+    completedAt: string;
+  },
+): TopicSpacedReview[] {
+  const cleanTopic = input.topic.trim();
+  const cleanSubject = input.subject.trim() || 'Estudo Geral';
+  if (!cleanTopic) return existing;
+  const todayIso = localDateIso();
+  const nextIso = addDaysIso(todayIso, TOPIC_REVIEW_INTERVALS_DAYS[0]);
+  const matchKey = `${normalizeSearch(cleanSubject)}::${normalizeSearch(cleanTopic)}`;
+  const idx = existing.findIndex((r) => {
+    if (input.sourceId && r.sourceId && r.sourceId === input.sourceId) return true;
+    return `${normalizeSearch(r.subject)}::${normalizeSearch(r.topic)}` === matchKey;
+  });
+  const entry: TopicSpacedReview = {
+    id: idx >= 0 ? existing[idx].id : uid(10),
+    subject: cleanSubject,
+    topic: cleanTopic,
+    source: input.source,
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
+    ...(input.contestId ? { contestId: input.contestId } : {}),
+    ...(input.contestName ? { contestName: input.contestName } : {}),
+    completedAt: input.completedAt,
+    nextReviewIso: nextIso,
+    stageIndex: 0,
+    done: false,
+  };
+  if (idx >= 0) {
+    const copy = [...existing];
+    copy[idx] = entry;
+    return copy;
+  }
+  return [entry, ...existing];
+}
 
 function addDaysIso(baseIso: string, days: number): string {
   const parts = baseIso.split('-').map(Number);
@@ -916,6 +962,8 @@ interface StudyContextValue {
       materia?: string;
       tempo?: string;
       observacoes?: string;
+      editalContestId?: string;
+      editalPointId?: string;
     },
   ) => void;
   deleteScheduleTopic: (day: WeekdayName, index: number) => void;
@@ -928,6 +976,13 @@ interface StudyContextValue {
   completeScheduleTopic: (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => void;
   archiveTopicAsIncomplete: (day: WeekdayName, index: number, currentSchedule: ScheduleMap) => void;
   archiveFullWeek: (currentSchedule: ScheduleMap) => number;
+  executeGuidedWeeklyClose: (params: {
+    weekMondayIso: string;
+    weeklyNote: string;
+    rolloverItems: Array<{ topic: ScheduleTopic; targetDay: WeekdayName }>;
+    archiveItems: Array<{ day: WeekdayName; topic: ScheduleTopic }>;
+    nextWeekKey: string;
+  }) => { rolledOver: number; archived: number };
   importScheduleTxt: (file: File) => Promise<number>;
   deleteCompletedGoal: (id: string) => void;
   updateCompletedGoal: (
@@ -946,6 +1001,10 @@ interface StudyContextValue {
   completeIncompleteGoal: (id: string) => void;
   restoreIncompleteGoalToSchedule: (id: string, targetDay: WeekdayName) => void;
   deleteIncompleteGoal: (id: string) => void;
+  advanceTopicReview: (reviewId: string) => void;
+  scheduleTopicReviewToDay: (reviewId: string, targetDay: WeekdayName) => void;
+  deleteTopicReview: (reviewId: string) => void;
+  setWeeklySubjectHourGoal: (subject: string, hours: number) => void;
 
   // Laws & Incidence Matrix
   createLawFolder: (name: string, options?: { silent?: boolean }) => string;
@@ -2017,6 +2076,7 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     caseLaw: toArraySafe(dataObj.caseLaw, seed.caseLaw || []),
     completedGoals: toArraySafe(dataObj.completedGoals, seed.completedGoals || []),
     incompleteGoals: toArraySafe(dataObj.incompleteGoals, seed.incompleteGoals || []),
+    topicReviews: toArraySafe(dataObj.topicReviews, seed.topicReviews || []),
     proofBanks: toArraySafe(dataObj.proofBanks, seed.proofBanks || []),
     essays: toArraySafe(dataObj.essays, seed.essays || []),
     criticalPoints: toArraySafe(dataObj.criticalPoints, seed.criticalPoints || []),
@@ -12655,9 +12715,26 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const toggleContestEditalPoint = useCallback(
     (contestId: string, pointId: string) => {
       const today = localDateBrazilian();
+      const targetContest = dbRef.current.contests.find((c) => c.id === contestId);
+      const targetPoint = targetContest?.edital_pontos?.find((pt) => pt.id === pointId);
+      const becomingStudied = Boolean(targetPoint && !targetPoint.estudado);
+
       setDb((prev) => {
+        let nextTopicReviews = prev.topicReviews || [];
+        if (becomingStudied && targetPoint) {
+          nextTopicReviews = upsertTopicSpacedReview(nextTopicReviews, {
+            subject: targetPoint.materia || 'Geral',
+            topic: targetPoint.titulo,
+            source: 'edital',
+            sourceId: targetPoint.id,
+            contestId,
+            contestName: targetContest?.concurso,
+            completedAt: today,
+          });
+        }
         const next: StudyDatabase = {
           ...prev,
+          topicReviews: nextTopicReviews,
           contests: prev.contests.map((c) => {
             if (c.id !== contestId) return c;
             return {
@@ -13311,6 +13388,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         materia?: string;
         tempo?: string;
         observacoes?: string;
+        editalContestId?: string;
+        editalPointId?: string;
       },
     ) => {
       setDb((prev) => {
@@ -13340,6 +13419,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               materia: preset?.materia || '',
               tempo: preset?.tempo || '1h',
               observacoes: preset?.observacoes || '',
+              ...(preset?.editalContestId ? { editalContestId: preset.editalContestId } : {}),
+              ...(preset?.editalPointId ? { editalPointId: preset.editalPointId } : {}),
             },
           ],
         };
@@ -13423,17 +13504,49 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const completeScheduleTopic = useCallback(
     (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => {
+      const previewSnapshot = dbRef.current;
+      const previewList = currentDayTopics || previewSnapshot.schedule[day] || [];
+      const previewRemoved = previewList[index];
+      if (!previewRemoved) return;
+
       lastUrgentSaveMsRef.current = Date.now();
-      let creditedSeconds = 0;
-      let creditedSubject = '';
-      let completedTopicId = '';
+      const completedTopicId = previewRemoved.id || '';
+      const fixedListPreview = previewSnapshot.fixedSubjects?.length
+        ? previewSnapshot.fixedSubjects
+        : DEFAULT_FIXED_SUBJECTS;
+      const previewSubject =
+        previewRemoved.disciplina_fixa?.trim() ||
+        inferFixedSubjectFromTopic(
+          { disciplina_fixa: previewRemoved.disciplina_fixa, materia: previewRemoved.materia },
+          fixedListPreview,
+        ) ||
+        previewRemoved.materia?.trim() ||
+        'Estudo Geral';
+      const previewManualSec = scheduleDurationSeconds(previewRemoved.tempo || '');
+      const previewLoggedFromRecords = previewRemoved.id
+        ? previewSnapshot.studyTimeRecords.reduce(
+            (sum, rec) =>
+              sum +
+              rec.allocations
+                .filter((a) => a.topicId === previewRemoved.id)
+                .reduce((s, a) => s + (a.seconds || 0), 0),
+            0,
+          )
+        : 0;
+      const previewAlreadyLogged = Math.max(
+        previewRemoved.estudado_segundos || 0,
+        previewLoggedFromRecords,
+      );
+      const previewCreditsSec =
+        previewManualSec > previewAlreadyLogged ? previewManualSec - previewAlreadyLogged : 0;
+      const linkedContestId = previewRemoved.editalContestId || '';
+      const linkedPointId = previewRemoved.editalPointId || '';
 
       setDb((prev) => {
         const list = [...(currentDayTopics || prev.schedule[day] || [])];
         const [removed] = list.splice(index, 1);
         if (!removed) return prev;
 
-        completedTopicId = removed.id || '';
         const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
         const effectiveFixedSubject =
           removed.disciplina_fixa?.trim() ||
@@ -13498,8 +13611,6 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ],
           };
           nextStudyTimeRecords = [...prev.studyTimeRecords, manualRecord];
-          creditedSeconds = secondsToAdd;
-          creditedSubject = effectiveFixedSubject;
         }
 
         const nextSchedule = { ...prev.schedule, [day]: list };
@@ -13507,8 +13618,41 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           removed.tempo?.trim() ||
           (effectiveTotalSeconds > 0 ? formatScheduleDuration(effectiveTotalSeconds) : '0min');
 
+        // Bidirectional Edital sync: automatically mark linked Edital point as studied
+        const nextContests =
+          removed.editalContestId && removed.editalPointId
+            ? prev.contests.map((c) => {
+                if (c.id !== removed.editalContestId) return c;
+                return {
+                  ...c,
+                  edital_pontos: (c.edital_pontos || []).map((pt) =>
+                    pt.id === removed.editalPointId
+                      ? { ...pt, estudado: true, estudado_em: goalDateBr }
+                      : pt,
+                  ),
+                };
+              })
+            : prev.contests;
+
+        // Automatic 24h -> 7d -> 15d -> 30d spaced repetition queue
+        const reviewTopicLabel =
+          removed.materia?.trim() ||
+          removed.observacoes?.trim() ||
+          effectiveFixedSubject;
+        const nextTopicReviews = upsertTopicSpacedReview(prev.topicReviews || [], {
+          subject: effectiveFixedSubject,
+          topic: reviewTopicLabel,
+          source: removed.editalPointId ? 'edital' : 'schedule',
+          sourceId: removed.editalPointId || removed.id,
+          contestId: removed.editalContestId,
+          contestName: effectiveContest,
+          completedAt: goalDateBr,
+        });
+
         const withCompleted: StudyDatabase = {
           ...prev,
+          contests: nextContests,
+          topicReviews: nextTopicReviews,
           studyTimeRecords: nextStudyTimeRecords,
           completedGoals: [
             {
@@ -13523,6 +13667,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ...(removed.id ? { topicId: removed.id } : {}),
               ...(createdRecordId ? { studyRecordId: createdRecordId } : {}),
               ...(effectiveTotalSeconds > 0 ? { estudado_segundos: effectiveTotalSeconds } : {}),
+              ...(removed.editalContestId ? { editalContestId: removed.editalContestId } : {}),
+              ...(removed.editalPointId ? { editalPointId: removed.editalPointId } : {}),
             },
             ...prev.completedGoals,
           ],
@@ -13534,16 +13680,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setActiveTimerTopic(null);
       }
 
+      if (linkedContestId && linkedPointId) {
+        scheduleAutoContestTxtSync(linkedContestId);
+      }
       scheduleAutoScheduleTxtSync();
-      if (creditedSeconds > 0 && creditedSubject) {
+
+      const editalSuffix = linkedContestId && linkedPointId ? ' · Ponto marcado no Edital!' : '';
+      if (previewCreditsSec > 0 && previewSubject) {
         toast(
-          `Meta concluída! +${formatScheduleDuration(creditedSeconds)} contabilizados em ${visibleName(creditedSubject)} no Portal da Transparência.`,
+          `Meta concluída (+${formatScheduleDuration(previewCreditsSec)} em ${visibleName(previewSubject)}) · Revisão 24h agendada${editalSuffix}`,
         );
       } else {
-        toast('Meta concluída e arquivada.');
+        toast(`Meta concluída · Revisão 24h agendada${editalSuffix}`);
       }
     },
-    [activeTimerTopic, scheduleAutoScheduleTxtSync, toast],
+    [activeTimerTopic, scheduleAutoContestTxtSync, scheduleAutoScheduleTxtSync, toast],
   );
 
   const archiveTopicAsIncomplete = useCallback(
@@ -13577,6 +13728,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ...(topic.concurso_alvo ? { concurso_alvo: topic.concurso_alvo } : {}),
               ...(topic.id ? { topicId: topic.id } : {}),
               ...(topic.estudado_segundos ? { estudado_segundos: topic.estudado_segundos } : {}),
+              ...(topic.editalContestId ? { editalContestId: topic.editalContestId } : {}),
+              ...(topic.editalPointId ? { editalPointId: topic.editalPointId } : {}),
             },
             ...prev.incompleteGoals,
           ],
@@ -13626,6 +13779,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ...(topic.concurso_alvo ? { concurso_alvo: topic.concurso_alvo } : {}),
               ...(topic.id ? { topicId: topic.id } : {}),
               ...(topic.estudado_segundos ? { estudado_segundos: topic.estudado_segundos } : {}),
+              ...(topic.editalContestId ? { editalContestId: topic.editalContestId } : {}),
+              ...(topic.editalPointId ? { editalPointId: topic.editalPointId } : {}),
             })),
             ...prev.incompleteGoals,
           ],
@@ -13636,6 +13791,229 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       return pending.length;
     },
     [scheduleAutoScheduleTxtSync],
+  );
+
+  const executeGuidedWeeklyClose = useCallback(
+    (params: {
+      weekMondayIso: string;
+      weeklyNote: string;
+      rolloverItems: Array<{ topic: ScheduleTopic; targetDay: WeekdayName }>;
+      archiveItems: Array<{ day: WeekdayName; topic: ScheduleTopic }>;
+      nextWeekKey: string;
+    }): { rolledOver: number; archived: number } => {
+      const archivedAt = localDateTimeBrazilian();
+      const nextWeekDates = getWeekDatesForIsoWeek(params.nextWeekKey) || getCurrentWeekDates();
+      const nextWeekMeta = buildScheduleWeekMetadata(params.nextWeekKey, nextWeekDates);
+
+      lastUrgentSaveMsRef.current = Date.now();
+      setDb((prev) => {
+        const curWeekKey = resolveActiveScheduleWeekKey(prev.scheduleDayDates, prev.schedule);
+        const curMeta = buildScheduleWeekMetadata(curWeekKey, prev.scheduleDayDates);
+
+        // Save weekly note
+        const nextWeeklyNotes = { ...prev.weeklyGoalNotes };
+        const trimmedNote = params.weeklyNote.trim();
+        if (trimmedNote) nextWeeklyNotes[params.weekMondayIso] = trimmedNote;
+        else delete nextWeeklyNotes[params.weekMondayIso];
+
+        // Archive closed week snapshot as cleared
+        const emptyClosedSchedule = WEEKDAYS.reduce<ScheduleMap>(
+          (acc, d) => ({ ...acc, [d]: [] }),
+          {} as ScheduleMap,
+        );
+
+        // Build next week's schedule preserving any already-scheduled items in next week + adding rolled-over items
+        const existingNextRecord = prev.weeklySchedules?.[nextWeekMeta.weekKey];
+        const baseNextSchedule: ScheduleMap = WEEKDAYS.reduce<ScheduleMap>((acc, d) => {
+          acc[d] = [...(existingNextRecord?.schedule?.[d] || [])];
+          return acc;
+        }, {} as ScheduleMap);
+
+        params.rolloverItems.forEach(({ topic, targetDay }) => {
+          baseNextSchedule[targetDay] = [
+            ...baseNextSchedule[targetDay],
+            {
+              ...topic,
+              id: uid(8),
+              data: nextWeekDates[targetDay] || localDateBrazilian(),
+              data_personalizada: false,
+              estudado_segundos: 0,
+            },
+          ];
+        });
+
+        const archivedGoals = params.archiveItems.map(({ day, topic }) => ({
+          id: uid(10),
+          data:
+            topic.data ||
+            prev.scheduleDayDates?.[day] ||
+            getCurrentWeekDates()[day] ||
+            localDateBrazilian(),
+          dia_semana: day,
+          materia: topic.materia,
+          tempo: topic.tempo,
+          observacoes: topic.observacoes,
+          arquivado_em: archivedAt,
+          ...(topic.disciplina_fixa ? { disciplina_fixa: topic.disciplina_fixa } : {}),
+          ...(topic.concurso_alvo ? { concurso_alvo: topic.concurso_alvo } : {}),
+          ...(topic.id ? { topicId: topic.id } : {}),
+          ...(topic.estudado_segundos ? { estudado_segundos: topic.estudado_segundos } : {}),
+          ...(topic.editalContestId ? { editalContestId: topic.editalContestId } : {}),
+          ...(topic.editalPointId ? { editalPointId: topic.editalPointId } : {}),
+        }));
+
+        const updatedWeeklySchedules: Record<string, WeeklyScheduleFileRecord> = {
+          ...(prev.weeklySchedules || {}),
+          [curMeta.weekKey]: {
+            weekKey: curMeta.weekKey,
+            label: curMeta.label,
+            fileName: curMeta.fileName,
+            updatedAt: archivedAt,
+            blobKey: `schedule_week_${curMeta.weekKey}`,
+            schedule: emptyClosedSchedule,
+            scheduleDayDates: curMeta.dayDates,
+          },
+          [nextWeekMeta.weekKey]: {
+            weekKey: nextWeekMeta.weekKey,
+            label: nextWeekMeta.label,
+            fileName: nextWeekMeta.fileName,
+            updatedAt: archivedAt,
+            blobKey: `schedule_week_${nextWeekMeta.weekKey}`,
+            schedule: baseNextSchedule,
+            scheduleDayDates: nextWeekMeta.dayDates,
+          },
+        };
+
+        const next: StudyDatabase = {
+          ...prev,
+          weeklyGoalNotes: nextWeeklyNotes,
+          incompleteGoals: [...archivedGoals, ...prev.incompleteGoals],
+          schedule: baseNextSchedule,
+          scheduleDayDates: nextWeekMeta.dayDates,
+          weeklySchedules: updatedWeeklySchedules,
+        };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
+      });
+
+      scheduleAutoScheduleTxtSync();
+      toast(
+        `Semana fechada! ${params.rolloverItems.length} meta(s) reprogramada(s) para a nova semana e ${params.archiveItems.length} arquivada(s) em Pendências.`,
+      );
+      return {
+        rolledOver: params.rolloverItems.length,
+        archived: params.archiveItems.length,
+      };
+    },
+    [scheduleAutoScheduleTxtSync, toast],
+  );
+
+  const advanceTopicReview = useCallback(
+    (reviewId: string) => {
+      const target = (dbRef.current.topicReviews || []).find((r) => r.id === reviewId);
+      if (!target) return;
+      const todayIso = localDateIso();
+      const nextStage = target.stageIndex + 1;
+      const isFinishing = nextStage >= TOPIC_REVIEW_INTERVALS_DAYS.length;
+
+      setDb((prev) => {
+        const nextReviews = (prev.topicReviews || []).map((r) => {
+          if (r.id !== reviewId) return r;
+          if (isFinishing) {
+            return { ...r, stageIndex: nextStage, lastReviewedIso: todayIso, done: true };
+          }
+          const daysAhead = TOPIC_REVIEW_INTERVALS_DAYS[nextStage];
+          return {
+            ...r,
+            stageIndex: nextStage,
+            lastReviewedIso: todayIso,
+            nextReviewIso: addDaysIso(todayIso, daysAhead),
+            done: false,
+          };
+        });
+        const next: StudyDatabase = { ...prev, topicReviews: nextReviews };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
+      });
+
+      if (isFinishing) {
+        toast(`Ciclo completo (24h·7d·15d·30d) consolidado em "${visibleName(target.topic)}"!`);
+      } else {
+        const nextDays = TOPIC_REVIEW_INTERVALS_DAYS[nextStage];
+        toast(`Revisão registrada! Próxima revisão de "${visibleName(target.topic)}" em ${nextDays} dias.`);
+      }
+    },
+    [toast],
+  );
+
+  const scheduleTopicReviewToDay = useCallback(
+    (reviewId: string, targetDay: WeekdayName) => {
+      const target = (dbRef.current.topicReviews || []).find((r) => r.id === reviewId);
+      if (!target) return;
+      const stageLabels = ['24h', '7d', '15d', '30d'];
+      const stageTag = stageLabels[Math.min(target.stageIndex, stageLabels.length - 1)] || 'Rev';
+      addTopicToDay(targetDay, {
+        disciplina_fixa: target.subject,
+        concurso_alvo: target.contestName || undefined,
+        materia: `Revisão ${stageTag}: ${target.topic}`,
+        tempo: '30m',
+        observacoes: `Revisão espaçada (${stageTag}) · concluído originalmente em ${target.completedAt}`,
+        ...(target.contestId ? { editalContestId: target.contestId } : {}),
+        ...(target.source === 'edital' && target.sourceId ? { editalPointId: target.sourceId } : {}),
+      });
+      toast(`Revisão (${stageTag}) de "${visibleName(target.topic)}" adicionada em ${targetDay}.`);
+    },
+    [addTopicToDay, toast],
+  );
+
+  const deleteTopicReview = useCallback(
+    (reviewId: string) => {
+      setDb((prev) => {
+        const next: StudyDatabase = {
+          ...prev,
+          topicReviews: (prev.topicReviews || []).filter((r) => r.id !== reviewId),
+        };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
+      });
+      toast('Item removido da fila de revisão espaçada.');
+    },
+    [toast],
+  );
+
+  const setWeeklySubjectHourGoal = useCallback(
+    (subject: string, hours: number) => {
+      const cleanSubject = subject.trim();
+      if (!cleanSubject) return;
+      const cleanHours = Math.max(0, Math.round(hours * 10) / 10);
+      setDb((prev) => {
+        const current = { ...(prev.preferences.weekly_subject_hours || {}) };
+        if (cleanHours <= 0) {
+          delete current[cleanSubject];
+        } else {
+          current[cleanSubject] = cleanHours;
+        }
+        const next: StudyDatabase = {
+          ...prev,
+          preferences: {
+            ...prev.preferences,
+            weekly_subject_hours: current,
+          },
+        };
+        dbRef.current = next;
+        pendingCloudSyncRef.current = true;
+        return next;
+      });
+      toast(
+        cleanHours > 0
+          ? `Meta semanal de ${visibleName(cleanSubject)} definida para ${cleanHours}h/semana.`
+          : `Meta semanal de ${visibleName(cleanSubject)} removida.`,
+      );
+    },
+    [toast],
   );
 
   const importScheduleTxt = useCallback(
@@ -17276,6 +17654,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         completeScheduleTopic,
         archiveTopicAsIncomplete,
         archiveFullWeek,
+        executeGuidedWeeklyClose,
         importScheduleTxt,
         deleteCompletedGoal,
         updateCompletedGoal,
@@ -17285,6 +17664,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         completeIncompleteGoal,
         restoreIncompleteGoalToSchedule,
         deleteIncompleteGoal,
+        advanceTopicReview,
+        scheduleTopicReviewToDay,
+        deleteTopicReview,
+        setWeeklySubjectHourGoal,
         createLawFolder,
         uploadLawFile,
         reprocessLawFolder,
