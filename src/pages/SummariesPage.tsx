@@ -24,6 +24,12 @@ import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import { formatCorrectionTextStructured } from '../lib/legalTextFormatter';
 import { formatUploadSize, visibleName } from '../lib/parsers';
 import {
+  computeMindMapLayout,
+  exportMindMapPngFile,
+  getTagMeta,
+  setAllNodesCollapsed,
+} from '../lib/mindMapLayout';
+import {
   exportAllSubjectsSummariesPdf,
   exportSingleNotePdf,
   exportSubjectSummariesPdf,
@@ -31,7 +37,7 @@ import {
   getSummaryDisplayTitle,
   getSummaryItemKind,
 } from '../lib/summaryPdfExport';
-import { MindMapNode, Question, SummaryFile, SummaryItemKind } from '../types/study';
+import { MindMapCustomTag, MindMapNode, Question, SummaryFile, SummaryItemKind } from '../types/study';
 import { MindMapBuilder } from '../components/summaries/MindMapBuilder';
 import { PdfAttachmentPanel } from '../components/summaries/PdfAttachmentPanel';
 import { SummaryAiStudioModal } from '../components/summaries/SummaryAiStudioModal';
@@ -276,6 +282,81 @@ export const SummariesPage: React.FC = () => {
       return;
     }
     triggerBlobDownload(blob, item.name);
+  };
+
+  const handleDownloadMindMapPng = async (item: SummaryFile) => {
+    if (!item.mindMap) return;
+    try {
+      const expanded = setAllNodesCollapsed(item.mindMap, false);
+      const layout = computeMindMapLayout(
+        expanded,
+        expanded.layout || 'bilateral',
+        expanded.customTags,
+      );
+      await exportMindMapPngFile(
+        layout,
+        expanded.edgeStyle || 'curved',
+        getSummaryDisplayTitle(item),
+        {
+          themeId: expanded.themeId,
+          canvasBg: expanded.canvasBg,
+          customTags: expanded.customTags,
+        },
+      );
+      toast(`PNG de "${getSummaryDisplayTitle(item)}" baixado com todos os ramos expandidos.`);
+    } catch (err) {
+      toast((err as Error).message, true);
+    }
+  };
+
+  const renderExpandedMindMapBranch = (
+    node: MindMapNode,
+    depth: number,
+    customTags?: MindMapCustomTag[],
+  ): React.ReactNode => {
+    const tagMeta = getTagMeta(node.tag, customTags);
+    return (
+      <div
+        key={node.id}
+        className={depth > 0 ? 'mt-1.5 pl-3 border-l border-[var(--line-strong)]' : ''}
+      >
+        <div className="flex flex-wrap items-baseline gap-1.5 text-[12px] leading-relaxed">
+          <span
+            className="inline-block w-2 h-2 rounded-full shrink-0 translate-y-[-1px]"
+            style={{ backgroundColor: node.color || '#1351B4' }}
+          />
+          {tagMeta && (
+            <span
+              className="text-[10px] font-extrabold uppercase tracking-wide px-1.5 py-0.5 rounded"
+              style={{ backgroundColor: tagMeta.bg, color: tagMeta.color }}
+            >
+              {tagMeta.short}
+            </span>
+          )}
+          <span
+            className={
+              depth === 0
+                ? 'font-bold text-[var(--text)]'
+                : 'font-semibold text-[var(--text)]'
+            }
+          >
+            {node.label || 'Sem texto'}
+          </span>
+          {node.note?.trim() && (
+            <span className="text-[11.5px] text-[var(--muted)] break-words">
+              — {node.note.trim()}
+            </span>
+          )}
+        </div>
+        {node.children && node.children.length > 0 && (
+          <div className="mt-1">
+            {node.children.map((child) =>
+              renderExpandedMindMapBranch(child, depth + 1, customTags),
+            )}
+          </div>
+        )}
+      </div>
+    );
   };
 
   const handleExportSubjectPdf = async (folderKey: string) => {
@@ -871,6 +952,17 @@ export const SummariesPage: React.FC = () => {
                               {kind === 'note' || kind === 'mindmap' ? 'Baixar PDF' : 'Baixar'}
                             </button>
 
+                            {kind === 'mindmap' && item.mindMap && (
+                              <button
+                                type="button"
+                                onClick={() => void handleDownloadMindMapPng(item)}
+                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                              >
+                                <Download className="w-3.5 h-3.5" />
+                                Baixar PNG
+                              </button>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => handleDeleteItem(folder, item)}
@@ -914,13 +1006,28 @@ export const SummariesPage: React.FC = () => {
                           </div>
                         )}
 
-                        {/* Compact tree summary for Mind Maps */}
+                        {/* Full expanded tree preview for saved Mind Maps (all groups, subgroups & notes) */}
                         {kind === 'mindmap' && item.mindMap && (
-                          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] px-3 py-2 text-[12px] text-[var(--muted)]">
-                            <strong className="text-[var(--text)]">{item.mindMap.label}</strong>
-                            {' · '}
-                            {item.mindMap.children.length} ramo(s) principais:{' '}
-                            {item.mindMap.children.map((c) => c.label).join(' · ') || 'Sem ramos'}
+                          <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-3">
+                            <div className="text-[12.5px] font-extrabold text-[var(--text)] mb-1">
+                              {item.mindMap.label}
+                            </div>
+                            {item.mindMap.note?.trim() && (
+                              <div className="text-[11.5px] text-[var(--muted)] mb-2 break-words">
+                                {item.mindMap.note.trim()}
+                              </div>
+                            )}
+                            {item.mindMap.children && item.mindMap.children.length > 0 ? (
+                              <div className="flex flex-col gap-1.5 pt-1 border-t border-[var(--line)]">
+                                {item.mindMap.children.map((branch) =>
+                                  renderExpandedMindMapBranch(branch, 0, item.mindMap?.customTags),
+                                )}
+                              </div>
+                            ) : (
+                              <div className="text-[11.5px] text-[var(--muted)]">
+                                Sem ramos adicionados.
+                              </div>
+                            )}
                           </div>
                         )}
                       </article>

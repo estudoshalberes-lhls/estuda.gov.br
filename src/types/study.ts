@@ -357,8 +357,19 @@ export interface PersonalPdfFile {
 
 export type SummaryItemKind = 'note' | 'pdf' | 'mindmap' | 'image';
 
-export type MindMapNodeTag = 'lei' | 'sumula' | 'excecao' | 'prazo' | 'pegadinha' | 'dica';
+export type BuiltInMindMapNodeTag = 'lei' | 'sumula' | 'excecao' | 'prazo' | 'pegadinha' | 'dica';
+export type MindMapNodeTag = BuiltInMindMapNodeTag | (string & {});
+
+export interface MindMapCustomTag {
+  id: string;
+  label: string;
+  short: string;
+  color: string;
+  bg: string;
+}
+
 export type MindMapLayoutMode = 'bilateral' | 'horizontal' | 'vertical';
+export type MindMapDirection = 'right' | 'left' | 'up' | 'down';
 export type MindMapEdgeStyle = 'curved' | 'orthogonal';
 export type MindMapThemeId =
   | 'padrao'
@@ -376,11 +387,13 @@ export interface MindMapNode {
   color?: string;
   bgColor?: string;
   tag?: MindMapNodeTag | '';
+  customTags?: MindMapCustomTag[];
   collapsed?: boolean;
   layout?: MindMapLayoutMode;
   edgeStyle?: MindMapEdgeStyle;
   themeId?: MindMapThemeId;
   canvasBg?: string;
+  direction?: MindMapDirection;
   offsetX?: number;
   offsetY?: number;
   children: MindMapNode[];

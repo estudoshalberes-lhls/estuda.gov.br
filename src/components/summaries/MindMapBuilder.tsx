@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   ArrowDown,
+  ArrowLeft,
+  ArrowRight,
   ArrowUp,
   Check,
   ChevronDown,
@@ -32,6 +34,7 @@ import {
   Search,
   Sparkles,
   Spline,
+  Tag,
   Trash2,
   Undo2,
   UnfoldHorizontal,
@@ -42,6 +45,8 @@ import {
   ZoomOut,
 } from 'lucide-react';
 import {
+  MindMapCustomTag,
+  MindMapDirection,
   MindMapEdgeStyle,
   MindMapLayoutMode,
   MindMapNode,
@@ -62,6 +67,7 @@ import {
   applyLiveDragPreview,
   applyThemePaletteToTree,
   buildEdgePath,
+  clearTagFromTree,
   cloneSubtreeWithNewIds,
   computeMindMapLayout,
   countOffsetNodes,
@@ -77,6 +83,7 @@ import {
   getReadableTextOnHex,
   getTagMeta,
   getTreeMetrics,
+  hexToSoftBg,
   insertSiblingInTree,
   isHexColorDark,
   makeNodeId,
@@ -89,6 +96,31 @@ import {
 } from '../../lib/mindMapLayout';
 
 export { MINDMAP_COLORS, createDefaultMindMap };
+
+const CUSTOM_TAGS_STORAGE_KEY = 'estuda_mindmap_custom_tags_v1';
+
+function loadSavedCustomTags(): MindMapCustomTag[] {
+  try {
+    const raw = window.localStorage.getItem(CUSTOM_TAGS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (t): t is MindMapCustomTag =>
+        Boolean(t && typeof t.id === 'string' && typeof t.label === 'string' && typeof t.color === 'string'),
+    );
+  } catch {
+    return [];
+  }
+}
+
+function persistSavedCustomTags(tags: MindMapCustomTag[]): void {
+  try {
+    window.localStorage.setItem(CUSTOM_TAGS_STORAGE_KEY, JSON.stringify(tags));
+  } catch {
+    // Ignore storage quota / privacy mode errors
+  }
+}
 
 function renderTagIcon(tag: MindMapNodeTag, className = 'w-3 h-3') {
   switch (tag) {
@@ -104,6 +136,8 @@ function renderTagIcon(tag: MindMapNodeTag, className = 'w-3 h-3') {
       return <Zap className={className} />;
     case 'dica':
       return <Lightbulb className={className} />;
+    default:
+      return <Tag className={className} />;
   }
 }
 
@@ -194,6 +228,21 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
 
+  // Custom study markers (library persisted locally + embedded in map tree)
+  const [libraryCustomTags, setLibraryCustomTags] = useState<MindMapCustomTag[]>(() =>
+    loadSavedCustomTags(),
+  );
+  const [showNewTagForm, setShowNewTagForm] = useState(false);
+  const [newTagLabel, setNewTagLabel] = useState('');
+  const [newTagColor, setNewTagColor] = useState('#1351B4');
+
+  const allCustomTags = useMemo<MindMapCustomTag[]>(() => {
+    const merged = new Map<string, MindMapCustomTag>();
+    for (const t of libraryCustomTags) merged.set(t.id, t);
+    for (const t of tree.customTags || []) merged.set(t.id, t);
+    return Array.from(merged.values());
+  }, [libraryCustomTags, tree.customTags]);
+
   const activeTheme = useMemo(() => getMindMapTheme(tree.themeId), [tree.themeId]);
   const resolvedCanvasBg = tree.canvasBg || activeTheme.canvasBg;
   const resolvedCanvasDotColor = useMemo(() => {
@@ -229,7 +278,10 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     }
   }, [inlineEditingId]);
 
-  const baseLayout = useMemo(() => computeMindMapLayout(tree, layoutMode), [tree, layoutMode]);
+  const baseLayout = useMemo(
+    () => computeMindMapLayout(tree, layoutMode, allCustomTags),
+    [tree, layoutMode, allCustomTags],
+  );
   const layout = useMemo(
     () => applyLiveDragPreview(baseLayout, dragPreview),
     [baseLayout, dragPreview],
@@ -246,8 +298,8 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   );
   const metrics = useMemo(() => getTreeMetrics(tree), [tree]);
   const searchMatches = useMemo(
-    () => searchMatchingNodeIds(tree, searchQuery),
-    [tree, searchQuery],
+    () => searchMatchingNodeIds(tree, searchQuery, allCustomTags),
+    [tree, searchQuery, allCustomTags],
   );
   const searchMatchSet = useMemo(() => new Set(searchMatches), [searchMatches]);
 
@@ -354,11 +406,11 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   );
 
   const handleAddChild = useCallback(
-    (parentId: string, autoInlineEdit = true) => {
+    (parentId: string, autoInlineEdit = true, direction?: MindMapDirection) => {
       const parent = findNode(tree, parentId);
       const inheritedColor =
         parentId === tree.id
-          ? MINDMAP_COLORS[tree.children.length % MINDMAP_COLORS.length].hex
+          ? activeTheme.branchPalette[tree.children.length % activeTheme.branchPalette.length]
           : parent?.color || '#1351B4';
 
       const defaultLabel = parentId === tree.id ? 'Novo Ramo' : 'Novo Subtópico';
@@ -366,22 +418,55 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
         id: makeNodeId(),
         label: defaultLabel,
         color: inheritedColor,
+        direction,
         children: [],
       };
-      commitTree((prev) =>
-        updateNodeInTree(prev, parentId, (n) => ({
-          ...n,
-          collapsed: false,
-          children: [...(n.children || []), newChild],
-        })),
-      );
+
+      const oldParentPos = baseLayout.nodes.find((n) => n.node.id === parentId);
+      const nextTree = updateNodeInTree(tree, parentId, (n) => ({
+        ...n,
+        collapsed: false,
+        children: [...(n.children || []), newChild],
+      }));
+
+      // Keep parent steady on screen and gently nudge viewport if new child is outside view
+      if (oldParentPos) {
+        const nextLayout = computeMindMapLayout(nextTree, layoutMode, allCustomTags);
+        const newParentPos = nextLayout.nodes.find((n) => n.node.id === parentId);
+        const newChildPos = nextLayout.nodes.find((n) => n.node.id === newChild.id);
+        if (newParentPos) {
+          const shiftX = newParentPos.x - oldParentPos.x;
+          const shiftY = newParentPos.y - oldParentPos.y;
+          const vp = viewportRef.current;
+          setPan((prevPan) => {
+            let nextX = Math.round(prevPan.x - shiftX * zoom);
+            let nextY = Math.round(prevPan.y - shiftY * zoom);
+            if (vp && newChildPos) {
+              const pad = 36;
+              const childLeft = nextX + newChildPos.x * zoom;
+              const childRight = nextX + (newChildPos.x + newChildPos.w) * zoom;
+              const childTop = nextY + newChildPos.y * zoom;
+              const childBottom = nextY + (newChildPos.y + newChildPos.h) * zoom;
+              if (childLeft < pad) nextX += Math.round(pad - childLeft);
+              else if (childRight > vp.clientWidth - pad)
+                nextX -= Math.round(childRight - (vp.clientWidth - pad));
+              if (childTop < pad) nextY += Math.round(pad - childTop);
+              else if (childBottom > vp.clientHeight - pad)
+                nextY -= Math.round(childBottom - (vp.clientHeight - pad));
+            }
+            return { x: nextX, y: nextY };
+          });
+        }
+      }
+
+      commitTree(nextTree);
       setSelectedId(newChild.id);
       if (autoInlineEdit) {
         setInlineEditingId(newChild.id);
         setInlineDraft(defaultLabel);
       }
     },
-    [commitTree, tree],
+    [activeTheme.branchPalette, allCustomTags, baseLayout.nodes, commitTree, layoutMode, tree, zoom],
   );
 
   const handleAddSibling = useCallback(
@@ -390,10 +475,11 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
         handleAddChild(tree.id, autoInlineEdit);
         return;
       }
+      const targetNode = findNode(tree, targetId);
       const parentInfo = findParentOf(tree, targetId);
       const siblingColor =
         parentInfo?.parent.id === tree.id
-          ? MINDMAP_COLORS[tree.children.length % MINDMAP_COLORS.length].hex
+          ? activeTheme.branchPalette[tree.children.length % activeTheme.branchPalette.length]
           : parentInfo?.parent.color || '#1351B4';
 
       const defaultLabel =
@@ -402,6 +488,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
         id: makeNodeId(),
         label: defaultLabel,
         color: siblingColor,
+        direction: targetNode?.direction,
         children: [],
       };
       commitTree((prev) => insertSiblingInTree(prev, targetId, newSibling));
@@ -411,7 +498,77 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
         setInlineDraft(defaultLabel);
       }
     },
-    [commitTree, handleAddChild, tree],
+    [activeTheme.branchPalette, commitTree, handleAddChild, tree],
+  );
+
+  const handleChangeNodeDirection = useCallback(
+    (nodeId: string, direction?: MindMapDirection) => {
+      if (nodeId === tree.id) return;
+      commitTree((prev) =>
+        updateNodeInTree(prev, nodeId, (n) => ({
+          ...n,
+          direction,
+          offsetX: undefined,
+          offsetY: undefined,
+        })),
+      );
+    },
+    [commitTree, tree.id],
+  );
+
+  const handleCreateCustomTag = useCallback(() => {
+    const label = newTagLabel.trim();
+    if (!label) {
+      onNotify('Digite um nome para o novo marcador de estudo.', true);
+      return;
+    }
+    const cleanShort = label
+      .toUpperCase()
+      .replace(/\s+/g, ' ')
+      .slice(0, 14);
+    const created: MindMapCustomTag = {
+      id: `custom-${Math.random().toString(36).slice(2, 8)}`,
+      label: label.slice(0, 28),
+      short: cleanShort,
+      color: newTagColor || '#1351B4',
+      bg: hexToSoftBg(newTagColor || '#1351B4'),
+    };
+
+    const nextLibrary = [...allCustomTags, created];
+    setLibraryCustomTags(nextLibrary);
+    persistSavedCustomTags(nextLibrary);
+
+    commitTree((prev) => {
+      const withTagList: MindMapNode = {
+        ...prev,
+        customTags: nextLibrary,
+      };
+      return updateNodeInTree(withTagList, selectedNode.id, (n) => ({
+        ...n,
+        tag: created.id,
+      }));
+    });
+
+    setNewTagLabel('');
+    setShowNewTagForm(false);
+    onNotify(`Marcador "${created.label}" criado e aplicado.`);
+  }, [allCustomTags, commitTree, newTagColor, newTagLabel, onNotify, selectedNode.id]);
+
+  const handleDeleteCustomTag = useCallback(
+    (tagId: string, tagLabel: string) => {
+      const nextLibrary = allCustomTags.filter((t) => t.id !== tagId);
+      setLibraryCustomTags(nextLibrary);
+      persistSavedCustomTags(nextLibrary);
+      commitTree((prev) => {
+        const cleaned = clearTagFromTree(prev, tagId);
+        return {
+          ...cleaned,
+          customTags: nextLibrary.length > 0 ? nextLibrary : undefined,
+        };
+      });
+      onNotify(`Marcador "${tagLabel}" removido.`);
+    },
+    [allCustomTags, commitTree, onNotify],
   );
 
   const handleDeleteNode = useCallback(
@@ -600,6 +757,18 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
 
       if (isTextField || inlineEditingId) return;
 
+      if (e.altKey && (e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+        e.preventDefault();
+        const dirMap: Record<string, MindMapDirection> = {
+          ArrowUp: 'up',
+          ArrowDown: 'down',
+          ArrowLeft: 'left',
+          ArrowRight: 'right',
+        };
+        handleAddChild(selectedNode.id, true, dirMap[e.key]);
+        return;
+      }
+
       if (e.key === 'Tab') {
         e.preventDefault();
         handleAddChild(selectedNode.id, true);
@@ -720,7 +889,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
         );
         // Compensate pan if normalized canvas origin shifted, preventing any visual jump on drop
         if (oldNodePos) {
-          const nextLayout = computeMindMapLayout(nextTree, layoutMode);
+          const nextLayout = computeMindMapLayout(nextTree, layoutMode, allCustomTags);
           const newNodePos = nextLayout.nodes.find((n) => n.node.id === active.nodeId);
           if (newNodePos) {
             const expectedX = oldNodePos.x + active.dx;
@@ -747,7 +916,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
       window.removeEventListener('mousemove', onWindowMouseMove);
       window.removeEventListener('mouseup', onWindowMouseUp);
     };
-  }, [baseLayout.nodes, commitTree, layoutMode, tree, zoom]);
+  }, [allCustomTags, baseLayout.nodes, commitTree, layoutMode, tree, zoom]);
 
   const handleResetAllPositions = () => {
     if (movedNodesCount === 0) return;
@@ -808,17 +977,29 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     () => ({
       themeId: tree.themeId,
       canvasBg: tree.canvasBg,
+      customTags: allCustomTags,
     }),
-    [tree.canvasBg, tree.themeId],
+    [allCustomTags, tree.canvasBg, tree.themeId],
   );
 
-  // Exports
+  const getExpandedExportLayout = useCallback(() => {
+    const expandedTree = setAllNodesCollapsed(tree, false);
+    return computeMindMapLayout(expandedTree, layoutMode, allCustomTags);
+  }, [allCustomTags, layoutMode, tree]);
+
+  // Exports (always render ALL groups and subgroups fully expanded without cutting text)
   const handleExportPng = async () => {
     setShowExportMenu(false);
     setExporting(true);
     try {
-      await exportMindMapPngFile(layout, edgeStyle, mapTitle || tree.label, exportVisualOptions);
-      onNotify('Imagem PNG em alta resolução baixada.');
+      const expandedLayout = getExpandedExportLayout();
+      await exportMindMapPngFile(
+        expandedLayout,
+        edgeStyle,
+        mapTitle || tree.label,
+        exportVisualOptions,
+      );
+      onNotify('Imagem PNG em alta resolução baixada com todos os ramos expandidos.');
     } catch (err) {
       onNotify((err as Error).message, true);
     } finally {
@@ -830,14 +1011,15 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
     setShowExportMenu(false);
     setExporting(true);
     try {
+      const expandedLayout = getExpandedExportLayout();
       await exportMindMapVisualPdfFile(
-        layout,
+        expandedLayout,
         edgeStyle,
         mapTitle || tree.label,
         subjectLabel,
         exportVisualOptions,
       );
-      onNotify('PDF Visual (A4 Paisagem) do mapa mental baixado.');
+      onNotify('PDF Visual do mapa mental baixado com todos os ramos expandidos.');
     } catch (err) {
       onNotify((err as Error).message, true);
     } finally {
@@ -847,8 +1029,9 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
 
   const handleExportSvg = () => {
     setShowExportMenu(false);
-    exportMindMapSvgFile(layout, edgeStyle, mapTitle || tree.label, exportVisualOptions);
-    onNotify('Arquivo SVG vetorial baixado.');
+    const expandedLayout = getExpandedExportLayout();
+    exportMindMapSvgFile(expandedLayout, edgeStyle, mapTitle || tree.label, exportVisualOptions);
+    onNotify('Arquivo SVG vetorial baixado com todos os ramos expandidos.');
   };
 
   const handleCopyOutline = async () => {
@@ -865,11 +1048,14 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
   const handleSaveMap = async () => {
     setSaving(true);
     try {
+      const expandedTree = setAllNodesCollapsed(tree, false);
       const payloadTree: MindMapNode = {
-        ...tree,
+        ...expandedTree,
         layout: layoutMode,
         edgeStyle,
+        customTags: allCustomTags.length > 0 ? allCustomTags : undefined,
       };
+      setTree(payloadTree);
       await onSave({
         id: editingId,
         title: mapTitle.trim() || tree.label.trim() || 'Mapa Mental',
@@ -1440,7 +1626,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
               const isBranch = n.depth === 1;
               const hasChildren = (n.node.children || []).length > 0;
               const isSearchHit = searchMatchSet.has(n.node.id);
-              const tagMeta = getTagMeta(n.node.tag);
+              const tagMeta = getTagMeta(n.node.tag, allCustomTags);
 
               const customBg = n.node.bgColor?.trim();
               const resolvedCardBg = customBg || (isRoot ? n.color : activeTheme.cardBg);
@@ -1453,10 +1639,6 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                       note: activeTheme.noteColor,
                       isDark: activeTheme.isDark,
                     };
-
-              // Position quick action handle on the outward edge
-              const isLeftSide = n.side === 'left';
-              const isVertical = layout.mode === 'vertical';
 
               return (
                 <div
@@ -1586,56 +1768,77 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                     </div>
                   )}
 
-                  {/* Quick Outward Action Handles (+ Child & Collapse/Count) */}
-                  <div
-                    className={`absolute flex items-center gap-1 transition-opacity ${
-                      isSelected || n.node.collapsed
-                        ? 'opacity-100'
-                        : 'opacity-0 group-hover:opacity-100'
-                    } ${
-                      isVertical
-                        ? 'left-1/2 -translate-x-1/2 -bottom-3'
-                        : isLeftSide
-                          ? '-left-3 top-1/2 -translate-y-1/2 -translate-x-1/2'
-                          : '-right-3 top-1/2 -translate-y-1/2 translate-x-1/2'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      title="Adicionar subtópico (Tab)"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        handleAddChild(n.node.id, true);
-                      }}
-                      className="w-5 h-5 rounded-full flex items-center justify-center text-white shadow-sm hover:scale-110 transition-transform"
-                      style={{ backgroundColor: n.color }}
-                    >
-                      <Plus className="w-3 h-3" />
-                    </button>
-
-                    {hasChildren && (
+                  {/* Omnidirectional 4-Way Quick Add Handles (Top, Right, Bottom, Left) */}
+                  {!isEditingThis &&
+                    (
+                      [
+                        {
+                          dir: 'up' as MindMapDirection,
+                          label: 'Adicionar subtópico acima (Alt+↑)',
+                          posClass: 'left-1/2 -translate-x-1/2 -top-2.5',
+                        },
+                        {
+                          dir: 'right' as MindMapDirection,
+                          label: 'Adicionar subtópico à direita (Alt+→)',
+                          posClass: '-right-2.5 top-1/2 -translate-y-1/2',
+                        },
+                        {
+                          dir: 'down' as MindMapDirection,
+                          label: 'Adicionar subtópico abaixo (Alt+↓)',
+                          posClass: 'left-1/2 -translate-x-1/2 -bottom-2.5',
+                        },
+                        {
+                          dir: 'left' as MindMapDirection,
+                          label: 'Adicionar subtópico à esquerda (Alt+←)',
+                          posClass: '-left-2.5 top-1/2 -translate-y-1/2',
+                        },
+                      ] as const
+                    ).map((handle) => (
                       <button
+                        key={handle.dir}
                         type="button"
-                        title={
-                          n.node.collapsed
-                            ? `Expandir ${n.hiddenCount} subtópico(s)`
-                            : 'Recolher ramo'
-                        }
+                        title={handle.label}
+                        aria-label={handle.label}
                         onClick={(e) => {
                           e.stopPropagation();
-                          handleToggleCollapse(n.node.id);
+                          handleAddChild(n.node.id, true, handle.dir);
                         }}
-                        className="h-5 min-w-5 px-1 rounded-full flex items-center justify-center bg-[var(--panel)] border text-[10px] font-mono-num tabular-nums font-extrabold shadow-sm hover:scale-105 transition-transform"
-                        style={{ borderColor: n.color, color: n.color }}
+                        className={`absolute ${handle.posClass} w-5 h-5 rounded-full flex items-center justify-center text-white shadow-sm ring-2 ring-white/90 hover:scale-125 transition-all z-20 ${
+                          isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                        }`}
+                        style={{ backgroundColor: n.color }}
                       >
-                        {n.node.collapsed ? (
-                          `+${n.hiddenCount}`
-                        ) : (
-                          <ChevronDown className="w-3 h-3" />
-                        )}
+                        <Plus className="w-3 h-3" />
                       </button>
-                    )}
-                  </div>
+                    ))}
+
+                  {/* Corner Collapse / Expand Handle (never collides with 4 cardinal + buttons) */}
+                  {hasChildren && !isEditingThis && (
+                    <button
+                      type="button"
+                      title={
+                        n.node.collapsed
+                          ? `Expandir ${n.hiddenCount} subtópico(s)`
+                          : 'Recolher subtópicos'
+                      }
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleCollapse(n.node.id);
+                      }}
+                      className={`absolute -bottom-2.5 -right-2.5 h-5 min-w-5 px-1 rounded-full flex items-center justify-center bg-[var(--panel)] border text-[10px] font-mono-num tabular-nums font-extrabold shadow-sm hover:scale-110 transition-all z-20 ${
+                        n.node.collapsed || isSelected
+                          ? 'opacity-100'
+                          : 'opacity-0 group-hover:opacity-100'
+                      }`}
+                      style={{ borderColor: n.color, color: n.color }}
+                    >
+                      {n.node.collapsed ? (
+                        `+${n.hiddenCount}`
+                      ) : (
+                        <ChevronDown className="w-3 h-3" />
+                      )}
+                    </button>
+                  )}
                 </div>
               );
             })}
@@ -1738,7 +1941,7 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             data-mm-control="true"
             className="hidden lg:block absolute bottom-3 right-3 z-20 text-[11px] text-[var(--muted)] bg-[var(--panel)]/85 backdrop-blur-xs px-2.5 py-1 rounded-md border border-[var(--line)]"
           >
-            Arraste qualquer grupo/subgrupo para mover · Duplo clique edita · Alt alterna célula única
+            Clique nos botões + nos 4 lados para ramificar · Arraste para mover · Duplo clique edita
           </div>
         </div>
 
@@ -1814,22 +2017,103 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             </div>
           </div>
 
-          {/* Semantic Exam Marker Selector */}
+          {/* Semantic Exam Marker Selector (Built-in + Custom Study Markers) */}
           <div className="border-t border-[var(--line)] pt-3">
-            <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center justify-between gap-2 mb-2">
               <span className="text-[11.5px] font-bold text-[var(--text)]">
                 Marcador de estudo
               </span>
-              {selectedNode.tag && (
+              <div className="flex items-center gap-2">
+                {selectedNode.tag && (
+                  <button
+                    type="button"
+                    onClick={() => handleUpdateNode(selectedNode.id, { tag: '' }, true)}
+                    className="text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
+                  >
+                    Limpar
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => handleUpdateNode(selectedNode.id, { tag: '' }, true)}
-                  className="text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
+                  onClick={() => setShowNewTagForm((v) => !v)}
+                  className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] hover:underline whitespace-nowrap"
                 >
-                  Limpar
+                  <Plus className="w-3 h-3" />
+                  Novo marcador
                 </button>
-              )}
+              </div>
             </div>
+
+            {showNewTagForm && (
+              <div className="mb-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-2.5 flex flex-col gap-2">
+                <input
+                  type="text"
+                  value={newTagLabel}
+                  onChange={(e) => setNewTagLabel(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleCreateCustomTag();
+                    } else if (e.key === 'Escape') {
+                      setShowNewTagForm(false);
+                    }
+                  }}
+                  maxLength={28}
+                  placeholder="Ex.: Doutrina, Cai muito, Artigo-chave..."
+                  className="ce-input text-[11.5px] py-1.5"
+                />
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {MINDMAP_COLORS.map((c) => {
+                    const active = newTagColor.toLowerCase() === c.hex.toLowerCase();
+                    return (
+                      <button
+                        key={c.id}
+                        type="button"
+                        title={c.label}
+                        onClick={() => setNewTagColor(c.hex)}
+                        className={`w-5 h-5 rounded-full border-2 transition-transform ${
+                          active ? 'scale-115 border-[var(--text)]' : 'border-transparent opacity-80 hover:opacity-100'
+                        }`}
+                        style={{ backgroundColor: c.hex }}
+                      />
+                    );
+                  })}
+                  <label
+                    title="Cor personalizada do marcador"
+                    className="inline-flex items-center justify-center w-5 h-5 rounded-full border border-dashed border-[var(--line-strong)] bg-[var(--panel)] text-[var(--muted)] hover:border-[var(--accent)] cursor-pointer relative overflow-hidden"
+                  >
+                    <Plus className="w-2.5 h-2.5 pointer-events-none" />
+                    <input
+                      type="color"
+                      aria-label="Cor personalizada do novo marcador"
+                      value={newTagColor}
+                      onChange={(e) => setNewTagColor(e.target.value)}
+                      className="absolute inset-0 opacity-0 cursor-pointer"
+                    />
+                  </label>
+                </div>
+                <div className="flex items-center justify-end gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowNewTagForm(false);
+                      setNewTagLabel('');
+                    }}
+                    className="px-2 py-1 rounded-md text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleCreateCustomTag}
+                    className="px-2.5 py-1 rounded-md bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)]"
+                  >
+                    Adicionar
+                  </button>
+                </div>
+              </div>
+            )}
+
             <div className="grid grid-cols-2 gap-1.5">
               {MINDMAP_TAGS.map((tag) => {
                 const active = selectedNode.tag === tag.id;
@@ -1853,6 +2137,54 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                     <span style={{ color: tag.color }}>{renderTagIcon(tag.id, 'w-3.5 h-3.5')}</span>
                     <span className="truncate">{tag.label}</span>
                   </button>
+                );
+              })}
+
+              {allCustomTags.map((tag) => {
+                const active = selectedNode.tag === tag.id;
+                return (
+                  <div
+                    key={tag.id}
+                    className={`group/tag relative flex items-center rounded-lg border transition-colors ${
+                      active
+                        ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)] font-bold'
+                        : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--line-strong)]'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() =>
+                        commitTree((prev) => {
+                          const withCustomList: MindMapNode = {
+                            ...prev,
+                            customTags: allCustomTags,
+                          };
+                          return updateNodeInTree(withCustomList, selectedNode.id, (n) => ({
+                            ...n,
+                            tag: active ? '' : tag.id,
+                          }));
+                        })
+                      }
+                      className="flex-1 min-w-0 inline-flex items-center gap-1.5 pl-2 pr-5 py-1.5 text-[11.5px] font-semibold text-left"
+                    >
+                      <span style={{ color: tag.color }} className="shrink-0">
+                        <Tag className="w-3.5 h-3.5" />
+                      </span>
+                      <span className="truncate">{tag.label}</span>
+                    </button>
+                    <button
+                      type="button"
+                      title={`Remover marcador "${tag.label}"`}
+                      aria-label={`Remover marcador ${tag.label}`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDeleteCustomTag(tag.id, tag.label);
+                      }}
+                      className="absolute right-1 p-0.5 rounded text-[var(--muted)] opacity-0 group-hover/tag:opacity-100 focus:opacity-100 hover:text-[var(--bad)] transition-opacity"
+                    >
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -2032,77 +2364,135 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
             </div>
           </div>
 
-          {/* Structural Node Actions */}
-          <div className="border-t border-[var(--line)] pt-3">
-            <span className="block text-[11.5px] font-bold text-[var(--text)] mb-2">
-              Estrutura do mapa
-            </span>
-            <div className="grid grid-cols-2 gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleAddChild(selectedNode.id, true)}
-                className="inline-flex items-center justify-center gap-1.5 h-[34px] px-2.5 rounded-lg border border-[var(--accent)]/60 bg-[var(--accent-soft)] text-[11.5px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white whitespace-nowrap"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Subtópico
-              </button>
+          {/* Structural Node Actions (4-Way Subtopic Creation + Repositioning) */}
+          <div className="border-t border-[var(--line)] pt-3 flex flex-col gap-2.5">
+            <div>
+              <span className="block text-[11.5px] font-bold text-[var(--text)] mb-1.5">
+                Criar subtópico em qualquer direção
+              </span>
+              <div className="grid grid-cols-2 gap-1.5">
+                {(
+                  [
+                    { dir: 'up' as MindMapDirection, label: 'Acima', icon: ArrowUp },
+                    { dir: 'right' as MindMapDirection, label: 'À direita', icon: ArrowRight },
+                    { dir: 'down' as MindMapDirection, label: 'Abaixo', icon: ArrowDown },
+                    { dir: 'left' as MindMapDirection, label: 'À esquerda', icon: ArrowLeft },
+                  ] as const
+                ).map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.dir}
+                      type="button"
+                      onClick={() => handleAddChild(selectedNode.id, true, item.dir)}
+                      className="inline-flex items-center justify-center gap-1.5 h-[32px] px-2 rounded-lg border border-[var(--accent)]/55 bg-[var(--accent-soft)] text-[11.5px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap"
+                    >
+                      <Icon className="w-3.5 h-3.5 shrink-0" />
+                      {item.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
 
-              <button
-                type="button"
-                disabled={selectedNode.id === tree.id}
-                onClick={() => handleAddSibling(selectedNode.id, true)}
-                className="inline-flex items-center justify-center gap-1.5 h-[34px] px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-40 whitespace-nowrap"
-              >
-                <GitBranch className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Irmão
-              </button>
+            {selectedNode.id !== tree.id && (
+              <div>
+                <span className="block text-[11px] font-bold text-[var(--muted)] mb-1.5">
+                  Lado deste ramo em relação ao pai
+                </span>
+                <div className="grid grid-cols-5 gap-1">
+                  {(
+                    [
+                      { val: undefined, label: 'Auto', title: 'Seguir layout automático' },
+                      { val: 'up' as MindMapDirection, label: '↑', title: 'Posicionar acima do pai' },
+                      { val: 'right' as MindMapDirection, label: '→', title: 'Posicionar à direita do pai' },
+                      { val: 'down' as MindMapDirection, label: '↓', title: 'Posicionar abaixo do pai' },
+                      { val: 'left' as MindMapDirection, label: '←', title: 'Posicionar à esquerda do pai' },
+                    ] as const
+                  ).map((opt) => {
+                    const active = selectedNode.direction === opt.val;
+                    return (
+                      <button
+                        key={opt.label}
+                        type="button"
+                        title={opt.title}
+                        onClick={() => handleChangeNodeDirection(selectedNode.id, opt.val)}
+                        className={`h-[28px] rounded-md border text-[11px] font-bold transition-colors ${
+                          active
+                            ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                            : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+                        }`}
+                      >
+                        {opt.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
 
-              <button
-                type="button"
-                disabled={!selectedParentInfo || selectedParentInfo.index === 0}
-                onClick={() => handleMoveSibling(selectedNode.id, -1)}
-                className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
-              >
-                <ArrowUp className="w-3.5 h-3.5" />
-                Subir
-              </button>
+            <div>
+              <span className="block text-[11.5px] font-bold text-[var(--text)] mb-1.5">
+                Estrutura do mapa
+              </span>
+              <div className="grid grid-cols-2 gap-1.5">
+                <button
+                  type="button"
+                  disabled={selectedNode.id === tree.id}
+                  onClick={() => handleAddSibling(selectedNode.id, true)}
+                  className="inline-flex items-center justify-center gap-1.5 h-[32px] px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-40 whitespace-nowrap"
+                >
+                  <GitBranch className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Irmão
+                </button>
 
-              <button
-                type="button"
-                disabled={
-                  !selectedParentInfo ||
-                  selectedParentInfo.index >= selectedParentInfo.parent.children.length - 1
-                }
-                onClick={() => handleMoveSibling(selectedNode.id, 1)}
-                className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
-              >
-                <ArrowDown className="w-3.5 h-3.5" />
-                Descer
-              </button>
+                <button
+                  type="button"
+                  disabled={selectedNode.id === tree.id}
+                  onClick={() => handleDuplicateNode(selectedNode.id)}
+                  className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                  Duplicar
+                </button>
 
-              <button
-                type="button"
-                disabled={selectedNode.id === tree.id}
-                onClick={() => handleDuplicateNode(selectedNode.id)}
-                className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
-              >
-                <Copy className="w-3.5 h-3.5" />
-                Duplicar
-              </button>
+                <button
+                  type="button"
+                  disabled={!selectedParentInfo || selectedParentInfo.index === 0}
+                  onClick={() => handleMoveSibling(selectedNode.id, -1)}
+                  className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                  Subir
+                </button>
 
-              <button
-                type="button"
-                disabled={selectedNode.id === tree.id}
-                onClick={() => handleDeleteNode(selectedNode.id)}
-                className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] disabled:opacity-35 whitespace-nowrap"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                Remover
-              </button>
+                <button
+                  type="button"
+                  disabled={
+                    !selectedParentInfo ||
+                    selectedParentInfo.index >= selectedParentInfo.parent.children.length - 1
+                  }
+                  onClick={() => handleMoveSibling(selectedNode.id, 1)}
+                  className="inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-35 whitespace-nowrap"
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                  Descer
+                </button>
+
+                <button
+                  type="button"
+                  disabled={selectedNode.id === tree.id}
+                  onClick={() => handleDeleteNode(selectedNode.id)}
+                  className="col-span-2 inline-flex items-center justify-center gap-1 h-[32px] px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] disabled:opacity-35 whitespace-nowrap"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Remover nó selecionado
+                </button>
+              </div>
             </div>
 
             {((selectedNode.offsetX || 0) !== 0 || (selectedNode.offsetY || 0) !== 0) && (
-              <div className="mt-2 pt-2 border-t border-[var(--line)] flex items-center justify-between gap-2 text-[11px]">
+              <div className="pt-2 border-t border-[var(--line)] flex items-center justify-between gap-2 text-[11px]">
                 <span className="font-mono-num text-[var(--muted)]">
                   Posição manual ({selectedNode.offsetX || 0}, {selectedNode.offsetY || 0})
                 </span>
@@ -2144,6 +2534,9 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                   <strong className="text-[var(--text)] font-mono-num">Tab</strong> · Novo filho
                 </span>
                 <span>
+                  <strong className="text-[var(--text)] font-mono-num">Alt+Setas</strong> · Filho na direção
+                </span>
+                <span>
                   <strong className="text-[var(--text)] font-mono-num">Enter</strong> · Novo irmão
                 </span>
                 <span>
@@ -2151,9 +2544,6 @@ export const MindMapBuilder: React.FC<MindMapBuilderProps> = ({
                 </span>
                 <span>
                   <strong className="text-[var(--text)] font-mono-num">Del</strong> · Remover nó
-                </span>
-                <span>
-                  <strong className="text-[var(--text)] font-mono-num">Setas</strong> · Navegar
                 </span>
                 <span>
                   <strong className="text-[var(--text)] font-mono-num">Ctrl+Z</strong> · Desfazer

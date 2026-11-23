@@ -1,5 +1,7 @@
 import { jsPDF } from 'jspdf';
 import {
+  MindMapCustomTag,
+  MindMapDirection,
   MindMapEdgeStyle,
   MindMapLayoutMode,
   MindMapNode,
@@ -286,9 +288,45 @@ export const MINDMAP_TAGS: MindMapTagMeta[] = [
   { id: 'dica', label: 'Dica / Macete', short: 'MACETE', color: '#6D28D9', bg: '#EDE9FE' },
 ];
 
-export function getTagMeta(tag?: MindMapNodeTag | ''): MindMapTagMeta | undefined {
+export function hexToSoftBg(hex: string): string {
+  const cleaned = (hex || '#1351B4').trim().replace('#', '');
+  if (!/^[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/.test(cleaned)) return '#E8F0FE';
+  const full =
+    cleaned.length === 3
+      ? cleaned
+          .split('')
+          .map((c) => c + c)
+          .join('')
+      : cleaned;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  // Blend 14% color + 86% white for crisp accessible light-card chip background
+  const blend = (c: number) => Math.round(c * 0.14 + 255 * 0.86);
+  const toHex = (c: number) => c.toString(16).padStart(2, '0');
+  return `#${toHex(blend(r))}${toHex(blend(g))}${toHex(blend(b))}`;
+}
+
+export function getTagMeta(
+  tag?: MindMapNodeTag | '',
+  customTags?: MindMapCustomTag[],
+): MindMapTagMeta | undefined {
   if (!tag) return undefined;
-  return MINDMAP_TAGS.find((t) => t.id === tag);
+  const builtIn = MINDMAP_TAGS.find((t) => t.id === tag);
+  if (builtIn) return builtIn;
+  if (customTags && customTags.length > 0) {
+    const custom = customTags.find((t) => t.id === tag);
+    if (custom) return custom;
+  }
+  return undefined;
+}
+
+export function clearTagFromTree(root: MindMapNode, tagId: string): MindMapNode {
+  return {
+    ...root,
+    tag: root.tag === tagId ? '' : root.tag,
+    children: (root.children || []).map((c) => clearTagFromTree(c, tagId)),
+  };
 }
 
 export function makeNodeId(): string {
@@ -667,12 +705,17 @@ export function getTreeMetrics(root: MindMapNode): {
   };
 }
 
-export function searchMatchingNodeIds(root: MindMapNode, query: string): string[] {
+export function searchMatchingNodeIds(
+  root: MindMapNode,
+  query: string,
+  extraCustomTags?: MindMapCustomTag[],
+): string[] {
   const q = query.trim().toLowerCase();
   if (!q) return [];
+  const tagPool = extraCustomTags || root.customTags;
   const matches: string[] = [];
   const walk = (n: MindMapNode) => {
-    const tagMeta = getTagMeta(n.tag);
+    const tagMeta = getTagMeta(n.tag, tagPool);
     const hay = `${n.label} ${n.note || ''} ${tagMeta?.label || ''}`.toLowerCase();
     if (hay.includes(q)) matches.push(n.id);
     for (const c of n.children || []) walk(c);
@@ -682,8 +725,113 @@ export function searchMatchingNodeIds(root: MindMapNode, query: string): string[
 }
 
 // ---------------------------------------------------------------------------
-// Dynamic Multi-Line Text Wrapping & Layout Engine (Bilateral / Horizontal / Vertical)
+// Pixel-Accurate Unlimited Multi-Line Text Wrapping & Layout Engine
 // ---------------------------------------------------------------------------
+
+let _measureCtx: CanvasRenderingContext2D | null | undefined;
+
+function getMeasureCtx(): CanvasRenderingContext2D | null {
+  if (_measureCtx !== undefined) return _measureCtx;
+  if (typeof document === 'undefined') {
+    _measureCtx = null;
+    return null;
+  }
+  try {
+    const canvas = document.createElement('canvas');
+    _measureCtx = canvas.getContext('2d');
+  } catch {
+    _measureCtx = null;
+  }
+  return _measureCtx;
+}
+
+function measureTextPx(text: string, font: string, fallbackCharW: number): number {
+  const ctx = getMeasureCtx();
+  if (ctx) {
+    ctx.font = font;
+    return ctx.measureText(text).width;
+  }
+  return text.length * fallbackCharW;
+}
+
+function splitLongTokenByWidth(
+  token: string,
+  maxWidthPx: number,
+  font: string,
+  fallbackCharW: number,
+): string[] {
+  const chunks: string[] = [];
+  let current = '';
+  for (const ch of token) {
+    const candidate = current + ch;
+    if (current && measureTextPx(candidate, font, fallbackCharW) > maxWidthPx) {
+      chunks.push(current);
+      current = ch;
+    } else {
+      current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function wrapParagraphByPixelWidth(
+  text: string,
+  maxWidthPx: number,
+  font: string,
+  fallbackCharW: number,
+): string[] {
+  const clean = text.trim().replace(/\s+/g, ' ');
+  if (!clean) return [];
+  const words = clean.split(' ');
+  const lines: string[] = [];
+  let current = '';
+
+  for (const word of words) {
+    const wordWidth = measureTextPx(word, font, fallbackCharW);
+    if (!current) {
+      if (wordWidth > maxWidthPx) {
+        const parts = splitLongTokenByWidth(word, maxWidthPx, font, fallbackCharW);
+        lines.push(...parts.slice(0, -1));
+        current = parts[parts.length - 1] || '';
+      } else {
+        current = word;
+      }
+    } else {
+      const candidate = `${current} ${word}`;
+      if (measureTextPx(candidate, font, fallbackCharW) <= maxWidthPx) {
+        current = candidate;
+      } else {
+        lines.push(current);
+        if (wordWidth > maxWidthPx) {
+          const parts = splitLongTokenByWidth(word, maxWidthPx, font, fallbackCharW);
+          lines.push(...parts.slice(0, -1));
+          current = parts[parts.length - 1] || '';
+        } else {
+          current = word;
+        }
+      }
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+function wrapMultilineByPixelWidth(
+  text: string,
+  maxWidthPx: number,
+  font: string,
+  fallbackCharW: number,
+): string[] {
+  const paragraphs = (text || '').split(/\r?\n/);
+  const allLines: string[] = [];
+  for (const para of paragraphs) {
+    const trimmed = para.trim();
+    if (!trimmed) continue;
+    allLines.push(...wrapParagraphByPixelWidth(trimmed, maxWidthPx, font, fallbackCharW));
+  }
+  return allLines;
+}
 
 export function wrapTextLines(text: string, maxCharsPerLine: number, maxLines: number): string[] {
   const clean = text.trim().replace(/\s+/g, ' ');
@@ -692,14 +840,29 @@ export function wrapTextLines(text: string, maxCharsPerLine: number, maxLines: n
   const lines: string[] = [];
   let current = '';
 
+  const pushWordUnbroken = (word: string) => {
+    if (word.length <= maxCharsPerLine) {
+      current = word;
+      return;
+    }
+    for (let i = 0; i < word.length; i += maxCharsPerLine) {
+      const slice = word.slice(i, i + maxCharsPerLine);
+      if (i + maxCharsPerLine < word.length) {
+        lines.push(slice);
+      } else {
+        current = slice;
+      }
+    }
+  };
+
   for (const word of words) {
     if (!current) {
-      current = word.length > maxCharsPerLine ? word.slice(0, maxCharsPerLine - 1) + '…' : word;
+      pushWordUnbroken(word);
     } else if (current.length + 1 + word.length <= maxCharsPerLine) {
       current = `${current} ${word}`;
     } else {
       lines.push(current);
-      if (lines.length >= maxLines) {
+      if (maxLines > 0 && lines.length >= maxLines) {
         const last = lines[lines.length - 1];
         if (!last.endsWith('…')) {
           lines[lines.length - 1] =
@@ -709,30 +872,19 @@ export function wrapTextLines(text: string, maxCharsPerLine: number, maxLines: n
         }
         return lines;
       }
-      current = word.length > maxCharsPerLine ? word.slice(0, maxCharsPerLine - 1) + '…' : word;
+      current = '';
+      pushWordUnbroken(word);
     }
   }
   if (current) lines.push(current);
   return maxLines > 0 ? lines.slice(0, maxLines) : lines;
 }
 
-function wrapMultilineText(text: string, maxCharsPerLine: number, maxTotalLines: number): string[] {
-  const paragraphs = (text || '').split(/\r?\n/);
-  const allLines: string[] = [];
-  for (const para of paragraphs) {
-    const trimmed = para.trim();
-    if (!trimmed) continue;
-    const wrapped = wrapTextLines(trimmed, maxCharsPerLine, 0);
-    allLines.push(...wrapped);
-    if (maxTotalLines > 0 && allLines.length >= maxTotalLines) break;
-  }
-  return maxTotalLines > 0 ? allLines.slice(0, maxTotalLines) : allLines;
-}
-
 export interface LayoutNode {
   node: MindMapNode;
   depth: number;
-  side: 'center' | 'right' | 'left' | 'down';
+  side: 'center' | MindMapDirection;
+  edgeAxis?: 'horizontal' | 'vertical';
   x: number;
   y: number;
   w: number;
@@ -815,448 +967,386 @@ export function moveNodeOffsetInTree(
   return walk(root);
 }
 
-function measureNodeBox(node: MindMapNode, depth: number, mode: MindMapLayoutMode) {
+function measureNodeBox(
+  node: MindMapNode,
+  depth: number,
+  mode: MindMapLayoutMode,
+  customTags?: MindMapCustomTag[],
+) {
   const isRoot = depth === 0;
-  const labelLen = (node.label || '').trim().length;
-  const noteLen = (node.note || '').trim().length;
-  const isLongText = labelLen > 65 || noteLen > 85;
+  const isBranch = depth === 1;
+  const labelText = (node.label || 'Sem texto').trim() || 'Sem texto';
+  const noteText = (node.note || '').trim();
+  const labelLen = labelText.length;
+  const noteLen = noteText.length;
+  const isVeryLongText = labelLen > 120 || noteLen > 160;
+  const isLongText = labelLen > 52 || noteLen > 72;
 
   const baseW = isRoot
     ? mode === 'vertical'
-      ? 248
-      : 236
+      ? 252
+      : 242
     : mode === 'vertical'
-      ? 208
-      : depth === 1
-        ? 224
-        : 214;
-  const w = isLongText ? baseW + 44 : baseW;
+      ? 216
+      : isBranch
+        ? 230
+        : 220;
+  const w = isVeryLongText ? baseW + 88 : isLongText ? baseW + 46 : baseW;
 
-  // Conservative char-per-line estimate to guarantee DOM height never exceeds measured height
-  const maxTitleChars = Math.max(18, Math.floor((w - 28) / (isRoot ? 8.2 : 7.5)));
-  const maxNoteChars = Math.max(22, Math.floor((w - 28) / 6.3));
-  const titleLines = wrapMultilineText(node.label || 'Sem texto', maxTitleChars, 18);
-  const noteLines = node.note?.trim() ? wrapMultilineText(node.note, maxNoteChars, 14) : [];
-  const hasTag = Boolean(getTagMeta(node.tag));
+  // Use exact SVG/DOM font metrics with safe horizontal padding so zero characters ever clip
+  const innerMaxPx = w - 28;
+  const titleFont = isRoot
+    ? '700 13.5px system-ui, -apple-system, sans-serif'
+    : isBranch
+      ? '700 12.5px system-ui, -apple-system, sans-serif'
+      : '600 12px system-ui, -apple-system, sans-serif';
+  const noteFont = '400 10.5px system-ui, -apple-system, sans-serif';
 
-  const paddingY = isRoot ? 15 : 11;
+  const titleLines = wrapMultilineByPixelWidth(
+    labelText,
+    innerMaxPx,
+    titleFont,
+    isRoot ? 8.2 : 7.4,
+  );
+  const noteLines = noteText
+    ? wrapMultilineByPixelWidth(noteText, innerMaxPx, noteFont, 6.2)
+    : [];
+  const hasTag = Boolean(getTagMeta(node.tag, customTags));
+
+  const paddingY = isRoot ? 14 : 11;
   const tagH = hasTag ? 20 : 0;
-  const titleLineH = isRoot ? 19 : 17.5;
-  const noteLineH = 15;
+  const titleLineH = isRoot ? 18.5 : 16.5;
+  const noteLineH = 14.5;
   const titleH = Math.max(1, titleLines.length) * titleLineH;
-  const noteH = noteLines.length > 0 ? 6 + noteLines.length * noteLineH : 0;
-  const safetyBuffer = titleLines.length + noteLines.length > 4 ? 10 : 4;
-  const h = Math.ceil(Math.max(isRoot ? 58 : 48, paddingY * 2 + tagH + titleH + noteH + safetyBuffer));
+  const noteH = noteLines.length > 0 ? 7 + noteLines.length * noteLineH : 0;
+  const safetyBuffer = titleLines.length + noteLines.length > 3 ? 10 : 6;
+  const h = Math.ceil(
+    Math.max(isRoot ? 56 : 46, paddingY * 2 + tagH + titleH + noteH + safetyBuffer),
+  );
 
   return { w, h, titleLines, noteLines };
 }
 
-function layoutHorizontalSide(
-  branchRoot: MindMapNode,
-  side: 'right' | 'left',
-  startDepth: number,
-  inheritedColor: string,
-  startX: number,
-  startY: number,
-  gapX: number,
-  gapY: number,
-): { nodes: LayoutNode[]; totalHeight: number; rootNode: LayoutNode } {
-  const nodes: LayoutNode[] = [];
-  let cursorY = startY;
-
-  const walk = (
-    node: MindMapNode,
-    depth: number,
-    colorIn: string,
-    parentId?: string,
-  ): { layoutNode: LayoutNode; centerY: number } => {
-    const color = node.color || colorIn || '#1351B4';
-    const { w, h, titleLines, noteLines } = measureNodeBox(node, depth, 'horizontal');
-    const visibleChildren = node.collapsed ? [] : node.children || [];
-    const hiddenCount = node.collapsed ? countDescendants(node) : 0;
-
-    // X grows right for 'right', grows left for 'left'
-    const step = w + gapX;
-    const x =
-      side === 'right'
-        ? startX + (depth - startDepth) * step
-        : startX - w - (depth - startDepth) * step;
-
-    if (visibleChildren.length === 0) {
-      const y = cursorY;
-      cursorY += h + gapY;
-      const ln: LayoutNode = {
-        node,
-        depth,
-        side,
-        x,
-        y,
-        w,
-        h,
-        color,
-        titleLines,
-        noteLines,
-        hiddenCount,
-        parentId,
-      };
-      nodes.push(ln);
-      return { layoutNode: ln, centerY: y + h / 2 };
-    }
-
-    const slotIndex = nodes.length;
-    const placeholder: LayoutNode = {
-      node,
-      depth,
-      side,
-      x,
-      y: 0,
-      w,
-      h,
-      color,
-      titleLines,
-      noteLines,
-      hiddenCount,
-      parentId,
-    };
-    nodes.push(placeholder);
-
-    const childResults: Array<{ layoutNode: LayoutNode; centerY: number }> = [];
-    for (const child of visibleChildren) {
-      childResults.push(walk(child, depth + 1, color, node.id));
-    }
-
-    const minCenter = Math.min(...childResults.map((r) => r.centerY));
-    const maxCenter = Math.max(...childResults.map((r) => r.centerY));
-    const centerY = (minCenter + maxCenter) / 2;
-    const y = centerY - h / 2;
-    placeholder.y = y;
-
-    // Wire exact edge anchors for direct children
-    const fromX = side === 'right' ? x + w : x;
-    const fromY = y + h / 2;
-    for (const res of childResults) {
-      res.layoutNode.edgeFrom = { x: fromX, y: fromY };
-      res.layoutNode.edgeTo = {
-        x: side === 'right' ? res.layoutNode.x : res.layoutNode.x + res.layoutNode.w,
-        y: res.layoutNode.y + res.layoutNode.h / 2,
-      };
-    }
-
-    return { layoutNode: placeholder, centerY: y + h / 2 };
-  };
-
-  const result = walk(branchRoot, startDepth, inheritedColor);
-  const minY = Math.min(...nodes.map((n) => n.y));
-  const maxY = Math.max(...nodes.map((n) => n.y + n.h));
-  return {
-    nodes,
-    totalHeight: maxY - minY,
-    rootNode: result.layoutNode,
-  };
+interface LayoutBounds {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
 }
 
-function computeHorizontalLayout(root: MindMapNode): ComputedMindMapLayout {
-  const padX = 48;
-  const padY = 44;
-  const gapX = 54;
-  const gapY = 16;
+interface SubtreeLayout {
+  nodes: LayoutNode[];
+  rootNode: LayoutNode;
+  bounds: LayoutBounds;
+}
 
-  const rootColor = root.color || '#1351B4';
-  const { w: rootW, h: rootH, titleLines, noteLines } = measureNodeBox(root, 0, 'horizontal');
-  const visibleChildren = root.collapsed ? [] : root.children || [];
-  const hiddenCount = root.collapsed ? countDescendants(root) : 0;
-
-  if (visibleChildren.length === 0) {
-    const rootNode: LayoutNode = {
-      node: root,
-      depth: 0,
-      side: 'center',
-      x: padX,
-      y: padY,
-      w: rootW,
-      h: rootH,
-      color: rootColor,
-      titleLines,
-      noteLines,
-      hiddenCount,
-    };
-    return {
-      mode: 'horizontal',
-      nodes: [rootNode],
-      width: rootW + padX * 2,
-      height: rootH + padY * 2,
-      rootCenter: { x: padX + rootW / 2, y: padY + rootH / 2 },
-    };
+function shiftSubtree(sub: SubtreeLayout, dx: number, dy: number): void {
+  if (dx === 0 && dy === 0) return;
+  for (const n of sub.nodes) {
+    n.x += dx;
+    n.y += dy;
+    if (n.edgeFrom) {
+      n.edgeFrom = { x: n.edgeFrom.x + dx, y: n.edgeFrom.y + dy };
+    }
+    if (n.edgeTo) {
+      n.edgeTo = { x: n.edgeTo.x + dx, y: n.edgeTo.y + dy };
+    }
   }
+  sub.bounds.minX += dx;
+  sub.bounds.maxX += dx;
+  sub.bounds.minY += dy;
+  sub.bounds.maxY += dy;
+}
 
-  let cursorY = padY;
-  const allChildNodes: LayoutNode[] = [];
-  const branchRoots: LayoutNode[] = [];
+function mergeBoundsList(subs: SubtreeLayout[]): LayoutBounds | null {
+  if (subs.length === 0) return null;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const s of subs) {
+    if (s.bounds.minX < minX) minX = s.bounds.minX;
+    if (s.bounds.maxX > maxX) maxX = s.bounds.maxX;
+    if (s.bounds.minY < minY) minY = s.bounds.minY;
+    if (s.bounds.maxY > maxY) maxY = s.bounds.maxY;
+  }
+  return { minX, maxX, minY, maxY };
+}
 
-  visibleChildren.forEach((child, idx) => {
-    const branchColor = child.color || MINDMAP_COLORS[idx % MINDMAP_COLORS.length].hex;
-    const res = layoutHorizontalSide(
-      child,
-      'right',
-      1,
-      branchColor,
-      padX + rootW + gapX,
-      cursorY,
-      gapX,
-      gapY,
-    );
-    cursorY = Math.max(...res.nodes.map((n) => n.y + n.h)) + gapY + 6;
-    res.rootNode.parentId = root.id;
-    branchRoots.push(res.rootNode);
-    allChildNodes.push(...res.nodes);
-  });
-
-  const minBranchCenter = Math.min(...branchRoots.map((b) => b.y + b.h / 2));
-  const maxBranchCenter = Math.max(...branchRoots.map((b) => b.y + b.h / 2));
-  const rootY = Math.max(padY, (minBranchCenter + maxBranchCenter) / 2 - rootH / 2);
+function layoutOmnidirectionalSubtree(
+  node: MindMapNode,
+  depth: number,
+  primaryDir: MindMapDirection,
+  colorIn: string,
+  mode: MindMapLayoutMode,
+  customTags?: MindMapCustomTag[],
+): SubtreeLayout {
+  const color = node.color || colorIn || '#1351B4';
+  const { w, h, titleLines, noteLines } = measureNodeBox(node, depth, mode, customTags);
+  const visibleChildren = node.collapsed ? [] : node.children || [];
+  const hiddenCount = node.collapsed ? countDescendants(node) : 0;
 
   const rootNode: LayoutNode = {
-    node: root,
-    depth: 0,
-    side: 'center',
-    x: padX,
-    y: rootY,
-    w: rootW,
-    h: rootH,
-    color: rootColor,
+    node,
+    depth,
+    side: depth === 0 ? 'center' : primaryDir,
+    edgeAxis:
+      depth === 0
+        ? undefined
+        : primaryDir === 'up' || primaryDir === 'down'
+          ? 'vertical'
+          : 'horizontal',
+    x: 0,
+    y: 0,
+    w,
+    h,
+    color,
     titleLines,
     noteLines,
     hiddenCount,
   };
 
-  branchRoots.forEach((br) => {
-    br.edgeFrom = { x: rootNode.x + rootNode.w, y: rootNode.y + rootNode.h / 2 };
-    br.edgeTo = { x: br.x, y: br.y + br.h / 2 };
-  });
-
-  const nodes = [rootNode, ...allChildNodes];
-  return normalizeLayoutBounds(nodes, 'horizontal', padX, padY, rootNode);
-}
-
-function computeBilateralLayout(root: MindMapNode): ComputedMindMapLayout {
-  const padX = 56;
-  const padY = 48;
-  const gapX = 56;
-  const gapY = 16;
-
-  const rootColor = root.color || '#1351B4';
-  const { w: rootW, h: rootH, titleLines, noteLines } = measureNodeBox(root, 0, 'bilateral');
-  const visibleChildren = root.collapsed ? [] : root.children || [];
-  const hiddenCount = root.collapsed ? countDescendants(root) : 0;
-
   if (visibleChildren.length === 0) {
-    const rootNode: LayoutNode = {
-      node: root,
-      depth: 0,
-      side: 'center',
-      x: padX,
-      y: padY,
-      w: rootW,
-      h: rootH,
-      color: rootColor,
-      titleLines,
-      noteLines,
-      hiddenCount,
-    };
     return {
-      mode: 'bilateral',
       nodes: [rootNode],
-      width: rootW + padX * 2,
-      height: rootH + padY * 2,
-      rootCenter: { x: padX + rootW / 2, y: padY + rootH / 2 },
+      rootNode,
+      bounds: { minX: 0, maxX: w, minY: 0, maxY: h },
     };
   }
 
-  // Balance primary branches cleanly between Right and Left sides
-  const rightChildren: Array<{ child: MindMapNode; idx: number }> = [];
-  const leftChildren: Array<{ child: MindMapNode; idx: number }> = [];
+  const gapX = mode === 'bilateral' ? 56 : 54;
+  const gapY = depth === 0 ? 22 : 16;
+  const gapVertY = 56;
+  const gapHorizX = 24;
+
+  const rightSubs: SubtreeLayout[] = [];
+  const leftSubs: SubtreeLayout[] = [];
+  const upSubs: SubtreeLayout[] = [];
+  const downSubs: SubtreeLayout[] = [];
+
+  let autoRootIdx = 0;
   visibleChildren.forEach((child, idx) => {
-    if (idx % 2 === 0) rightChildren.push({ child, idx });
-    else leftChildren.push({ child, idx });
-  });
+    const branchColor =
+      depth === 0
+        ? child.color || MINDMAP_COLORS[idx % MINDMAP_COLORS.length].hex
+        : child.color || color;
 
-  const buildSide = (
-    items: Array<{ child: MindMapNode; idx: number }>,
-    side: 'right' | 'left',
-  ) => {
-    let cursorY = 0;
-    const sideNodes: LayoutNode[] = [];
-    const roots: LayoutNode[] = [];
-    const anchorX = side === 'right' ? rootW / 2 + gapX : -rootW / 2 - gapX;
-
-    items.forEach(({ child, idx }) => {
-      const branchColor = child.color || MINDMAP_COLORS[idx % MINDMAP_COLORS.length].hex;
-      const res = layoutHorizontalSide(child, side, 1, branchColor, anchorX, cursorY, gapX, gapY);
-      const maxY = Math.max(...res.nodes.map((n) => n.y + n.h));
-      cursorY = maxY + gapY + 10;
-      res.rootNode.parentId = root.id;
-      roots.push(res.rootNode);
-      sideNodes.push(...res.nodes);
-    });
-
-    if (sideNodes.length > 0) {
-      const minY = Math.min(...sideNodes.map((n) => n.y));
-      const maxY = Math.max(...sideNodes.map((n) => n.y + n.h));
-      const midY = (minY + maxY) / 2;
-      // Center vertically around Y = 0
-      sideNodes.forEach((n) => {
-        n.y -= midY;
-        if (n.edgeFrom) n.edgeFrom.y -= midY;
-        if (n.edgeTo) n.edgeTo.y -= midY;
-      });
-    }
-
-    return { sideNodes, roots };
-  };
-
-  const right = buildSide(rightChildren, 'right');
-  const left = buildSide(leftChildren, 'left');
-
-  const rootNode: LayoutNode = {
-    node: root,
-    depth: 0,
-    side: 'center',
-    x: -rootW / 2,
-    y: -rootH / 2,
-    w: rootW,
-    h: rootH,
-    color: rootColor,
-    titleLines,
-    noteLines,
-    hiddenCount,
-  };
-
-  right.roots.forEach((br) => {
-    br.edgeFrom = { x: rootNode.x + rootNode.w, y: 0 };
-    br.edgeTo = { x: br.x, y: br.y + br.h / 2 };
-  });
-  left.roots.forEach((br) => {
-    br.edgeFrom = { x: rootNode.x, y: 0 };
-    br.edgeTo = { x: br.x + br.w, y: br.y + br.h / 2 };
-  });
-
-  const nodes = [rootNode, ...right.sideNodes, ...left.sideNodes];
-  return normalizeLayoutBounds(nodes, 'bilateral', padX, padY, rootNode);
-}
-
-function computeVerticalLayout(root: MindMapNode): ComputedMindMapLayout {
-  const padX = 48;
-  const padY = 44;
-  const gapX = 24;
-  const gapY = 58;
-
-  // Pre-compute max node height per depth so tall nodes never overlap rows below
-  const maxHeightByDepth = new Map<number, number>();
-  const measureDepths = (node: MindMapNode, depth: number) => {
-    const { h } = measureNodeBox(node, depth, 'vertical');
-    maxHeightByDepth.set(depth, Math.max(maxHeightByDepth.get(depth) || 0, h));
-    if (!node.collapsed) {
-      for (const child of node.children || []) {
-        measureDepths(child, depth + 1);
+    let effectiveDir: MindMapDirection;
+    if (child.direction) {
+      effectiveDir = child.direction;
+    } else if (depth === 0) {
+      if (mode === 'bilateral') {
+        effectiveDir = autoRootIdx % 2 === 0 ? 'right' : 'left';
+        autoRootIdx += 1;
+      } else if (mode === 'horizontal') {
+        effectiveDir = 'right';
+      } else {
+        effectiveDir = 'down';
       }
+    } else {
+      effectiveDir = primaryDir;
     }
-  };
-  measureDepths(root, 0);
 
-  const depthY = new Map<number, number>();
-  let accY = padY;
-  const maxDepth = Math.max(0, ...Array.from(maxHeightByDepth.keys()));
-  for (let d = 0; d <= maxDepth; d++) {
-    depthY.set(d, accY);
-    accY += (maxHeightByDepth.get(d) || 64) + gapY;
+    const sub = layoutOmnidirectionalSubtree(
+      child,
+      depth + 1,
+      effectiveDir,
+      branchColor,
+      mode,
+      customTags,
+    );
+    sub.rootNode.parentId = node.id;
+
+    if (effectiveDir === 'right') rightSubs.push(sub);
+    else if (effectiveDir === 'left') leftSubs.push(sub);
+    else if (effectiveDir === 'up') upSubs.push(sub);
+    else downSubs.push(sub);
+  });
+
+  // 1. Place Right children vertically stacked to the right of node
+  if (rightSubs.length > 0) {
+    let cursorY = 0;
+    for (const sub of rightSubs) {
+      shiftSubtree(sub, w + gapX - sub.bounds.minX, cursorY - sub.bounds.minY);
+      cursorY = sub.bounds.maxY + gapY;
+    }
+    const firstCy = rightSubs[0].rootNode.y + rightSubs[0].rootNode.h / 2;
+    const lastCy =
+      rightSubs[rightSubs.length - 1].rootNode.y + rightSubs[rightSubs.length - 1].rootNode.h / 2;
+    const dyCenter = h / 2 - (firstCy + lastCy) / 2;
+    for (const sub of rightSubs) {
+      shiftSubtree(sub, 0, dyCenter);
+      sub.rootNode.side = 'right';
+      sub.rootNode.edgeAxis = 'horizontal';
+      sub.rootNode.edgeFrom = { x: w, y: h / 2 };
+      sub.rootNode.edgeTo = {
+        x: sub.rootNode.x,
+        y: sub.rootNode.y + sub.rootNode.h / 2,
+      };
+    }
   }
 
-  const nodes: LayoutNode[] = [];
-  let cursorX = padX;
-
-  const walk = (
-    node: MindMapNode,
-    depth: number,
-    colorIn: string,
-    parentId?: string,
-  ): { layoutNode: LayoutNode; centerX: number } => {
-    const color = node.color || colorIn || '#1351B4';
-    const { w, h, titleLines, noteLines } = measureNodeBox(node, depth, 'vertical');
-    const visibleChildren = node.collapsed ? [] : node.children || [];
-    const hiddenCount = node.collapsed ? countDescendants(node) : 0;
-    const y = depthY.get(depth) ?? padY;
-
-    if (visibleChildren.length === 0) {
-      const x = cursorX;
-      cursorX += w + gapX;
-      const ln: LayoutNode = {
-        node,
-        depth,
-        side: depth === 0 ? 'center' : 'down',
-        x,
-        y,
-        w,
-        h,
-        color,
-        titleLines,
-        noteLines,
-        hiddenCount,
-        parentId,
-      };
-      nodes.push(ln);
-      return { layoutNode: ln, centerX: x + w / 2 };
+  // 2. Place Left children vertically stacked to the left of node
+  if (leftSubs.length > 0) {
+    let cursorY = 0;
+    for (const sub of leftSubs) {
+      shiftSubtree(sub, -gapX - sub.bounds.maxX, cursorY - sub.bounds.minY);
+      cursorY = sub.bounds.maxY + gapY;
     }
-
-    const placeholder: LayoutNode = {
-      node,
-      depth,
-      side: depth === 0 ? 'center' : 'down',
-      x: 0,
-      y,
-      w,
-      h,
-      color,
-      titleLines,
-      noteLines,
-      hiddenCount,
-      parentId,
-    };
-    nodes.push(placeholder);
-
-    const childResults: Array<{ layoutNode: LayoutNode; centerX: number }> = [];
-    visibleChildren.forEach((child, idx) => {
-      const nextColor =
-        depth === 0
-          ? child.color || MINDMAP_COLORS[idx % MINDMAP_COLORS.length].hex
-          : child.color || color;
-      childResults.push(walk(child, depth + 1, nextColor, node.id));
-    });
-
-    const minCenter = Math.min(...childResults.map((r) => r.centerX));
-    const maxCenter = Math.max(...childResults.map((r) => r.centerX));
-    const centerX = (minCenter + maxCenter) / 2;
-    placeholder.x = centerX - w / 2;
-
-    const fromX = placeholder.x + placeholder.w / 2;
-    const fromY = placeholder.y + placeholder.h;
-    for (const res of childResults) {
-      res.layoutNode.edgeFrom = { x: fromX, y: fromY };
-      res.layoutNode.edgeTo = {
-        x: res.layoutNode.x + res.layoutNode.w / 2,
-        y: res.layoutNode.y,
+    const firstCy = leftSubs[0].rootNode.y + leftSubs[0].rootNode.h / 2;
+    const lastCy =
+      leftSubs[leftSubs.length - 1].rootNode.y + leftSubs[leftSubs.length - 1].rootNode.h / 2;
+    const dyCenter = h / 2 - (firstCy + lastCy) / 2;
+    for (const sub of leftSubs) {
+      shiftSubtree(sub, 0, dyCenter);
+      sub.rootNode.side = 'left';
+      sub.rootNode.edgeAxis = 'horizontal';
+      sub.rootNode.edgeFrom = { x: 0, y: h / 2 };
+      sub.rootNode.edgeTo = {
+        x: sub.rootNode.x + sub.rootNode.w,
+        y: sub.rootNode.y + sub.rootNode.h / 2,
       };
     }
+  }
 
-    return { layoutNode: placeholder, centerX };
+  const rightBounds = mergeBoundsList(rightSubs);
+  const leftBounds = mergeBoundsList(leftSubs);
+
+  // 3. Place Up children horizontally arranged above node
+  if (upSubs.length > 0) {
+    let cursorX = 0;
+    for (const sub of upSubs) {
+      shiftSubtree(sub, cursorX - sub.bounds.minX, -sub.bounds.maxY);
+      cursorX = sub.bounds.maxX + gapHorizX;
+    }
+    const firstCx = upSubs[0].rootNode.x + upSubs[0].rootNode.w / 2;
+    const lastCx =
+      upSubs[upSubs.length - 1].rootNode.x + upSubs[upSubs.length - 1].rootNode.w / 2;
+    const dxCenter = w / 2 - (firstCx + lastCx) / 2;
+    for (const sub of upSubs) {
+      shiftSubtree(sub, dxCenter, 0);
+    }
+
+    const upBoundsX = mergeBoundsList(upSubs)!;
+    let targetMaxY = -gapVertY;
+    if (leftBounds && upBoundsX.minX < leftBounds.maxX + 14) {
+      targetMaxY = Math.min(targetMaxY, leftBounds.minY - 24);
+    }
+    if (rightBounds && upBoundsX.maxX > rightBounds.minX - 14) {
+      targetMaxY = Math.min(targetMaxY, rightBounds.minY - 24);
+    }
+
+    for (const sub of upSubs) {
+      shiftSubtree(sub, 0, targetMaxY);
+      sub.rootNode.side = 'up';
+      sub.rootNode.edgeAxis = 'vertical';
+      sub.rootNode.edgeFrom = { x: w / 2, y: 0 };
+      sub.rootNode.edgeTo = {
+        x: sub.rootNode.x + sub.rootNode.w / 2,
+        y: sub.rootNode.y + sub.rootNode.h,
+      };
+    }
+  }
+
+  // 4. Place Down children horizontally arranged below node
+  if (downSubs.length > 0) {
+    let cursorX = 0;
+    for (const sub of downSubs) {
+      shiftSubtree(sub, cursorX - sub.bounds.minX, -sub.bounds.minY);
+      cursorX = sub.bounds.maxX + gapHorizX;
+    }
+    const firstCx = downSubs[0].rootNode.x + downSubs[0].rootNode.w / 2;
+    const lastCx =
+      downSubs[downSubs.length - 1].rootNode.x + downSubs[downSubs.length - 1].rootNode.w / 2;
+    const dxCenter = w / 2 - (firstCx + lastCx) / 2;
+    for (const sub of downSubs) {
+      shiftSubtree(sub, dxCenter, 0);
+    }
+
+    const downBoundsX = mergeBoundsList(downSubs)!;
+    let targetMinY = h + gapVertY;
+    if (leftBounds && downBoundsX.minX < leftBounds.maxX + 14) {
+      targetMinY = Math.max(targetMinY, leftBounds.maxY + 24);
+    }
+    if (rightBounds && downBoundsX.maxX > rightBounds.minX - 14) {
+      targetMinY = Math.max(targetMinY, rightBounds.maxY + 24);
+    }
+
+    for (const sub of downSubs) {
+      shiftSubtree(sub, 0, targetMinY);
+      sub.rootNode.side = 'down';
+      sub.rootNode.edgeAxis = 'vertical';
+      sub.rootNode.edgeFrom = { x: w / 2, y: h };
+      sub.rootNode.edgeTo = {
+        x: sub.rootNode.x + sub.rootNode.w / 2,
+        y: sub.rootNode.y,
+      };
+    }
+  }
+
+  const allNodes: LayoutNode[] = [rootNode];
+  for (const s of rightSubs) allNodes.push(...s.nodes);
+  for (const s of leftSubs) allNodes.push(...s.nodes);
+  for (const s of upSubs) allNodes.push(...s.nodes);
+  for (const s of downSubs) allNodes.push(...s.nodes);
+
+  let minX = 0;
+  let maxX = w;
+  let minY = 0;
+  let maxY = h;
+  for (const n of allNodes) {
+    if (n.x < minX) minX = n.x;
+    if (n.x + n.w > maxX) maxX = n.x + n.w;
+    if (n.y < minY) minY = n.y;
+    if (n.y + n.h > maxY) maxY = n.y + n.h;
+  }
+
+  return {
+    nodes: allNodes,
+    rootNode,
+    bounds: { minX, maxX, minY, maxY },
   };
+}
 
-  const rootRes = walk(root, 0, root.color || '#1351B4');
-  return normalizeLayoutBounds(nodes, 'vertical', padX, padY, rootRes.layoutNode);
+function reanchorEdgeSmart(parent: LayoutNode, child: LayoutNode): void {
+  const parentCx = parent.x + parent.w / 2;
+  const parentCy = parent.y + parent.h / 2;
+  const childCx = child.x + child.w / 2;
+  const childCy = child.y + child.h / 2;
+  const dx = childCx - parentCx;
+  const dy = childCy - parentCy;
+
+  const nx = Math.abs(dx) / Math.max(1, (parent.w + child.w) / 2);
+  const ny = Math.abs(dy) / Math.max(1, (parent.h + child.h) / 2);
+
+  if (ny > nx) {
+    child.edgeAxis = 'vertical';
+    if (dy >= 0) {
+      child.side = 'down';
+      child.edgeFrom = { x: parentCx, y: parent.y + parent.h };
+      child.edgeTo = { x: childCx, y: child.y };
+    } else {
+      child.side = 'up';
+      child.edgeFrom = { x: parentCx, y: parent.y };
+      child.edgeTo = { x: childCx, y: child.y + child.h };
+    }
+  } else {
+    child.edgeAxis = 'horizontal';
+    if (dx >= 0) {
+      child.side = 'right';
+      child.edgeFrom = { x: parent.x + parent.w, y: parentCy };
+      child.edgeTo = { x: child.x, y: childCy };
+    } else {
+      child.side = 'left';
+      child.edgeFrom = { x: parent.x, y: parentCy };
+      child.edgeTo = { x: child.x + child.w, y: childCy };
+    }
+  }
 }
 
 function applyHierarchicalOffsetsAndReanchor(
   nodes: LayoutNode[],
-  mode: MindMapLayoutMode,
+  _mode: MindMapLayoutMode,
   rootNode: LayoutNode,
 ) {
   const byId = new Map<string, LayoutNode>(nodes.map((n) => [n.node.id, n]));
@@ -1282,43 +1372,31 @@ function applyHierarchicalOffsetsAndReanchor(
       anyOffset = true;
       n.x += off.dx;
       n.y += off.dy;
+      if (n.edgeTo) {
+        n.edgeTo = { x: n.edgeTo.x + off.dx, y: n.edgeTo.y + off.dy };
+      }
+    }
+    if (n.parentId && n.edgeFrom) {
+      const pOff = getCumulativeOffset(n.parentId);
+      if (pOff.dx !== 0 || pOff.dy !== 0) {
+        n.edgeFrom = { x: n.edgeFrom.x + pOff.dx, y: n.edgeFrom.y + pOff.dy };
+      }
     }
   }
 
   if (!anyOffset) return;
 
-  // Recompute clean edge anchors based on actual post-drag positions
+  // Re-anchor edges smartly only where a node has a manual offset relative to its parent
   for (const n of nodes) {
     if (!n.parentId) continue;
+    const ownDx = Number.isFinite(n.node.offsetX) ? (n.node.offsetX as number) : 0;
+    const ownDy = Number.isFinite(n.node.offsetY) ? (n.node.offsetY as number) : 0;
+    if (ownDx === 0 && ownDy === 0) continue;
     const parent = byId.get(n.parentId);
     if (!parent) continue;
-
-    if (mode === 'vertical') {
-      const parentCenterY = parent.y + parent.h / 2;
-      const childCenterY = n.y + n.h / 2;
-      if (childCenterY >= parentCenterY) {
-        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y + parent.h };
-        n.edgeTo = { x: n.x + n.w / 2, y: n.y };
-      } else {
-        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y };
-        n.edgeTo = { x: n.x + n.w / 2, y: n.y + n.h };
-      }
-    } else {
-      const parentCenterX = parent.x + parent.w / 2;
-      const childCenterX = n.x + n.w / 2;
-      const isRight = childCenterX >= parentCenterX;
-      n.edgeFrom = {
-        x: isRight ? parent.x + parent.w : parent.x,
-        y: parent.y + parent.h / 2,
-      };
-      n.edgeTo = {
-        x: isRight ? n.x : n.x + n.w,
-        y: n.y + n.h / 2,
-      };
-    }
+    reanchorEdgeSmart(parent, n);
   }
 
-  // Keep root reference updated (bounds normalization runs right after)
   void rootNode;
 }
 
@@ -1365,10 +1443,20 @@ function normalizeLayoutBounds(
 export function computeMindMapLayout(
   root: MindMapNode,
   mode: MindMapLayoutMode = 'bilateral',
+  extraCustomTags?: MindMapCustomTag[],
 ): ComputedMindMapLayout {
-  if (mode === 'horizontal') return computeHorizontalLayout(root);
-  if (mode === 'vertical') return computeVerticalLayout(root);
-  return computeBilateralLayout(root);
+  const padX = mode === 'bilateral' ? 56 : 48;
+  const padY = mode === 'bilateral' ? 48 : 44;
+  const defaultRootDir: MindMapDirection = mode === 'vertical' ? 'down' : 'right';
+  const result = layoutOmnidirectionalSubtree(
+    root,
+    0,
+    defaultRootDir,
+    root.color || '#1351B4',
+    mode,
+    extraCustomTags || root.customTags,
+  );
+  return normalizeLayoutBounds(result.nodes, mode, padX, padY, result.rootNode);
 }
 
 /**
@@ -1412,30 +1500,21 @@ export function applyLiveDragPreview(
     if (!n.parentId) continue;
     const parent = byId.get(n.parentId);
     if (!parent) continue;
-    if (!movedIds.has(n.node.id) && !movedIds.has(parent.node.id)) continue;
+    const childMoved = movedIds.has(n.node.id);
+    const parentMoved = movedIds.has(parent.node.id);
+    if (!childMoved && !parentMoved) continue;
 
-    if (baseLayout.mode === 'vertical') {
-      const parentCenterY = parent.y + parent.h / 2;
-      const childCenterY = n.y + n.h / 2;
-      if (childCenterY >= parentCenterY) {
-        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y + parent.h };
-        n.edgeTo = { x: n.x + n.w / 2, y: n.y };
-      } else {
-        n.edgeFrom = { x: parent.x + parent.w / 2, y: parent.y };
-        n.edgeTo = { x: n.x + n.w / 2, y: n.y + n.h };
+    if (childMoved && parentMoved) {
+      // Whole subtree translated together: shift existing edge anchors cleanly
+      if (n.edgeFrom) {
+        n.edgeFrom = { x: n.edgeFrom.x + drag.dx, y: n.edgeFrom.y + drag.dy };
+      }
+      if (n.edgeTo) {
+        n.edgeTo = { x: n.edgeTo.x + drag.dx, y: n.edgeTo.y + drag.dy };
       }
     } else {
-      const parentCenterX = parent.x + parent.w / 2;
-      const childCenterX = n.x + n.w / 2;
-      const isRight = childCenterX >= parentCenterX;
-      n.edgeFrom = {
-        x: isRight ? parent.x + parent.w : parent.x,
-        y: parent.y + parent.h / 2,
-      };
-      n.edgeTo = {
-        x: isRight ? n.x : n.x + n.w,
-        y: n.y + n.h / 2,
-      };
+      // Relative position between parent and child changed: snap to best 4-way face
+      reanchorEdgeSmart(parent, n);
     }
   }
 
@@ -1446,7 +1525,7 @@ export function applyLiveDragPreview(
 }
 
 // ---------------------------------------------------------------------------
-// Edge Path Builder (Curved Bezier vs Clean Orthogonal)
+// Edge Path Builder (Curved Bezier vs Clean Orthogonal — All 4 Directions)
 // ---------------------------------------------------------------------------
 
 export function buildEdgePath(
@@ -1458,7 +1537,11 @@ export function buildEdgePath(
   const { x: x1, y: y1 } = n.edgeFrom;
   const { x: x2, y: y2 } = n.edgeTo;
 
-  if (mode === 'vertical') {
+  const isVerticalEdge = n.edgeAxis
+    ? n.edgeAxis === 'vertical'
+    : n.side === 'up' || n.side === 'down' || (n.side !== 'left' && n.side !== 'right' && mode === 'vertical');
+
+  if (isVerticalEdge) {
     const midY = (y1 + y2) / 2;
     if (edgeStyle === 'orthogonal') {
       const r = Math.min(8, Math.abs(x2 - x1) / 2, Math.abs(y2 - y1) / 4);
@@ -1466,7 +1549,8 @@ export function buildEdgePath(
         return `M ${x1} ${y1} L ${x2} ${y2}`;
       }
       const dirX = x2 > x1 ? 1 : -1;
-      return `M ${x1} ${y1} L ${x1} ${midY - r} Q ${x1} ${midY}, ${x1 + dirX * r} ${midY} L ${x2 - dirX * r} ${midY} Q ${x2} ${midY}, ${x2} ${midY + r} L ${x2} ${y2}`;
+      const dirY = y2 > y1 ? 1 : -1;
+      return `M ${x1} ${y1} L ${x1} ${midY - dirY * r} Q ${x1} ${midY}, ${x1 + dirX * r} ${midY} L ${x2 - dirX * r} ${midY} Q ${x2} ${midY}, ${x2} ${midY + dirY * r} L ${x2} ${y2}`;
     }
     return `M ${x1} ${y1} C ${x1} ${midY}, ${x2} ${midY}, ${x2} ${y2}`;
   }
@@ -1501,6 +1585,8 @@ function escapeXml(str: string): string {
 export interface MindMapVisualExportOptions {
   themeId?: MindMapThemeId;
   canvasBg?: string;
+  customTags?: MindMapCustomTag[];
+  omitHeader?: boolean;
 }
 
 export function buildStandaloneMindMapSvg(
@@ -1509,7 +1595,7 @@ export function buildStandaloneMindMapSvg(
   title: string,
   visualOptions?: MindMapVisualExportOptions,
 ): string {
-  const headerH = 44;
+  const headerH = visualOptions?.omitHeader ? 0 : 44;
   const totalW = layout.width;
   const totalH = layout.height + headerH;
   const theme = getMindMapTheme(visualOptions?.themeId);
@@ -1529,7 +1615,7 @@ export function buildStandaloneMindMapSvg(
       if (!d || !n.edgeTo) return '';
       const strokeW = n.depth === 1 ? 2.4 : 1.8;
       return `
-        <path d="${d}" fill="none" stroke="${n.color}" stroke-width="${strokeW}" stroke-opacity="0.78" stroke-linecap="round" />
+        <path d="${d}" fill="none" stroke="${n.color}" stroke-width="${strokeW}" stroke-opacity="0.82" stroke-linecap="round" />
         <circle cx="${n.edgeTo.x}" cy="${n.edgeTo.y}" r="3" fill="${n.color}" />
       `;
     })
@@ -1539,7 +1625,7 @@ export function buildStandaloneMindMapSvg(
     .map((n) => {
       const isRoot = n.depth === 0;
       const isBranch = n.depth === 1;
-      const tagMeta = getTagMeta(n.node.tag);
+      const tagMeta = getTagMeta(n.node.tag, visualOptions?.customTags);
       const customBg = n.node.bgColor?.trim();
       const fill = customBg || (isRoot ? n.color : theme.exportCardBg);
       const readable = customBg
@@ -1555,32 +1641,38 @@ export function buildStandaloneMindMapSvg(
       const noteFill = readable.isDark ? '#CBD5E1' : readable.note;
       const rx = isRoot ? 14 : 10;
       const padX = 12;
-      let cursorY = n.y + (isRoot ? 14 : 10);
+      const titleLineH = isRoot ? 18.5 : 16.5;
+      const noteLineH = 14.5;
+      let cursorY = n.y + (isRoot ? 14 : 11);
 
       let tagSvg = '';
       if (tagMeta) {
         const tagFill = readable.isDark ? 'rgba(255,255,255,0.16)' : tagMeta.bg;
         const tagTextFill = readable.isDark ? '#FFFFFF' : tagMeta.color;
-        const tagW = Math.max(46, tagMeta.short.length * 6.5 + 12);
+        const measuredTagW = Math.ceil(
+          measureTextPx(tagMeta.short, '800 8.5px system-ui, -apple-system, sans-serif', 6.4) + 14,
+        );
+        const tagW = Math.min(n.w - padX * 2, Math.max(44, measuredTagW));
         tagSvg = `
-          <rect x="${n.x + padX}" y="${cursorY - 2}" width="${tagW}" height="15" rx="4" fill="${tagFill}" />
-          <text x="${n.x + padX + 6}" y="${cursorY + 9}" font-family="system-ui, -apple-system, sans-serif" font-size="8.5" font-weight="800" letter-spacing="0.4" fill="${tagTextFill}">${escapeXml(tagMeta.short)}</text>
+          <rect x="${n.x + padX}" y="${cursorY - 1}" width="${tagW}" height="16" rx="4" fill="${tagFill}" />
+          <text x="${n.x + padX + 6}" y="${cursorY + 10.5}" font-family="system-ui, -apple-system, sans-serif" font-size="8.5" font-weight="800" letter-spacing="0.3" fill="${tagTextFill}">${escapeXml(tagMeta.short)}</text>
         `;
-        cursorY += 18;
+        cursorY += 20;
       }
 
+      const titleFontSize = isRoot ? 13.5 : isBranch ? 12.5 : 12;
       const titleSvg = n.titleLines
         .map((line, i) => {
-          const lineY = cursorY + (isRoot ? 13 : 12) + i * (isRoot ? 18 : 16);
-          return `<text x="${n.x + padX}" y="${lineY}" font-family="system-ui, -apple-system, sans-serif" font-size="${isRoot ? 13.5 : 12}" font-weight="${isRoot || isBranch ? 700 : 600}" fill="${textFill}">${escapeXml(line)}</text>`;
+          const lineY = cursorY + (isRoot ? 13 : 12) + i * titleLineH;
+          return `<text x="${n.x + padX}" y="${lineY}" font-family="system-ui, -apple-system, sans-serif" font-size="${titleFontSize}" font-weight="${isRoot || isBranch ? 700 : 600}" fill="${textFill}">${escapeXml(line)}</text>`;
         })
         .join('\n');
 
-      const afterTitleY = cursorY + Math.max(1, n.titleLines.length) * (isRoot ? 18 : 16) + 3;
+      const afterTitleY = cursorY + Math.max(1, n.titleLines.length) * titleLineH + 5;
       const noteSvg = n.noteLines
         .map((line, i) => {
-          const lineY = afterTitleY + 10 + i * 14;
-          return `<text x="${n.x + padX}" y="${lineY}" font-family="system-ui, -apple-system, sans-serif" font-size="10.2" fill="${noteFill}">${escapeXml(line)}</text>`;
+          const lineY = afterTitleY + 10 + i * noteLineH;
+          return `<text x="${n.x + padX}" y="${lineY}" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" fill="${noteFill}">${escapeXml(line)}</text>`;
         })
         .join('\n');
 
@@ -1597,6 +1689,14 @@ export function buildStandaloneMindMapSvg(
 
   const safeTitle = escapeXml(title.trim() || 'Mapa Mental');
   const safeDate = escapeXml(localDateTimeBrazilian());
+  const headerSvg =
+    headerH > 0
+      ? `
+    <rect width="100%" height="${headerH}" fill="${theme.headerBg}" />
+    <rect y="${headerH - 2}" width="100%" height="2" fill="${theme.headerAccent}" />
+    <text x="20" y="27" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">${safeTitle}</text>
+    <text x="${totalW - 20}" y="26" text-anchor="end" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" fill="#CBD5E1">${safeDate}</text>`
+      : '';
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${totalW}" height="${totalH}" viewBox="0 0 ${totalW} ${totalH}">
     <defs>
@@ -1606,10 +1706,7 @@ export function buildStandaloneMindMapSvg(
     </defs>
     <rect width="100%" height="100%" fill="${resolvedCanvasBg}" />
     <rect y="${headerH}" width="100%" height="${layout.height}" fill="url(#mm-dot-grid)" />
-    <rect width="100%" height="${headerH}" fill="${theme.headerBg}" />
-    <rect y="${headerH - 2}" width="100%" height="2" fill="${theme.headerAccent}" />
-    <text x="20" y="27" font-family="system-ui, -apple-system, sans-serif" font-size="14" font-weight="700" fill="#FFFFFF">${safeTitle}</text>
-    <text x="${totalW - 20}" y="26" text-anchor="end" font-family="system-ui, -apple-system, sans-serif" font-size="10.5" fill="#CBD5E1">${safeDate}</text>
+    ${headerSvg}
     <g transform="translate(0, ${headerH})">
       ${paths}
       ${boxes}
@@ -1633,7 +1730,7 @@ function renderSvgToDataUrl(
   svgString: string,
   width: number,
   height: number,
-  scale = 2,
+  scale = 2.5,
   bgColor = '#F8FAFC',
 ): Promise<{ blob: Blob; dataUrl: string }> {
   return new Promise((resolve, reject) => {
@@ -1641,16 +1738,20 @@ function renderSvgToDataUrl(
     const url = URL.createObjectURL(svgBlob);
     const img = new Image();
     img.onload = () => {
+      const maxDim = Math.max(width, height, 1);
+      const safeMaxScale = Math.max(1, Math.floor((7600 / maxDim) * 100) / 100);
+      const effectiveScale = Math.max(1, Math.min(scale, safeMaxScale));
+
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(width * scale);
-      canvas.height = Math.round(height * scale);
+      canvas.width = Math.round(width * effectiveScale);
+      canvas.height = Math.round(height * effectiveScale);
       const ctx = canvas.getContext('2d');
       if (!ctx) {
         URL.revokeObjectURL(url);
         reject(new Error('Contexto 2D indisponível para renderização.'));
         return;
       }
-      ctx.scale(scale, scale);
+      ctx.scale(effectiveScale, effectiveScale);
       ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, width, height);
       ctx.drawImage(img, 0, 0);
@@ -1672,6 +1773,40 @@ function renderSvgToDataUrl(
   });
 }
 
+/**
+ * Renders any MindMapNode tree with ALL branches and subgroups expanded into
+ * PNG bytes + dimensions, ready for standalone PNG download or PDF embedding.
+ */
+export async function renderExpandedMindMapPngBytes(
+  root: MindMapNode,
+  title: string,
+  visualOptions?: MindMapVisualExportOptions,
+): Promise<{ bytes: Uint8Array; blob: Blob; dataUrl: string; width: number; height: number }> {
+  const expanded = setAllNodesCollapsed(root, false);
+  const mode = expanded.layout || 'bilateral';
+  const edgeStyle = expanded.edgeStyle || 'curved';
+  const mergedOptions: MindMapVisualExportOptions = {
+    themeId: visualOptions?.themeId ?? expanded.themeId,
+    canvasBg: visualOptions?.canvasBg ?? expanded.canvasBg,
+    customTags: visualOptions?.customTags ?? expanded.customTags,
+    omitHeader: visualOptions?.omitHeader,
+  };
+  const layout = computeMindMapLayout(expanded, mode, mergedOptions.customTags);
+  const theme = getMindMapTheme(mergedOptions.themeId);
+  const resolvedCanvasBg = mergedOptions.canvasBg || theme.exportCanvasBg;
+  const headerH = mergedOptions.omitHeader ? 0 : 44;
+  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, mergedOptions);
+  const { blob, dataUrl } = await renderSvgToDataUrl(
+    svgString,
+    layout.width,
+    layout.height + headerH,
+    2.5,
+    resolvedCanvasBg,
+  );
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  return { bytes, blob, dataUrl, width: layout.width, height: layout.height + headerH };
+}
+
 export async function exportMindMapPngFile(
   layout: ComputedMindMapLayout,
   edgeStyle: MindMapEdgeStyle,
@@ -1685,7 +1820,7 @@ export async function exportMindMapPngFile(
     svgString,
     layout.width,
     layout.height + 44,
-    2,
+    2.5,
     resolvedCanvasBg,
   );
   const slug = cleanSafeName(title, 'mapa_mental').replace(/\s+/g, '_');
@@ -1701,15 +1836,19 @@ export async function exportMindMapVisualPdfFile(
 ): Promise<void> {
   const theme = getMindMapTheme(visualOptions?.themeId);
   const resolvedCanvasBg = visualOptions?.canvasBg || theme.exportCanvasBg;
-  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, visualOptions);
+  const svgString = buildStandaloneMindMapSvg(layout, edgeStyle, title, {
+    ...visualOptions,
+    omitHeader: true,
+  });
   const svgW = layout.width;
-  const svgH = layout.height + 44;
-  const { dataUrl } = await renderSvgToDataUrl(svgString, svgW, svgH, 2, resolvedCanvasBg);
+  const svgH = layout.height;
+  const { dataUrl } = await renderSvgToDataUrl(svgString, svgW, svgH, 2.5, resolvedCanvasBg);
 
-  const doc = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' });
+  const orientation = svgH > svgW * 1.15 ? 'portrait' : 'landscape';
+  const doc = new jsPDF({ orientation, unit: 'mm', format: 'a4' });
   const pageW = doc.internal.pageSize.getWidth();
   const pageH = doc.internal.pageSize.getHeight();
-  const margin = 10;
+  const margin = 8;
 
   // Compact institutional header
   doc.setFillColor(7, 29, 65);
@@ -1728,21 +1867,21 @@ export async function exportMindMapVisualPdfFile(
 
   doc.setTextColor(255, 255, 255);
   doc.setFontSize(11.5);
-  doc.text(normalizePdfLegalText((title || 'Mapa Mental').slice(0, 95)), margin, 13.5);
+  doc.text(normalizePdfLegalText((title || 'Mapa Mental').slice(0, 110)), margin, 13.5);
 
   doc.setTextColor(203, 213, 225);
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(7.5);
   doc.text(localDateTimeBrazilian(), pageW - margin, 13.5, { align: 'right' });
 
-  // Fit diagram cleanly inside remaining A4 landscape frame
+  // Fit full expanded diagram cleanly inside remaining A4 frame
   const availW = pageW - margin * 2;
-  const availH = pageH - 28;
+  const availH = pageH - 27;
   const ratio = Math.min(availW / svgW, availH / svgH);
   const drawW = svgW * ratio;
   const drawH = svgH * ratio;
   const drawX = margin + (availW - drawW) / 2;
-  const drawY = 22 + (availH - drawH) / 2;
+  const drawY = 21 + (availH - drawH) / 2;
 
   doc.addImage(dataUrl, 'PNG', drawX, drawY, drawW, drawH, undefined, 'FAST');
 
@@ -1751,7 +1890,7 @@ export async function exportMindMapVisualPdfFile(
   doc.text(
     normalizePdfLegalText(`estuda.gov.br · Construtor Visual de Mapas Mentais · ${subjectLabel}`),
     margin,
-    pageH - 4,
+    pageH - 3.5,
   );
 
   const slug = cleanSafeName(title, 'mapa_mental').replace(/\s+/g, '_');

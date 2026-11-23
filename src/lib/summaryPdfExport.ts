@@ -1,8 +1,15 @@
 import { jsPDF } from 'jspdf';
 import { PDFDocument } from 'pdf-lib';
-import { MindMapNode, SummaryFile, SummaryItemKind } from '../types/study';
+import { MindMapCustomTag, MindMapNode, SummaryFile, SummaryItemKind } from '../types/study';
 import { getFileBlob, triggerBlobDownload } from './fileStorage';
 import { normalizePdfLegalText, segmentLegalText } from './legalTextFormatter';
+import {
+  computeMindMapLayout,
+  exportMindMapVisualPdfFile,
+  getTagMeta,
+  renderExpandedMindMapPngBytes,
+  setAllNodesCollapsed,
+} from './mindMapLayout';
 import { cleanSafeName, localDateIso, localDateTimeBrazilian, visibleName } from './parsers';
 
 export function getSummaryItemKind(item: SummaryFile): SummaryItemKind {
@@ -21,13 +28,20 @@ export function getSummaryDisplayTitle(item: SummaryFile): string {
   return base.replace(/\.(pdf|txt|png|jpe?g|webp|mindmap\.json)$/i, '') || base;
 }
 
-export function flattenMindMapToOutline(node: MindMapNode, depth = 0): string[] {
+export function flattenMindMapToOutline(
+  node: MindMapNode,
+  depth = 0,
+  customTags?: MindMapCustomTag[],
+): string[] {
+  const tagPool = customTags ?? node.customTags;
   const indent = '  '.repeat(depth);
   const bullet = depth === 0 ? 'TEMA CENTRAL: ' : depth === 1 ? '• ' : '- ';
-  const noteSuffix = node.note?.trim() ? ` (${node.note.trim()})` : '';
-  const lines = [`${indent}${bullet}${node.label.trim()}${noteSuffix}`];
+  const tagMeta = getTagMeta(node.tag, tagPool);
+  const tagPrefix = tagMeta ? `[${tagMeta.short}] ` : '';
+  const noteSuffix = node.note?.trim() ? ` — ${node.note.trim()}` : '';
+  const lines = [`${indent}${bullet}${tagPrefix}${(node.label || '').trim()}${noteSuffix}`];
   for (const child of node.children || []) {
-    lines.push(...flattenMindMapToOutline(child, depth + 1));
+    lines.push(...flattenMindMapToOutline(child, depth + 1, tagPool));
   }
   return lines;
 }
@@ -299,8 +313,100 @@ async function appendBinarySummaryItemToMergedPdf(
   return { appendedPages: 0 };
 }
 
+async function appendVisualMindMapPageToMergedPdf(
+  mergedPdf: PDFDocument,
+  subjectLabel: string,
+  item: SummaryFile,
+): Promise<{ appendedPages: number; warning?: string }> {
+  if (!item.mindMap) return { appendedPages: 0 };
+  try {
+    const title = getSummaryDisplayTitle(item);
+    const rendered = await renderExpandedMindMapPngBytes(item.mindMap, title, {
+      themeId: item.mindMap.themeId,
+      canvasBg: item.mindMap.canvasBg,
+      customTags: item.mindMap.customTags,
+      omitHeader: true,
+    });
+    const orientation = rendered.height > rendered.width * 1.15 ? 'portrait' : 'landscape';
+    const doc = new jsPDF({ orientation, unit: 'mm', format: 'a4' });
+    const pageW = doc.internal.pageSize.getWidth();
+    const pageH = doc.internal.pageSize.getHeight();
+    const margin = 8;
+
+    doc.setFillColor(7, 29, 65);
+    doc.rect(0, 0, pageW, 18, 'F');
+    doc.setFillColor(255, 205, 7);
+    doc.rect(0, 18, pageW, 1.2, 'F');
+
+    doc.setTextColor(255, 205, 7);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.5);
+    doc.text(
+      normalizePdfLegalText(`MAPA MENTAL VISUAL · ${subjectLabel.toUpperCase()}`),
+      margin,
+      6.5,
+    );
+
+    doc.setTextColor(255, 255, 255);
+    doc.setFontSize(11.5);
+    doc.text(normalizePdfLegalText(title.slice(0, 110)), margin, 13.5);
+
+    doc.setTextColor(203, 213, 225);
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.text(localDateTimeBrazilian(), pageW - margin, 13.5, { align: 'right' });
+
+    const availW = pageW - margin * 2;
+    const availH = pageH - 27;
+    const ratio = Math.min(availW / rendered.width, availH / rendered.height);
+    const drawW = rendered.width * ratio;
+    const drawH = rendered.height * ratio;
+    const drawX = margin + (availW - drawW) / 2;
+    const drawY = 21 + (availH - drawH) / 2;
+
+    doc.addImage(rendered.dataUrl, 'PNG', drawX, drawY, drawW, drawH, undefined, 'FAST');
+
+    doc.setTextColor(100, 116, 139);
+    doc.setFontSize(7.5);
+    doc.text(
+      normalizePdfLegalText(`estuda.gov.br · Mapa Mental Expandido · ${subjectLabel}`),
+      margin,
+      pageH - 3.5,
+    );
+
+    const visualPdf = await PDFDocument.load(doc.output('arraybuffer'));
+    const copied = await mergedPdf.copyPages(visualPdf, visualPdf.getPageIndices());
+    copied.forEach((p) => mergedPdf.addPage(p));
+    return { appendedPages: copied.length };
+  } catch {
+    return { appendedPages: 0, warning: `Não foi possível renderizar o diagrama visual: ${getSummaryDisplayTitle(item)}` };
+  }
+}
+
 export async function exportSingleNotePdf(subjectKey: string, item: SummaryFile): Promise<void> {
   const subjectLabel = visibleName(subjectKey);
+  const kind = getSummaryItemKind(item);
+  if (kind === 'mindmap' && item.mindMap) {
+    const expanded = setAllNodesCollapsed(item.mindMap, false);
+    const layout = computeMindMapLayout(
+      expanded,
+      expanded.layout || 'bilateral',
+      expanded.customTags,
+    );
+    await exportMindMapVisualPdfFile(
+      layout,
+      expanded.edgeStyle || 'curved',
+      getSummaryDisplayTitle(item),
+      subjectLabel,
+      {
+        themeId: expanded.themeId,
+        canvasBg: expanded.canvasBg,
+        customTags: expanded.customTags,
+      },
+    );
+    return;
+  }
+
   const bytes = buildNotesPdfBytes(`${subjectLabel} — ${getSummaryDisplayTitle(item)}`, [item]);
   if (!bytes) {
     throw new Error('Este item não possui conteúdo textual para exportação.');
@@ -324,7 +430,7 @@ export async function exportSubjectSummariesPdf(
   const mergedPdf = await PDFDocument.create();
   const warnings: string[] = [];
 
-  // 1. Add formatted notes + mind map outlines
+  // 1. Add formatted notes + full expanded mind map text outlines
   const notesBytes = buildNotesPdfBytes(subjectLabel, items);
   if (notesBytes) {
     const notesDoc = await PDFDocument.load(notesBytes);
@@ -332,7 +438,14 @@ export async function exportSubjectSummariesPdf(
     copied.forEach((p) => mergedPdf.addPage(p));
   }
 
-  // 2. Append attached PDFs & images
+  // 2. Append full expanded visual diagram pages for every saved Mind Map
+  const mindMapItems = items.filter((it) => getSummaryItemKind(it) === 'mindmap' && it.mindMap);
+  for (const mmItem of mindMapItems) {
+    const res = await appendVisualMindMapPageToMergedPdf(mergedPdf, subjectLabel, mmItem);
+    if (res.warning) warnings.push(res.warning);
+  }
+
+  // 3. Append attached PDFs & images
   if (includeAttached) {
     const binaries = items.filter((it) => {
       const k = getSummaryItemKind(it);
@@ -482,6 +595,12 @@ export async function exportAllSubjectsSummariesPdf(
         const copied = await mergedPdf.copyPages(divDoc, divDoc.getPageIndices());
         copied.forEach((p) => mergedPdf.addPage(p));
       }
+    }
+
+    const mindMapItems = list.filter((it) => getSummaryItemKind(it) === 'mindmap' && it.mindMap);
+    for (const mmItem of mindMapItems) {
+      const res = await appendVisualMindMapPageToMergedPdf(mergedPdf, subjectLabel, mmItem);
+      if (res.warning) warnings.push(res.warning);
     }
 
     if (includeAttached) {
