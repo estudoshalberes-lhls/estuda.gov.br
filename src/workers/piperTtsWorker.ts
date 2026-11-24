@@ -1,32 +1,22 @@
 import {
-  download,
-  INFERENCE_PROGRESS_URL,
-  remove,
-  stored,
-  TtsSession,
-  WASM_BASE,
-  type Progress,
-  type VoiceId,
-} from '@mintplex-labs/piper-tts-web';
-
-const ONNX_WASM_CDN = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
-
-const WASM_PATHS = {
-  onnxWasm: ONNX_WASM_CDN,
-  piperData: `${WASM_BASE}.data`,
-  piperWasm: `${WASM_BASE}.wasm`,
-};
+  downloadPiperV2Voice,
+  listStoredPiperV2Voices,
+  type PiperV2VoiceId,
+  removePiperV2Voice,
+  resetActivePiperSession,
+  synthesizePiperV2WavBuffer,
+} from '../lib/piperEngine';
 
 type WorkerRequest =
   | { id: number; type: 'stored' }
-  | { id: number; type: 'download'; voiceId: VoiceId }
-  | { id: number; type: 'predict'; voiceId: VoiceId; text: string }
-  | { id: number; type: 'remove'; voiceId: VoiceId };
+  | { id: number; type: 'download'; voiceId: PiperV2VoiceId }
+  | { id: number; type: 'predict'; voiceId: PiperV2VoiceId; text: string }
+  | { id: number; type: 'remove'; voiceId: PiperV2VoiceId };
 
 type WorkerResponse =
-  | { id: number; type: 'stored'; voices: VoiceId[] }
-  | { id: number; type: 'downloaded'; voiceId: VoiceId }
-  | { id: number; type: 'removed'; voiceId: VoiceId }
+  | { id: number; type: 'stored'; voices: PiperV2VoiceId[] }
+  | { id: number; type: 'downloaded'; voiceId: PiperV2VoiceId }
+  | { id: number; type: 'removed'; voiceId: PiperV2VoiceId }
   | {
       id: number;
       type: 'progress';
@@ -40,8 +30,6 @@ type WorkerResponse =
 // ONNX Runtime WASM cannot execute overlapping session.run() calls safely;
 // serialize all model operations in a FIFO promise chain inside the worker.
 let opQueue: Promise<void> = Promise.resolve();
-let activeSessionVoice: VoiceId | null = null;
-let activeSession: TtsSession | null = null;
 
 function post(msg: WorkerResponse, transfer?: Transferable[]) {
   if (transfer && transfer.length > 0) {
@@ -51,66 +39,26 @@ function post(msg: WorkerResponse, transfer?: Transferable[]) {
   }
 }
 
-async function getSessionForVoice(
-  voiceId: VoiceId,
-  onProgress: (p: Progress) => void,
-): Promise<TtsSession> {
-  if (activeSession && activeSessionVoice === voiceId) {
-    // Re-attach latest progress callback on existing singleton session
-    const reused = new TtsSession({
-      voiceId,
-      progress: onProgress,
-      wasmPaths: WASM_PATHS,
-    });
-    await reused.waitReady;
-    return reused;
-  }
-
-  // Force clean reload when switching voices (TtsSession caches a static singleton)
-  TtsSession._instance = null;
-  activeSession = null;
-  activeSessionVoice = null;
-
-  const session = await TtsSession.create({
-    voiceId,
-    progress: onProgress,
-    wasmPaths: WASM_PATHS,
-  });
-  activeSession = session;
-  activeSessionVoice = voiceId;
-  return session;
-}
-
 async function handleRequest(req: WorkerRequest): Promise<void> {
   try {
     if (req.type === 'stored') {
-      let voices: VoiceId[] = [];
-      try {
-        voices = await stored();
-      } catch {
-        voices = [];
-      }
+      const voices = await listStoredPiperV2Voices().catch(() => [] as PiperV2VoiceId[]);
       post({ id: req.id, type: 'stored', voices });
       return;
     }
 
     if (req.type === 'remove') {
-      if (activeSessionVoice === req.voiceId) {
-        TtsSession._instance = null;
-        activeSession = null;
-        activeSessionVoice = null;
-      }
-      await remove(req.voiceId);
+      await removePiperV2Voice(req.voiceId);
       post({ id: req.id, type: 'removed', voiceId: req.voiceId });
       return;
     }
 
     if (req.type === 'download') {
-      await download(req.voiceId, (p) => {
+      await downloadPiperV2Voice(req.voiceId, (p) => {
         post({
           id: req.id,
           type: 'progress',
-          stage: 'download',
+          stage: p.stage,
           loaded: p.loaded,
           total: p.total,
         });
@@ -120,23 +68,21 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
     }
 
     if (req.type === 'predict') {
-      const session = await getSessionForVoice(req.voiceId, (p) => {
+      const buffer = await synthesizePiperV2WavBuffer(req.voiceId, req.text, (p) => {
         post({
           id: req.id,
           type: 'progress',
-          stage: p.url === INFERENCE_PROGRESS_URL ? 'inference' : 'download',
+          stage: p.stage,
           loaded: p.loaded,
           total: p.total,
         });
       });
-      const wavBlob = await session.predict(req.text);
-      const buffer = await wavBlob.arrayBuffer();
       post(
         {
           id: req.id,
           type: 'result',
           buffer,
-          mimeType: wavBlob.type || 'audio/wav',
+          mimeType: 'audio/wav',
         },
         [buffer],
       );
@@ -144,11 +90,8 @@ async function handleRequest(req: WorkerRequest): Promise<void> {
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Erro ao executar a voz neural local (Piper WASM).';
-    // Reset broken session so the next attempt can recover cleanly
     if (req.type === 'predict') {
-      TtsSession._instance = null;
-      activeSession = null;
-      activeSessionVoice = null;
+      resetActivePiperSession();
     }
     post({ id: req.id, type: 'error', message });
   }

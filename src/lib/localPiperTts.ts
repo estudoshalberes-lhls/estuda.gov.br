@@ -1,4 +1,6 @@
-export type LocalPiperVoiceId = 'pt_BR-faber-medium' | 'pt_BR-edresson-low';
+import type { PiperV2VoiceId } from './piperEngine';
+
+export type LocalPiperVoiceId = PiperV2VoiceId;
 
 export interface LocalPiperVoiceSpec {
   id: LocalPiperVoiceId;
@@ -15,9 +17,15 @@ export const LOCAL_PIPER_VOICES: ReadonlyArray<LocalPiperVoiceSpec> = [
     sizeMb: 60,
   },
   {
-    id: 'pt_BR-edresson-low',
-    label: 'Edresson · Neural pt-BR (Rápida)',
-    shortName: 'Edresson',
+    id: 'pt_BR-cadu-medium',
+    label: 'Cadu · Neural pt-BR (Natural)',
+    shortName: 'Cadu',
+    sizeMb: 60,
+  },
+  {
+    id: 'pt_BR-jeff-medium',
+    label: 'Jeff · Neural pt-BR (Firme)',
+    shortName: 'Jeff',
     sizeMb: 60,
   },
 ];
@@ -165,10 +173,8 @@ function callWorker<T>(
 }
 
 // Main-thread fallback (only if Web Workers are blocked in a restricted context)
-const ONNX_WASM_CDN = 'https://cdn.jsdelivr.net/npm/onnxruntime-web@1.31.1/dist/';
-
-async function loadMainThreadPiper() {
-  return import('@mintplex-labs/piper-tts-web');
+async function loadMainThreadEngine() {
+  return import('./piperEngine');
 }
 
 export async function getStoredLocalPiperVoices(): Promise<LocalPiperVoiceId[]> {
@@ -178,8 +184,8 @@ export async function getStoredLocalPiperVoices(): Promise<LocalPiperVoiceId[]> 
     return raw.filter((v): v is LocalPiperVoiceId => VALID_LOCAL_PIPER_IDS.has(v));
   } catch {
     try {
-      const mod = await loadMainThreadPiper();
-      const raw = await mod.stored();
+      const mod = await loadMainThreadEngine();
+      const raw = await mod.listStoredPiperV2Voices();
       return raw.filter((v): v is LocalPiperVoiceId => VALID_LOCAL_PIPER_IDS.has(v));
     } catch {
       return [];
@@ -200,12 +206,12 @@ export async function downloadLocalPiperVoice(
     if (err instanceof Error && err.message !== 'WORKER_UNAVAILABLE') {
       throw err;
     }
-    const mod = await loadMainThreadPiper();
-    await mod.download(voiceId, (p) => {
+    const mod = await loadMainThreadEngine();
+    await mod.downloadPiperV2Voice(voiceId, (p) => {
       const pct =
         p.total > 0 ? Math.min(100, Math.max(0, Math.round((p.loaded / p.total) * 100))) : 0;
       onProgress?.({
-        stage: 'download',
+        stage: p.stage,
         loaded: p.loaded,
         total: p.total,
         percent: pct,
@@ -236,29 +242,18 @@ export async function synthesizeLocalPiperWav(
       throw abortErr;
     }
 
-    const mod = await loadMainThreadPiper();
-    if (mod.TtsSession._instance && mod.TtsSession._instance.voiceId !== voiceId) {
-      mod.TtsSession._instance = null;
-    }
-    const session = await mod.TtsSession.create({
-      voiceId,
-      wasmPaths: {
-        onnxWasm: ONNX_WASM_CDN,
-        piperData: `${mod.WASM_BASE}.data`,
-        piperWasm: `${mod.WASM_BASE}.wasm`,
-      },
-      progress: (p) => {
-        const pct =
-          p.total > 0 ? Math.min(100, Math.max(0, Math.round((p.loaded / p.total) * 100))) : 0;
-        onProgress?.({
-          stage: p.url === mod.INFERENCE_PROGRESS_URL ? 'inference' : 'download',
-          loaded: p.loaded,
-          total: p.total,
-          percent: pct,
-        });
-      },
+    const mod = await loadMainThreadEngine();
+    const buffer = await mod.synthesizePiperV2WavBuffer(voiceId, text, (p) => {
+      const pct =
+        p.total > 0 ? Math.min(100, Math.max(0, Math.round((p.loaded / p.total) * 100))) : 0;
+      onProgress?.({
+        stage: p.stage,
+        loaded: p.loaded,
+        total: p.total,
+        percent: pct,
+      });
     });
-    return session.predict(text);
+    return new Blob([buffer], { type: 'audio/wav' });
   }
 }
 
@@ -268,11 +263,8 @@ export async function removeLocalPiperVoice(voiceId: LocalPiperVoiceId): Promise
     await callWorker<void>({ type: 'remove', voiceId });
   } catch {
     try {
-      const mod = await loadMainThreadPiper();
-      if (mod.TtsSession._instance && mod.TtsSession._instance.voiceId === voiceId) {
-        mod.TtsSession._instance = null;
-      }
-      await mod.remove(voiceId);
+      const mod = await loadMainThreadEngine();
+      await mod.removePiperV2Voice(voiceId);
     } catch {
       // ignore cleanup error
     }

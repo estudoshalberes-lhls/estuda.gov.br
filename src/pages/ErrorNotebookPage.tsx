@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import {
   AlertTriangle,
   AlignLeft,
@@ -53,6 +52,12 @@ import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal
 const UNASSIGNED_SUBJECT_FILTER = '__UNASSIGNED__';
 const SIMULADOS_FILTER = '__SIMULADOS__';
 const SIMULADOS_STATS_KEY = 'Simulados';
+const EXAM_UNASSIGNED_SUBJECT_LABEL = 'Sem matéria associada';
+const INITIAL_VISIBLE_ENTRIES = 80;
+
+function isProofExamEntry(entry: ErrorNotebookEntry): boolean {
+  return Boolean(entry.correcao_prova && entry.arquivo_prova);
+}
 
 function isClosedSimulationEntry(entry: ErrorNotebookEntry): boolean {
   return (
@@ -63,25 +68,81 @@ function isClosedSimulationEntry(entry: ErrorNotebookEntry): boolean {
   );
 }
 
+function isExamEntry(entry: ErrorNotebookEntry): boolean {
+  return isClosedSimulationEntry(entry) || isProofExamEntry(entry);
+}
+
+function findMatchingCompletedSimulation(
+  entry: ErrorNotebookEntry,
+  completedSimulations: CompletedSimulation[],
+): CompletedSimulation | undefined {
+  if (entry.simulado_id) {
+    const byId = completedSimulations.find((s) => s.id === entry.simulado_id);
+    if (byId) return byId;
+  }
+  if (entry.id.startsWith('sim-err-')) {
+    const byPrefix = completedSimulations.find((s) => entry.id.startsWith(`sim-err-${s.id}-`));
+    if (byPrefix) return byPrefix;
+  }
+  const candidateTitleNorm = normalizeSearch(
+    visibleName(entry.simulado_titulo || entry.arquivo_prova || ''),
+  );
+  if (candidateTitleNorm) {
+    const byTitle = completedSimulations.find((s) => {
+      const simTitleNorm = normalizeSearch(visibleName(s.titulo || ''));
+      const simFileNorm = normalizeSearch(visibleName(s.arquivo || ''));
+      return (
+        (simTitleNorm && simTitleNorm === candidateTitleNorm) ||
+        (simFileNorm && simFileNorm === candidateTitleNorm)
+      );
+    });
+    if (byTitle) return byTitle;
+  }
+  const stmtNorm = normalizeSearch(entry.questao?.enunciado || '').slice(0, 120);
+  if (stmtNorm.length >= 24) {
+    const byStmt = completedSimulations.find((s) =>
+      (s.questoes || []).some(
+        (q) => !q.correta && normalizeSearch(q.enunciado || '').includes(stmtNorm),
+      ),
+    );
+    if (byStmt) return byStmt;
+  }
+  return undefined;
+}
+
 function resolveSimulationExamMeta(
   entry: ErrorNotebookEntry,
   completedSimulations: CompletedSimulation[],
-): { key: string; label: string } {
-  if (entry.simulado_id) {
-    const matched = completedSimulations.find((s) => s.id === entry.simulado_id);
-    const label = visibleName(
-      entry.simulado_titulo || matched?.titulo || entry.arquivo_prova || 'Simulado Fechado',
-    );
-    return { key: entry.simulado_id, label: label || 'Simulado Fechado' };
+): { key: string; label: string; kind: 'simulado' | 'prova'; completedSim?: CompletedSimulation } {
+  if (isProofExamEntry(entry)) {
+    const cleanFile = visibleName(entry.arquivo_prova || 'Prova');
+    const bankLabel = (entry.banca || '').trim();
+    const label = bankLabel ? `${bankLabel} · ${cleanFile}` : cleanFile;
+    return {
+      key: `proof:${normalizeSearch(bankLabel)}:${normalizeSearch(cleanFile)}`,
+      label: label || 'Prova',
+      kind: 'prova',
+    };
   }
-  if (entry.id.startsWith('sim-err-')) {
-    const matched = completedSimulations.find((s) => entry.id.startsWith(`sim-err-${s.id}-`));
-    if (matched) {
-      return {
-        key: matched.id,
-        label: visibleName(entry.simulado_titulo || matched.titulo || matched.arquivo || 'Simulado Fechado'),
-      };
-    }
+  const matched = findMatchingCompletedSimulation(entry, completedSimulations);
+  if (matched) {
+    const label = visibleName(
+      entry.simulado_titulo || matched.titulo || matched.arquivo || 'Simulado Fechado',
+    );
+    return {
+      key: matched.id,
+      label: label || 'Simulado Fechado',
+      kind: 'simulado',
+      completedSim: matched,
+    };
+  }
+  if (entry.simulado_id) {
+    const label = visibleName(entry.simulado_titulo || entry.arquivo_prova || 'Simulado Fechado');
+    return {
+      key: entry.simulado_id,
+      label: label || 'Simulado Fechado',
+      kind: 'simulado',
+    };
   }
   const fallbackLabel = visibleName(
     entry.simulado_titulo || entry.arquivo_prova || entry.materia || 'Simulado Fechado',
@@ -89,6 +150,7 @@ function resolveSimulationExamMeta(
   return {
     key: `title:${normalizeSearch(fallbackLabel || 'simulado-fechado')}`,
     label: fallbackLabel || 'Simulado Fechado',
+    kind: 'simulado',
   };
 }
 
@@ -120,22 +182,20 @@ interface SubjectStatItem {
   errorRatePct: number | null;
   notebookTotal: number;
   pendingCount: number;
+  correctedCount: number;
   notebookSharePct: number;
 }
 
-interface SubjectStatListRowProps {
-  rows: SubjectStatItem[];
-  filterSubject: string;
+interface SubjectStatCardProps {
+  row: SubjectStatItem;
+  index: number;
+  isSelected: boolean;
+  isExamScoped: boolean;
   onToggleSubject: (subject: string) => void;
 }
 
-const SubjectStatListRow = React.memo(
-  ({ index, style, ariaAttributes, rows, filterSubject, onToggleSubject }: RowComponentProps<SubjectStatListRowProps>) => {
-    const row = rows[index];
-    if (!row) return null;
-    const isSelected =
-      (row.subject === SIMULADOS_STATS_KEY && filterSubject === SIMULADOS_FILTER) ||
-      normalizeSearch(filterSubject) === normalizeSearch(row.subject);
+const SubjectStatCard = React.memo(
+  ({ row, index, isSelected, isExamScoped, onToggleSubject }: SubjectStatCardProps) => {
     const barPercent = row.errorRatePct !== null ? row.errorRatePct : row.notebookSharePct;
     const barColor =
       barPercent >= 50
@@ -144,56 +204,55 @@ const SubjectStatListRow = React.memo(
           ? 'var(--warning)'
           : 'var(--accent)';
     return (
-      <div style={style} {...ariaAttributes} className="pb-1.5 pr-1">
-        <button
-          type="button"
-          onClick={() => onToggleSubject(row.subject)}
-          className={`w-full text-left rounded-lg border px-3 py-2 transition-colors cursor-pointer ${
-            isSelected
-              ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
-              : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
-          }`}
-        >
-          <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
-            <div className="flex items-center gap-2 min-w-0">
-              <span className="font-mono-num text-[11.5px] font-extrabold text-[var(--muted)] w-6 shrink-0">
-                {index + 1}º
-              </span>
-              <strong className="text-[13px] font-bold text-[var(--text)] truncate">
-                {visibleName(row.subject)}
-              </strong>
-            </div>
-            <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono-num shrink-0">
-              {row.errorRatePct !== null && (
-                <span
-                  className="font-extrabold"
-                  style={{ color: barColor }}
-                  title="Percentual de erros sobre questões respondidas"
-                >
-                  {row.errorRatePct}% de erro ({row.wrongQuestions}/{row.answeredQuestions})
-                </span>
-              )}
-              <span className="text-[var(--muted)]">
-                <strong className="text-[var(--text)]">{row.notebookTotal}</strong>{' '}
-                no caderno ({row.notebookSharePct}%)
-                {row.pendingCount > 0 ? ` · ${row.pendingCount} pend.` : ''}
-              </span>
-            </div>
+      <button
+        type="button"
+        onClick={() => onToggleSubject(row.subject)}
+        className={`w-full text-left rounded-lg border px-3 py-2 transition-colors cursor-pointer ${
+          isSelected
+            ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
+            : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
+        }`}
+      >
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-mono-num text-[11.5px] font-extrabold text-[var(--muted)] w-6 shrink-0">
+              {index + 1}º
+            </span>
+            <strong className="text-[13px] font-bold text-[var(--text)] truncate">
+              {visibleName(row.subject)}
+            </strong>
           </div>
-          <div className="h-1.5 w-full rounded-full bg-[var(--panel-raised)] overflow-hidden">
-            <div
-              className="h-full rounded-full transition-all"
-              style={{
-                width: `${Math.max(4, Math.min(100, barPercent))}%`,
-                backgroundColor: barColor,
-              }}
-            />
+          <div className="flex flex-wrap items-center gap-3 text-[11.5px] font-mono-num shrink-0">
+            {row.errorRatePct !== null && (
+              <span
+                className="font-extrabold"
+                style={{ color: barColor }}
+                title="Percentual de erros sobre questões respondidas"
+              >
+                {row.errorRatePct}% de erro ({row.wrongQuestions}/{row.answeredQuestions})
+              </span>
+            )}
+            <span className="text-[var(--muted)]">
+              <strong className="text-[var(--text)]">{row.notebookTotal}</strong>{' '}
+              {isExamScoped ? 'na prova' : 'no caderno'} ({row.notebookSharePct}%)
+              {row.pendingCount > 0 ? ` · ${row.pendingCount} pend.` : ''}
+              {row.correctedCount > 0 ? ` · ${row.correctedCount} corrig.` : ''}
+            </span>
           </div>
-        </button>
-      </div>
+        </div>
+        <div className="h-1.5 w-full rounded-full bg-[var(--panel-raised)] overflow-hidden">
+          <div
+            className="h-full rounded-full transition-all"
+            style={{
+              width: `${Math.max(4, Math.min(100, barPercent))}%`,
+              backgroundColor: barColor,
+            }}
+          />
+        </div>
+      </button>
     );
   },
-) as (props: RowComponentProps<SubjectStatListRowProps>) => React.ReactElement | null;
+);
 
 function formatBrDateStr(iso?: string): string {
   if (!iso || !/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso || '';
@@ -201,12 +260,12 @@ function formatBrDateStr(iso?: string): string {
   return `${d}/${m}/${y}`;
 }
 
-interface ErrorNotebookRowProps {
-  entries: ErrorNotebookEntry[];
+interface ErrorNotebookEntryCardProps {
+  entry: ErrorNotebookEntry;
   completedSimulations: CompletedSimulation[];
   registeredSubjects: string[];
   registeredSubjectNorms: Set<string>;
-  selectedEntryIds: Set<string>;
+  isSelected: boolean;
   onToggleSelectEntry: (id: string) => void;
   todayIso: string;
   editingEntry: EditingErrorEntryState | null;
@@ -221,16 +280,13 @@ interface ErrorNotebookRowProps {
   setActivePage: (page: ModuleName) => void;
 }
 
-const ErrorNotebookEntryRow = React.memo(
+const ErrorNotebookEntryCard = React.memo(
   ({
-    index,
-    style,
-    ariaAttributes,
-    entries,
+    entry,
     completedSimulations,
     registeredSubjects,
     registeredSubjectNorms,
-    selectedEntryIds,
+    isSelected,
     onToggleSelectEntry,
     todayIso,
     editingEntry,
@@ -243,9 +299,8 @@ const ErrorNotebookEntryRow = React.memo(
     reopenAnnotation,
     deleteAnnotation,
     setActivePage,
-  }: RowComponentProps<ErrorNotebookRowProps>) => {
-    const entry = entries[index];
-    const isEditing = Boolean(entry && editingEntry?.id === entry.id);
+  }: ErrorNotebookEntryCardProps) => {
+    const isEditing = Boolean(editingEntry?.id === entry.id);
     const [rawTextBeforeFormat, setRawTextBeforeFormat] = useState<string | null>(null);
     const [justAutoFormatted, setJustAutoFormatted] = useState(false);
     const [rawEnunciadoBeforeFormat, setRawEnunciadoBeforeFormat] = useState<string | null>(null);
@@ -260,13 +315,9 @@ const ErrorNotebookEntryRow = React.memo(
       }
     }, [isEditing, entry?.id]);
 
-    if (!entry) return null;
     const isCorrected = Boolean(entry.corrigido);
-    const isSelected = selectedEntryIds.has(entry.id);
-    const isSimEntry = isClosedSimulationEntry(entry);
-    const simExamMeta = isSimEntry
-      ? resolveSimulationExamMeta(entry, completedSimulations)
-      : null;
+    const isExam = isExamEntry(entry);
+    const simExamMeta = isExam ? resolveSimulationExamMeta(entry, completedSimulations) : null;
     const entryMateriaNorm = normalizeSearch(visibleName(entry.materia));
     const isRegisteredMatch = Boolean(entryMateriaNorm && registeredSubjectNorms.has(entryMateriaNorm));
     const selectedSubjectVal =
@@ -364,24 +415,22 @@ const ErrorNotebookEntryRow = React.memo(
     };
 
     return (
-      <div style={style} {...ariaAttributes} className="pb-3">
+      <div>
         <Panel className={isSelected ? 'border-[var(--accent)] bg-[var(--accent-soft)]/30' : undefined}>
           <div className="flex flex-wrap items-start justify-between gap-2.5 mb-2">
             <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
-              {!isCorrected && (
-                <label
-                  className="inline-flex items-center cursor-pointer select-none"
-                  title="Selecionar questão pendente para associar em lote a uma matéria"
-                >
-                  <input
-                    type="checkbox"
-                    checked={isSelected}
-                    onChange={() => onToggleSelectEntry(entry.id)}
-                    aria-label={`Selecionar questão pendente ${entry.id}`}
-                    className="accent-[var(--accent)] w-4 h-4 cursor-pointer"
-                  />
-                </label>
-              )}
+              <label
+                className="inline-flex items-center cursor-pointer select-none"
+                title="Selecionar questão para associar em lote a uma matéria"
+              >
+                <input
+                  type="checkbox"
+                  checked={isSelected}
+                  onChange={() => onToggleSelectEntry(entry.id)}
+                  aria-label={`Selecionar questão ${entry.id}`}
+                  className="accent-[var(--accent)] w-4 h-4 cursor-pointer"
+                />
+              </label>
 
               {isCorrected ? (
                 <span className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--good)]">
@@ -407,14 +456,14 @@ const ErrorNotebookEntryRow = React.memo(
                   value={selectedSubjectVal}
                   onChange={(e) => updateErrorEntrySubject(entry.id, e.target.value)}
                   className={`ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[12px] font-bold ${
-                    !isCorrected && !isRegisteredMatch ? '!border-[var(--warning)]' : ''
+                    !isRegisteredMatch ? '!border-[var(--warning)]' : ''
                   }`}
-                  title="Associar questão a uma matéria cadastrada"
+                  title="Associar questão a uma matéria geral cadastrada (mantém o vínculo com a prova)"
                 >
                   {!isRegisteredMatch && selectedSubjectVal && (
                     <option value={selectedSubjectVal}>
-                      {isSimEntry
-                        ? 'Selecionar matéria cadastrada...'
+                      {isExam
+                        ? 'Selecionar matéria geral...'
                         : `${visibleName(selectedSubjectVal)} (não cadastrada)`}
                     </option>
                   )}
@@ -424,13 +473,16 @@ const ErrorNotebookEntryRow = React.memo(
                     </option>
                   ))}
                 </select>
-                {!isCorrected && !isRegisteredMatch && (
+                {!isRegisteredMatch && (
                   <span className="text-[10.5px] font-bold text-[var(--warning)]">
                     Associar
                   </span>
                 )}
-                {isSimEntry && isRegisteredMatch && (
-                  <span className="inline-flex items-center gap-0.5 text-[10.5px] font-bold text-[var(--good)]">
+                {isExam && isRegisteredMatch && (
+                  <span
+                    className="inline-flex items-center gap-0.5 text-[10.5px] font-bold text-[var(--good)]"
+                    title="Associada à matéria geral e contabilizada também nas estatísticas desta prova"
+                  >
                     <Check className="w-3 h-3" />
                     Associada
                   </span>
@@ -441,7 +493,8 @@ const ErrorNotebookEntryRow = React.memo(
                 <>
                   <span className="text-[var(--line-strong)]">·</span>
                   <span className="text-[11px] font-semibold text-[var(--muted)]">
-                    Simulado: <strong className="text-[var(--text)]">{simExamMeta.label}</strong>
+                    {simExamMeta.kind === 'prova' ? 'Prova' : 'Simulado'}:{' '}
+                    <strong className="text-[var(--text)]">{simExamMeta.label}</strong>
                   </span>
                 </>
               )}
@@ -818,7 +871,7 @@ const ErrorNotebookEntryRow = React.memo(
       </div>
     );
   },
-) as (props: RowComponentProps<ErrorNotebookRowProps>) => React.ReactElement | null;
+);
 
 export const ErrorNotebookPage: React.FC = () => {
   const {
@@ -913,10 +966,12 @@ export const ErrorNotebookPage: React.FC = () => {
 
   const [filterSubject, setFilterSubject] = useState('Todas as Matérias');
   const [selectedSimulationKey, setSelectedSimulationKey] = useState<string>('all');
+  const [simSubjectFilter, setSimSubjectFilter] = useState<string>('all');
   const [simOnlyUnassigned, setSimOnlyUnassigned] = useState<boolean>(false);
   const [filterMode, setFilterMode] = useState<'all' | 'errors' | 'notes'>('all');
   const [filterStatus, setFilterStatus] = useState<'pending' | 'corrected' | 'all'>('pending');
   const [search, setSearch] = useState('');
+  const [visibleLimit, setVisibleLimit] = useState(INITIAL_VISIBLE_ENTRIES);
   const [flashcardMode, setFlashcardMode] = useState(false);
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardRevealed, setFlashcardRevealed] = useState(false);
@@ -993,13 +1048,15 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [bulkTargetSubject, registeredSubjectNorms, registeredSubjects]);
 
-  // Unified directory of closed simulations (grouped inside single "Simulados" selector)
+  // Unified directory of closed simulations & library proofs (grouped inside "Provas & Simulados")
   const simulationDirectory = useMemo(() => {
     const map = new Map<
       string,
       {
         key: string;
         label: string;
+        kind: 'simulado' | 'prova';
+        completedSim?: CompletedSimulation;
         total: number;
         pending: number;
         corrected: number;
@@ -1009,13 +1066,15 @@ export const ErrorNotebookPage: React.FC = () => {
 
     let totalEntries = 0;
     let totalPending = 0;
+    let totalCorrected = 0;
     let totalUnassigned = 0;
 
     allErrorEntries.forEach((e) => {
-      if (!isClosedSimulationEntry(e)) return;
+      if (!isExamEntry(e)) return;
       totalEntries += 1;
       const isCorr = Boolean(e.corrigido);
-      if (!isCorr) totalPending += 1;
+      if (isCorr) totalCorrected += 1;
+      else totalPending += 1;
       const matNorm = normalizeSearch(visibleName(e.materia));
       const isUnassigned = !matNorm || !registeredSubjectNorms.has(matNorm);
       if (isUnassigned) totalUnassigned += 1;
@@ -1024,11 +1083,16 @@ export const ErrorNotebookPage: React.FC = () => {
       const cur = map.get(meta.key) || {
         key: meta.key,
         label: meta.label,
+        kind: meta.kind,
+        completedSim: meta.completedSim,
         total: 0,
         pending: 0,
         corrected: 0,
         unassigned: 0,
       };
+      if (!cur.completedSim && meta.completedSim) {
+        cur.completedSim = meta.completedSim;
+      }
       cur.total += 1;
       if (isCorr) cur.corrected += 1;
       else cur.pending += 1;
@@ -1041,7 +1105,7 @@ export const ErrorNotebookPage: React.FC = () => {
       return a.label.localeCompare(b.label, 'pt-BR');
     });
 
-    return { exams, totalEntries, totalPending, totalUnassigned };
+    return { exams, totalEntries, totalPending, totalCorrected, totalUnassigned };
   }, [allErrorEntries, db.completedSimulations, registeredSubjectNorms]);
 
   // Reset selectedSimulationKey if that exam no longer exists
@@ -1054,6 +1118,16 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [selectedSimulationKey, simulationDirectory.exams]);
 
+  // Reset in-exam subject sub-filter when leaving exam mode or switching exam
+  useEffect(() => {
+    setSimSubjectFilter('all');
+  }, [filterSubject, selectedSimulationKey]);
+
+  const activeSelectedExam = useMemo(() => {
+    if (filterSubject !== SIMULADOS_FILTER || selectedSimulationKey === 'all') return null;
+    return simulationDirectory.exams.find((ex) => ex.key === selectedSimulationKey) || null;
+  }, [filterSubject, selectedSimulationKey, simulationDirectory.exams]);
+
   const subjectOptions = useMemo(() => {
     const seen = new Set<string>();
     const list: string[] = [];
@@ -1065,9 +1139,9 @@ export const ErrorNotebookPage: React.FC = () => {
       list.push(clean);
     };
     registeredSubjects.forEach(push);
-    // Only include non-simulation subjects (closed simulation raw titles stay inside "Simulados")
+    // Only include non-exam subjects (raw exam names stay inside "Provas & Simulados")
     allErrorEntries.forEach((e) => {
-      if (isClosedSimulationEntry(e)) {
+      if (isExamEntry(e)) {
         const norm = normalizeSearch(visibleName(e.materia));
         if (norm && registeredSubjectNorms.has(norm)) push(e.materia);
       } else {
@@ -1090,31 +1164,6 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   }, [exportSingleSubject, subjectOptions]);
 
-  // Counts per subject (exact normalized match) + non-simulation unassigned counts
-  const subjectDirectoryMetrics = useMemo(() => {
-    const byNorm = new Map<string, { pending: number; corrected: number; total: number }>();
-    let unassignedPending = 0;
-    let unassignedTotal = 0;
-
-    allErrorEntries.forEach((e) => {
-      const norm = normalizeSearch(visibleName(e.materia));
-      const isCorr = Boolean(e.corrigido);
-      if (norm) {
-        const cur = byNorm.get(norm) || { pending: 0, corrected: 0, total: 0 };
-        cur.total += 1;
-        if (isCorr) cur.corrected += 1;
-        else cur.pending += 1;
-        byNorm.set(norm, cur);
-      }
-      if (!isClosedSimulationEntry(e) && (!norm || !registeredSubjectNorms.has(norm))) {
-        unassignedTotal += 1;
-        if (!isCorr) unassignedPending += 1;
-      }
-    });
-
-    return { byNorm, unassignedPending, unassignedTotal };
-  }, [allErrorEntries, registeredSubjectNorms]);
-
   const resolveStatsSubject = useMemo(() => {
     const byNorm = new Map<string, string>();
     registeredSubjects.forEach((s) => byNorm.set(normalizeSearch(s), s));
@@ -1128,12 +1177,84 @@ export const ErrorNotebookPage: React.FC = () => {
         const matchedRegistered = byNorm.get(normalizeSearch(inferred));
         if (matchedRegistered) return matchedRegistered;
       }
-      // Never spawn a separate subject row for each closed simulation exam name
+      // Never spawn a separate subject row for each raw exam name in global stats
       if (isFromSimulation) return SIMULADOS_STATS_KEY;
       return clean;
     };
   }, [registeredSubjects]);
 
+  // Resolves a subject label inside exam-scoped statistics:
+  // maps to the general registered subject whenever associated/matched, or flags as unassigned
+  const resolveExamSubjectLabel = useMemo(() => {
+    const byNorm = new Map<string, string>();
+    registeredSubjects.forEach((s) => byNorm.set(normalizeSearch(s), s));
+    return (raw?: string, examLabel?: string, sim?: CompletedSimulation): string => {
+      const clean = visibleName(raw || '');
+      const cleanNorm = normalizeSearch(clean);
+      if (!cleanNorm) return EXAM_UNASSIGNED_SUBJECT_LABEL;
+
+      const exact = byNorm.get(cleanNorm);
+      if (exact) return exact;
+
+      const inferred = inferFixedSubjectFromTopic({ materia: clean }, registeredSubjects);
+      if (inferred) {
+        const matchedRegistered = byNorm.get(normalizeSearch(inferred));
+        if (matchedRegistered) return matchedRegistered;
+      }
+
+      if (
+        cleanNorm === 'geral' ||
+        cleanNorm === 'simulado fechado' ||
+        cleanNorm.startsWith('provas ') ||
+        cleanNorm.startsWith('simulado enviado') ||
+        (examLabel && cleanNorm === normalizeSearch(visibleName(examLabel))) ||
+        (sim?.titulo && cleanNorm === normalizeSearch(visibleName(sim.titulo))) ||
+        (sim?.arquivo && cleanNorm === normalizeSearch(visibleName(sim.arquivo)))
+      ) {
+        return EXAM_UNASSIGNED_SUBJECT_LABEL;
+      }
+
+      return clean;
+    };
+  }, [registeredSubjects]);
+
+  // Counts per general subject (aligned with filteredEntries) + non-exam unassigned counts
+  const subjectDirectoryMetrics = useMemo(() => {
+    const byNorm = new Map<string, { pending: number; corrected: number; total: number }>();
+    let unassignedPending = 0;
+    let unassignedTotal = 0;
+
+    allErrorEntries.forEach((e) => {
+      const fromExam = isExamEntry(e);
+      const rawNorm = normalizeSearch(visibleName(e.materia));
+      const resolved = resolveStatsSubject(e.materia, fromExam);
+      const resolvedNorm = normalizeSearch(resolved);
+      const isCorr = Boolean(e.corrigido);
+
+      const countedNorm =
+        resolvedNorm && resolvedNorm !== normalizeSearch(SIMULADOS_STATS_KEY)
+          ? resolvedNorm
+          : rawNorm;
+
+      if (countedNorm) {
+        const cur = byNorm.get(countedNorm) || { pending: 0, corrected: 0, total: 0 };
+        cur.total += 1;
+        if (isCorr) cur.corrected += 1;
+        else cur.pending += 1;
+        byNorm.set(countedNorm, cur);
+      }
+      if (!fromExam && (!rawNorm || !registeredSubjectNorms.has(rawNorm))) {
+        unassignedTotal += 1;
+        if (!isCorr) unassignedPending += 1;
+      }
+    });
+
+    return { byNorm, unassignedPending, unassignedTotal };
+  }, [allErrorEntries, registeredSubjectNorms, resolveStatsSubject]);
+
+  const isExamStatsMode = filterSubject === SIMULADOS_FILTER;
+
+  // Exam-scoped vs global statistics (Pareto + Subject Ranking + Selected Exam Summary)
   const subjectErrorStats = useMemo(() => {
     interface SubjectStatAcc {
       subject: string;
@@ -1146,8 +1267,7 @@ export const ErrorNotebookPage: React.FC = () => {
     }
 
     const map = new Map<string, SubjectStatAcc>();
-    const ensureRow = (rawSubject?: string, isFromSimulation = false): SubjectStatAcc => {
-      const key = resolveStatsSubject(rawSubject, isFromSimulation);
+    const ensureKey = (key: string): SubjectStatAcc => {
       const norm = normalizeSearch(key);
       const existing = [...map.values()].find((r) => normalizeSearch(r.subject) === norm);
       if (existing) return existing;
@@ -1164,13 +1284,222 @@ export const ErrorNotebookPage: React.FC = () => {
       return created;
     };
 
+    if (isExamStatsMode) {
+      const scopedEntries = allErrorEntries.filter((entry) => {
+        if (!isExamEntry(entry)) return false;
+        if (selectedSimulationKey !== 'all') {
+          const meta = resolveSimulationExamMeta(entry, db.completedSimulations);
+          if (meta.key !== selectedSimulationKey) return false;
+        }
+        return true;
+      });
+
+      const entrySubjectBySimQ = new Map<string, string>();
+      const scopedSimIds = new Set<string>();
+
+      scopedEntries.forEach((entry) => {
+        const meta = resolveSimulationExamMeta(entry, db.completedSimulations);
+        const subjKey = resolveExamSubjectLabel(entry.materia, meta.label, meta.completedSim);
+        const row = ensureKey(subjKey);
+        row.notebookTotal += 1;
+        const isErrorItem = Boolean(
+          entry.questao || entry.correcao_prova || entry.tipo.includes('Erro'),
+        );
+        if (isErrorItem) row.notebookErrors += 1;
+        if (entry.corrigido) row.correctedCount += 1;
+        else row.pendingCount += 1;
+
+        if (meta.completedSim) {
+          scopedSimIds.add(meta.completedSim.id);
+          const prefix = `sim-err-${meta.completedSim.id}-`;
+          const qNum =
+            entry.simulado_questao_numero ??
+            (entry.id.startsWith(prefix)
+              ? Number(entry.id.slice(prefix.length).split('-')[0])
+              : NaN);
+          if (Number.isFinite(qNum) && qNum > 0) {
+            entrySubjectBySimQ.set(`${meta.completedSim.id}::${qNum}`, entry.materia);
+          }
+        }
+      });
+
+      const matchedSims =
+        selectedSimulationKey !== 'all'
+          ? db.completedSimulations.filter((sim) => sim.id === selectedSimulationKey)
+          : db.completedSimulations.filter(
+              (sim) => scopedSimIds.has(sim.id) || (sim.questoes?.length || 0) > 0,
+            );
+
+      let examTotalQuestions = 0;
+      let examCorrect = 0;
+      let examWrong = 0;
+      let examBlank = 0;
+
+      matchedSims.forEach((sim) => {
+        const qs = sim.questoes || [];
+        examTotalQuestions += sim.total || qs.length;
+        examCorrect += sim.acertos || 0;
+        examWrong += sim.erros || 0;
+        examBlank += sim.em_branco || 0;
+
+        // Only compute per-subject errorRatePct when correct questions in this exam also carry subject tags
+        const simHasPerQuestionSubjects = qs.some(
+          (q) =>
+            q.correta &&
+            resolveExamSubjectLabel(q.materia, sim.titulo, sim) !== EXAM_UNASSIGNED_SUBJECT_LABEL,
+        );
+
+        qs.forEach((q) => {
+          if (!q.resposta) return;
+          const overridden = entrySubjectBySimQ.get(`${sim.id}::${q.numero}`);
+          const subjKey = resolveExamSubjectLabel(
+            overridden || q.materia || sim.materia,
+            sim.titulo,
+            sim,
+          );
+          const row = ensureKey(subjKey);
+          if (simHasPerQuestionSubjects) {
+            row.answeredQuestions += 1;
+          }
+          if (!q.correta) {
+            row.wrongQuestions += 1;
+          }
+        });
+      });
+
+      // Ensure proof-file entries (without a CompletedSimulation) also expose wrongQuestions for Pareto
+      map.forEach((row) => {
+        if (row.wrongQuestions === 0 && row.notebookErrors > 0) {
+          row.wrongQuestions = row.notebookErrors;
+        }
+      });
+
+      const totalNotebookAll = scopedEntries.length;
+      const scopedPending = scopedEntries.filter((e) => !e.corrigido).length;
+      const scopedCorrected = totalNotebookAll - scopedPending;
+      const rows = [...map.values()]
+        .filter((r) => r.notebookTotal > 0 || r.wrongQuestions > 0)
+        .map((r) => {
+          const errorRatePct =
+            r.answeredQuestions > 0
+              ? Math.round((r.wrongQuestions / r.answeredQuestions) * 100)
+              : null;
+          const notebookSharePct =
+            totalNotebookAll > 0 ? Math.round((r.notebookTotal / totalNotebookAll) * 100) : 0;
+          const effectiveScore = errorRatePct !== null ? errorRatePct : notebookSharePct;
+          return {
+            ...r,
+            errorRatePct,
+            notebookSharePct,
+            effectiveScore,
+          };
+        });
+
+      const hasAttemptData = rows.some((r) => r.errorRatePct !== null);
+      const activeMode = statsSortBy === 'rate' && hasAttemptData ? 'rate' : 'count';
+
+      rows.sort((a, b) => {
+        if (activeMode === 'rate') {
+          const aRate = a.errorRatePct ?? -1;
+          const bRate = b.errorRatePct ?? -1;
+          if (bRate !== aRate) return bRate - aRate;
+          if (b.notebookTotal !== a.notebookTotal) return b.notebookTotal - a.notebookTotal;
+          return b.wrongQuestions - a.wrongQuestions;
+        }
+        if (b.notebookTotal !== a.notebookTotal) return b.notebookTotal - a.notebookTotal;
+        if (b.pendingCount !== a.pendingCount) return b.pendingCount - a.pendingCount;
+        return (b.errorRatePct ?? 0) - (a.errorRatePct ?? 0);
+      });
+
+      const highestRateRow =
+        [...rows]
+          .filter((r) => r.errorRatePct !== null && r.wrongQuestions > 0)
+          .sort(
+            (a, b) =>
+              (b.errorRatePct ?? 0) - (a.errorRatePct ?? 0) ||
+              b.wrongQuestions - a.wrongQuestions,
+          )[0] || null;
+
+      const highestVolumeRow =
+        [...rows].sort(
+          (a, b) => b.notebookTotal - a.notebookTotal || b.pendingCount - a.pendingCount,
+        )[0] || null;
+
+      const answeredInExam = examCorrect + examWrong;
+      const examOverview =
+        matchedSims.length > 0
+          ? {
+              hasSimulationMetrics: true,
+              totalQuestions: examTotalQuestions,
+              correct: examCorrect,
+              wrong: examWrong,
+              blank: examBlank,
+              accuracyPct:
+                answeredInExam > 0 ? Math.round((examCorrect / answeredInExam) * 100) : 0,
+              errorPct: answeredInExam > 0 ? Math.round((examWrong / answeredInExam) * 100) : 0,
+              pending: scopedPending,
+              corrected: scopedCorrected,
+              notebookTotal: totalNotebookAll,
+            }
+          : {
+              hasSimulationMetrics: false,
+              totalQuestions: totalNotebookAll,
+              correct: 0,
+              wrong: totalNotebookAll,
+              blank: 0,
+              accuracyPct: 0,
+              errorPct: 0,
+              pending: scopedPending,
+              corrected: scopedCorrected,
+              notebookTotal: totalNotebookAll,
+            };
+
+      return {
+        rows,
+        scopedEntries,
+        hasAttemptData,
+        activeMode,
+        highestRateRow,
+        highestVolumeRow,
+        totalNotebookAll,
+        scopedPending,
+        scopedCorrected,
+        examOverview,
+      };
+    }
+
+    // Global mode: exam errors associated to general subjects count toward their general subject
+    const ensureRow = (rawSubject?: string, isFromSimulation = false): SubjectStatAcc => {
+      const key = resolveStatsSubject(rawSubject, isFromSimulation);
+      return ensureKey(key);
+    };
+
+    const entrySubjectBySimQ = new Map<string, string>();
     allErrorEntries.forEach((entry) => {
-      const row = ensureRow(entry.materia, isClosedSimulationEntry(entry));
+      const fromExam = isExamEntry(entry);
+      const row = ensureRow(entry.materia, fromExam);
       row.notebookTotal += 1;
-      const isErrorItem = Boolean(entry.questao || entry.correcao_prova || entry.tipo.includes('Erro'));
+      const isErrorItem = Boolean(
+        entry.questao || entry.correcao_prova || entry.tipo.includes('Erro'),
+      );
       if (isErrorItem) row.notebookErrors += 1;
       if (entry.corrigido) row.correctedCount += 1;
       else row.pendingCount += 1;
+
+      if (fromExam && !isProofExamEntry(entry)) {
+        const meta = resolveSimulationExamMeta(entry, db.completedSimulations);
+        if (meta.completedSim) {
+          const prefix = `sim-err-${meta.completedSim.id}-`;
+          const qNum =
+            entry.simulado_questao_numero ??
+            (entry.id.startsWith(prefix)
+              ? Number(entry.id.slice(prefix.length).split('-')[0])
+              : NaN);
+          if (Number.isFinite(qNum) && qNum > 0) {
+            entrySubjectBySimQ.set(`${meta.completedSim.id}::${qNum}`, entry.materia);
+          }
+        }
+      }
     });
 
     db.history.forEach((h) => {
@@ -1182,7 +1511,8 @@ export const ErrorNotebookPage: React.FC = () => {
     db.completedSimulations.forEach((sim) => {
       (sim.questoes || []).forEach((q) => {
         if (!q.resposta) return;
-        const row = ensureRow(q.materia || sim.materia, true);
+        const overridden = entrySubjectBySimQ.get(`${sim.id}::${q.numero}`);
+        const row = ensureRow(overridden || q.materia || sim.materia, true);
         row.answeredQuestions += 1;
         if (!q.correta) row.wrongQuestions += 1;
       });
@@ -1239,18 +1569,33 @@ export const ErrorNotebookPage: React.FC = () => {
 
     return {
       rows,
+      scopedEntries: allErrorEntries,
       hasAttemptData,
       activeMode,
       highestRateRow,
       highestVolumeRow,
       totalNotebookAll,
+      scopedPending: pendingCount,
+      scopedCorrected: correctedCount,
+      examOverview: null,
     };
-  }, [allErrorEntries, db.completedSimulations, db.history, resolveStatsSubject, statsSortBy]);
+  }, [
+    allErrorEntries,
+    correctedCount,
+    db.completedSimulations,
+    db.history,
+    isExamStatsMode,
+    pendingCount,
+    resolveExamSubjectLabel,
+    resolveStatsSubject,
+    selectedSimulationKey,
+    statsSortBy,
+  ]);
 
   const paretoItems = useMemo<ParetoDatum[]>(() => {
     if (paretoMode === 'by_type') {
       const byType = new Map<string, { count: number; pending: number }>();
-      allErrorEntries.forEach((e) => {
+      subjectErrorStats.scopedEntries.forEach((e) => {
         const key = visibleName(e.tipo || 'Outros') || 'Outros';
         const cur = byType.get(key) || { count: 0, pending: 0 };
         cur.count += 1;
@@ -1274,7 +1619,7 @@ export const ErrorNotebookPage: React.FC = () => {
           count: r.wrongQuestions,
           pendingCount: r.pendingCount,
           ratePct: r.errorRatePct,
-          rateDetail: `${r.wrongQuestions}/${r.answeredQuestions}`,
+          rateDetail: r.answeredQuestions ? `${r.wrongQuestions}/${r.answeredQuestions}` : undefined,
         }));
     }
 
@@ -1288,41 +1633,74 @@ export const ErrorNotebookPage: React.FC = () => {
         ratePct: r.errorRatePct,
         rateDetail: r.answeredQuestions ? `${r.wrongQuestions}/${r.answeredQuestions}` : undefined,
       }));
-  }, [allErrorEntries, paretoMode, subjectErrorStats.rows]);
+  }, [paretoMode, subjectErrorStats.rows, subjectErrorStats.scopedEntries]);
 
-  const filteredEntries = useMemo(() => {
-    const term = normalizeSearch(search);
+  // Available subjects inside the currently selected exam (for quick in-exam subject filtering)
+  const examSubjectFilterOptions = useMemo(() => {
+    if (!isExamStatsMode) return [] as Array<{ label: string; total: number; pending: number; corrected: number }>;
+    return subjectErrorStats.rows
+      .filter((r) => r.notebookTotal > 0)
+      .map((r) => ({
+        label: r.subject,
+        total: r.notebookTotal,
+        pending: r.pendingCount,
+        corrected: r.correctedCount,
+      }));
+  }, [isExamStatsMode, subjectErrorStats.rows]);
+
+  // Step 1: Entries matching primary subject/exam scope (before secondary filters & status)
+  const entriesInPrimaryScope = useMemo(() => {
     const filterNorm = normalizeSearch(filterSubject);
     return allErrorEntries.filter((e) => {
       if (filterSubject === SIMULADOS_FILTER) {
-        if (!isClosedSimulationEntry(e)) return false;
+        if (!isExamEntry(e)) return false;
         if (selectedSimulationKey !== 'all') {
           const meta = resolveSimulationExamMeta(e, db.completedSimulations);
           if (meta.key !== selectedSimulationKey) return false;
+        }
+        return true;
+      }
+      if (filterSubject === UNASSIGNED_SUBJECT_FILTER) {
+        if (isExamEntry(e)) return false;
+        const entryNorm = normalizeSearch(visibleName(e.materia));
+        return !(entryNorm && registeredSubjectNorms.has(entryNorm));
+      }
+      if (filterSubject !== 'Todas as Matérias') {
+        const entryNorm = normalizeSearch(visibleName(e.materia));
+        const resolvedNorm = normalizeSearch(resolveStatsSubject(e.materia, isExamEntry(e)));
+        return entryNorm === filterNorm || resolvedNorm === filterNorm;
+      }
+      return true;
+    });
+  }, [
+    allErrorEntries,
+    db.completedSimulations,
+    filterSubject,
+    registeredSubjectNorms,
+    resolveStatsSubject,
+    selectedSimulationKey,
+  ]);
+
+  // Step 2: Apply secondary filters (in-exam subject, unassigned-only, category mode, search) before status tab
+  const entriesBeforeStatus = useMemo(() => {
+    const term = normalizeSearch(search);
+    const simSubjNorm = normalizeSearch(simSubjectFilter);
+    return entriesInPrimaryScope.filter((e) => {
+      if (filterSubject === SIMULADOS_FILTER) {
+        if (simSubjectFilter !== 'all') {
+          const meta = resolveSimulationExamMeta(e, db.completedSimulations);
+          const resolvedExamSubj = resolveExamSubjectLabel(e.materia, meta.label, meta.completedSim);
+          if (normalizeSearch(resolvedExamSubj) !== simSubjNorm) return false;
         }
         if (simOnlyUnassigned) {
           const entryNorm = normalizeSearch(visibleName(e.materia));
           if (entryNorm && registeredSubjectNorms.has(entryNorm)) return false;
         }
-      } else if (filterSubject === UNASSIGNED_SUBJECT_FILTER) {
-        if (isClosedSimulationEntry(e)) return false;
-        const entryNorm = normalizeSearch(visibleName(e.materia));
-        if (entryNorm && registeredSubjectNorms.has(entryNorm)) return false;
-      } else if (filterSubject !== 'Todas as Matérias') {
-        const entryNorm = normalizeSearch(visibleName(e.materia));
-        const resolvedNorm = normalizeSearch(
-          resolveStatsSubject(e.materia, isClosedSimulationEntry(e)),
-        );
-        if (entryNorm !== filterNorm && resolvedNorm !== filterNorm) return false;
       }
+
       const isErrorItem = Boolean(e.questao || e.correcao_prova || e.tipo.includes('Erro'));
       if (filterMode === 'errors' && !isErrorItem) return false;
       if (filterMode === 'notes' && isErrorItem) return false;
-
-      // Status: Pendentes vs Já Corrigidos vs Todos
-      const isCorrected = Boolean(e.corrigido);
-      if (filterStatus === 'pending' && isCorrected) return false;
-      if (filterStatus === 'corrected' && !isCorrected) return false;
 
       if (term) {
         const hay = normalizeSearch(
@@ -1335,31 +1713,78 @@ export const ErrorNotebookPage: React.FC = () => {
       return true;
     });
   }, [
-    allErrorEntries,
     db.completedSimulations,
+    entriesInPrimaryScope,
     filterMode,
-    filterStatus,
     filterSubject,
     registeredSubjectNorms,
-    resolveStatsSubject,
+    resolveExamSubjectLabel,
     search,
-    selectedSimulationKey,
     simOnlyUnassigned,
+    simSubjectFilter,
   ]);
 
-  // Selection helpers for bulk association of pending questions
-  const filteredPendingIds = useMemo(
-    () => filteredEntries.filter((e) => !e.corrigido).map((e) => e.id),
+  // Scoped counts for the 3 status tabs so numbers always match what the user actually sees
+  const scopedStatusCounts = useMemo(() => {
+    let pending = 0;
+    let corrected = 0;
+    entriesBeforeStatus.forEach((e) => {
+      if (e.corrigido) corrected += 1;
+      else pending += 1;
+    });
+    return { pending, corrected, total: entriesBeforeStatus.length };
+  }, [entriesBeforeStatus]);
+
+  // Count of entries in primary scope for the active status tab (detects hidden items due to secondary filters)
+  const primaryScopeStatusCount = useMemo(() => {
+    if (filterStatus === 'all') return entriesInPrimaryScope.length;
+    return entriesInPrimaryScope.filter((e) =>
+      filterStatus === 'corrected' ? Boolean(e.corrigido) : !e.corrigido,
+    ).length;
+  }, [entriesInPrimaryScope, filterStatus]);
+
+  const filteredEntries = useMemo(() => {
+    return entriesBeforeStatus.filter((e) => {
+      const isCorrected = Boolean(e.corrigido);
+      if (filterStatus === 'pending' && isCorrected) return false;
+      if (filterStatus === 'corrected' && !isCorrected) return false;
+      return true;
+    });
+  }, [entriesBeforeStatus, filterStatus]);
+
+  const hiddenBySecondaryFiltersCount = Math.max(0, primaryScopeStatusCount - filteredEntries.length);
+
+  // Reset pagination when active filters change
+  useEffect(() => {
+    setVisibleLimit(INITIAL_VISIBLE_ENTRIES);
+  }, [
+    filterSubject,
+    selectedSimulationKey,
+    simSubjectFilter,
+    simOnlyUnassigned,
+    filterMode,
+    filterStatus,
+    search,
+  ]);
+
+  const visibleEntries = useMemo(
+    () => filteredEntries.slice(0, visibleLimit),
+    [filteredEntries, visibleLimit],
+  );
+
+  // Selection helpers for bulk association of visible questions (pending OR corrected)
+  const filteredSelectableIds = useMemo(
+    () => filteredEntries.map((e) => e.id),
     [filteredEntries],
   );
 
   const selectedEntryIdSet = useMemo(() => new Set(selectedEntryIds), [selectedEntryIds]);
 
-  // Keep selectedEntryIds valid when entries are deleted or corrected
+  // Keep selectedEntryIds valid when entries are deleted
   useEffect(() => {
-    const validPending = new Set(allErrorEntries.filter((e) => !e.corrigido).map((e) => e.id));
+    const validIds = new Set(allErrorEntries.map((e) => e.id));
     setSelectedEntryIds((prev) => {
-      const next = prev.filter((id) => validPending.has(id));
+      const next = prev.filter((id) => validIds.has(id));
       return next.length === prev.length ? prev : next;
     });
   }, [allErrorEntries]);
@@ -1370,16 +1795,16 @@ export const ErrorNotebookPage: React.FC = () => {
     );
   }, []);
 
-  const allFilteredPendingSelected =
-    filteredPendingIds.length > 0 &&
-    filteredPendingIds.every((id) => selectedEntryIdSet.has(id));
+  const allFilteredSelected =
+    filteredSelectableIds.length > 0 &&
+    filteredSelectableIds.every((id) => selectedEntryIdSet.has(id));
 
-  const handleToggleSelectAllFilteredPending = () => {
-    if (allFilteredPendingSelected) {
-      const toRemove = new Set(filteredPendingIds);
+  const handleToggleSelectAllFiltered = () => {
+    if (allFilteredSelected) {
+      const toRemove = new Set(filteredSelectableIds);
       setSelectedEntryIds((prev) => prev.filter((id) => !toRemove.has(id)));
     } else {
-      setSelectedEntryIds((prev) => Array.from(new Set([...prev, ...filteredPendingIds])));
+      setSelectedEntryIds((prev) => Array.from(new Set([...prev, ...filteredSelectableIds])));
     }
   };
 
@@ -1460,7 +1885,7 @@ export const ErrorNotebookPage: React.FC = () => {
     }) => {
       if (cfg.mode === 'simulation') {
         const entries = allErrorEntries.filter((row) => {
-          if (!isClosedSimulationEntry(row)) return false;
+          if (!isExamEntry(row)) return false;
           const isCorr = Boolean(row.corrigido);
           if (cfg.statusFilter === 'pending' && isCorr) return false;
           if (cfg.statusFilter === 'corrected' && !isCorr) return false;
@@ -1508,7 +1933,8 @@ export const ErrorNotebookPage: React.FC = () => {
         if (!isAll) {
           if (!selectedNorms.size) return false;
           const rowNorm = normalizeSearch(visibleName(row.materia));
-          if (!selectedNorms.has(rowNorm)) return false;
+          const resolvedNorm = normalizeSearch(resolveStatsSubject(row.materia, isExamEntry(row)));
+          if (!selectedNorms.has(rowNorm) && !selectedNorms.has(resolvedNorm)) return false;
         }
         return true;
       });
@@ -1532,7 +1958,7 @@ export const ErrorNotebookPage: React.FC = () => {
         targetSubjects,
       };
     },
-    [allErrorEntries, db.completedSimulations],
+    [allErrorEntries, db.completedSimulations, resolveStatsSubject],
   );
 
   const exportPreview = useMemo(
@@ -1830,90 +2256,30 @@ export const ErrorNotebookPage: React.FC = () => {
     : 0;
   const activeFlashcard = filteredEntries[safeFlashcardIdx];
 
-  const handleToggleStatsSubject = useCallback((subject: string) => {
-    if (normalizeSearch(subject) === normalizeSearch(SIMULADOS_STATS_KEY)) {
+  const handleToggleStatsSubject = useCallback(
+    (subject: string) => {
+      if (isExamStatsMode) {
+        setSimSubjectFilter((prev) =>
+          normalizeSearch(prev) === normalizeSearch(subject) ? 'all' : subject,
+        );
+        return;
+      }
+      if (normalizeSearch(subject) === normalizeSearch(SIMULADOS_STATS_KEY)) {
+        setFilterSubject((prev) =>
+          prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
+        );
+        return;
+      }
       setFilterSubject((prev) =>
-        prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
+        normalizeSearch(prev) === normalizeSearch(subject) ? 'Todas as Matérias' : subject,
       );
-      return;
-    }
-    setFilterSubject((prev) =>
-      normalizeSearch(prev) === normalizeSearch(subject) ? 'Todas as Matérias' : subject,
-    );
-  }, []);
+    },
+    [isExamStatsMode],
+  );
 
   const displayedStatsRows = useMemo(
-    () => (statsShowAll ? subjectErrorStats.rows : subjectErrorStats.rows.slice(0, 5)),
+    () => (statsShowAll ? subjectErrorStats.rows : subjectErrorStats.rows.slice(0, 6)),
     [statsShowAll, subjectErrorStats.rows],
-  );
-
-  const statsRowProps = useMemo<SubjectStatListRowProps>(
-    () => ({
-      rows: displayedStatsRows,
-      filterSubject,
-      onToggleSubject: handleToggleStatsSubject,
-    }),
-    [displayedStatsRows, filterSubject, handleToggleStatsSubject],
-  );
-
-  const statsDynamicHeight = useDynamicRowHeight({
-    defaultRowHeight: 62,
-    key: `err-stats-${displayedStatsRows.length}-${statsSortBy}`,
-  });
-
-  const statsRowKey = useCallback(
-    (index: number, data: SubjectStatListRowProps) => data.rows[index]?.subject ?? index,
-    [],
-  );
-
-  const entriesDynamicHeight = useDynamicRowHeight({
-    defaultRowHeight: 220,
-    key: `err-entries-${filterSubject}-${selectedSimulationKey}-${simOnlyUnassigned}-${filterMode}-${filterStatus}-${search}`,
-  });
-
-  const entryRowProps = useMemo<ErrorNotebookRowProps>(
-    () => ({
-      entries: filteredEntries,
-      completedSimulations: db.completedSimulations,
-      registeredSubjects,
-      registeredSubjectNorms,
-      selectedEntryIds: selectedEntryIdSet,
-      onToggleSelectEntry: handleToggleSelectEntry,
-      todayIso,
-      editingEntry,
-      setEditingEntry,
-      flushEditingDraft,
-      handleSaveEdit,
-      updateErrorEntrySubject: handleSafeUpdateEntrySubject,
-      markAnnotationCorrected,
-      advanceErrorReview,
-      reopenAnnotation,
-      deleteAnnotation,
-      setActivePage,
-    }),
-    [
-      filteredEntries,
-      db.completedSimulations,
-      registeredSubjects,
-      registeredSubjectNorms,
-      selectedEntryIdSet,
-      handleToggleSelectEntry,
-      todayIso,
-      editingEntry,
-      flushEditingDraft,
-      handleSaveEdit,
-      handleSafeUpdateEntrySubject,
-      markAnnotationCorrected,
-      advanceErrorReview,
-      reopenAnnotation,
-      deleteAnnotation,
-      setActivePage,
-    ],
-  );
-
-  const entryRowKey = useCallback(
-    (index: number, data: ErrorNotebookRowProps) => data.entries[index]?.id ?? index,
-    [],
   );
 
   return (
@@ -2002,14 +2368,15 @@ export const ErrorNotebookPage: React.FC = () => {
                   ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
                   : 'border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[var(--accent)] hover:border-[var(--accent)]'
               }`}
-              title="Todas as provas fechadas agrupadas em um único seletor para escolher qual prova corrigir"
+              title="Todas as provas e simulados agrupados para filtrar por prova e visualizar estatísticas específicas da prova"
             >
               <ClipboardCheck className="w-3.5 h-3.5" />
-              Simulados
+              Provas &amp; Simulados
               <span className="font-mono-num text-[11px] opacity-90">
                 {simulationDirectory.exams.length}{' '}
                 {simulationDirectory.exams.length === 1 ? 'prova' : 'provas'} ·{' '}
-                {simulationDirectory.totalPending} pend.
+                {simulationDirectory.totalPending} pend. · {simulationDirectory.totalCorrected}{' '}
+                corrig.
               </span>
             </button>
           )}
@@ -2040,29 +2407,29 @@ export const ErrorNotebookPage: React.FC = () => {
           )}
         </div>
 
-        {/* Seletor interno de provas fechadas dentro de Simulados */}
+        {/* Seletor interno de provas fechadas e provas da biblioteca */}
         {filterSubject === SIMULADOS_FILTER && simulationDirectory.exams.length > 0 && (
           <div className="mb-3 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)]/50 p-3 flex flex-col gap-2.5">
             <div className="flex flex-wrap items-center justify-between gap-2.5">
               <div className="flex flex-wrap items-center gap-2 min-w-0 flex-1">
                 <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[var(--text)] whitespace-nowrap">
                   <ClipboardCheck className="w-4 h-4 text-[var(--accent)]" />
-                  Prova de Simulado para corrigir:
+                  Prova / Simulado:
                 </span>
                 <select
-                  aria-label="Escolher prova fechada dentro de Simulados"
+                  aria-label="Escolher prova ou simulado para filtrar questões e estatísticas"
                   value={selectedSimulationKey}
                   onChange={(e) => setSelectedSimulationKey(e.target.value)}
                   className="ce-select !w-auto min-w-[260px] max-w-full flex-1 font-bold"
                 >
                   <option value="all">
-                    Todos os simulados ({simulationDirectory.exams.length} prova(s) ·{' '}
-                    {simulationDirectory.totalPending} pend. · {simulationDirectory.totalEntries}{' '}
-                    total)
+                    Todas as provas ({simulationDirectory.exams.length} prova(s) ·{' '}
+                    {simulationDirectory.totalPending} pend. · {simulationDirectory.totalCorrected}{' '}
+                    corrig. · {simulationDirectory.totalEntries} total)
                   </option>
                   {simulationDirectory.exams.map((ex) => (
                     <option key={ex.key} value={ex.key}>
-                      {ex.label} ({ex.pending} pend. · {ex.total} total)
+                      {ex.label} ({ex.pending} pend. · {ex.corrected} corrig. · {ex.total} total)
                     </option>
                   ))}
                 </select>
@@ -2072,26 +2439,46 @@ export const ErrorNotebookPage: React.FC = () => {
                 type="button"
                 onClick={handlePrintSimulationDirect}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap shrink-0 cursor-pointer"
-                title="Imprimir em folha A4 os erros do simulado selecionado"
+                title="Imprimir em folha A4 os erros da prova selecionada"
               >
                 <Printer className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Imprimir simulado (A4)
+                Imprimir prova (A4)
               </button>
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11.5px] text-[var(--muted)]">
               <span>
-                Ao associar a matéria de uma questão abaixo, ela permanece visível nesta prova com a nova matéria salva para facilitar sua correção.
+                As estatísticas abaixo refletem exclusivamente a prova selecionada. Ao associar uma questão à matéria geral, ela conta tanto na matéria geral quanto nas estatísticas desta prova.
               </span>
-              <label className="inline-flex items-center gap-1.5 font-semibold text-[var(--text)] cursor-pointer select-none whitespace-nowrap">
-                <input
-                  type="checkbox"
-                  checked={simOnlyUnassigned}
-                  onChange={(e) => setSimOnlyUnassigned(e.target.checked)}
-                  className="accent-[var(--accent)] w-3.5 h-3.5 cursor-pointer"
-                />
-                Mostrar apenas ainda sem matéria cadastrada
-              </label>
+              <div className="flex flex-wrap items-center gap-3">
+                {examSubjectFilterOptions.length > 0 && (
+                  <label className="inline-flex items-center gap-1.5 font-semibold text-[var(--text)] whitespace-nowrap">
+                    <span>Matéria na prova:</span>
+                    <select
+                      aria-label="Filtrar matéria dentro da prova selecionada"
+                      value={simSubjectFilter}
+                      onChange={(e) => setSimSubjectFilter(e.target.value)}
+                      className="ce-select !w-auto !min-h-[28px] !py-0.5 !px-2 !text-[11.5px] font-bold"
+                    >
+                      <option value="all">Todas ({subjectErrorStats.totalNotebookAll})</option>
+                      {examSubjectFilterOptions.map((opt) => (
+                        <option key={opt.label} value={opt.label}>
+                          {opt.label} ({opt.total})
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                )}
+                <label className="inline-flex items-center gap-1.5 font-semibold text-[var(--text)] cursor-pointer select-none whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={simOnlyUnassigned}
+                    onChange={(e) => setSimOnlyUnassigned(e.target.checked)}
+                    className="accent-[var(--accent)] w-3.5 h-3.5 cursor-pointer"
+                  />
+                  Apenas sem matéria geral
+                </label>
+              </div>
             </div>
           </div>
         )}
@@ -2495,15 +2882,29 @@ export const ErrorNotebookPage: React.FC = () => {
 
       {/* D3 Pareto 80/20 + Tabela Analítica de Concentração de Erros */}
       <ErrorParetoD3Panel
-        title="Análise de Pareto 80/20 · Concentração de Erros"
-        subtitle="Identifique rapidamente as poucas matérias ou tipos de falha que geram ~80% dos seus erros. Clique em uma barra ou linha para filtrar."
+        title={
+          isExamStatsMode
+            ? activeSelectedExam
+              ? `Análise de Pareto 80/20 · Prova: ${activeSelectedExam.label}`
+              : 'Análise de Pareto 80/20 · Provas & Simulados'
+            : 'Análise de Pareto 80/20 · Concentração de Erros'
+        }
+        subtitle={
+          isExamStatsMode
+            ? activeSelectedExam
+              ? `Erros por matéria dentro de "${activeSelectedExam.label}". Matérias associadas continuam somando na matéria geral. Clique em uma barra para filtrar esta prova.`
+              : 'Concentração de erros por matéria somando todas as provas e simulados. Clique em uma barra para filtrar.'
+            : 'Identifique rapidamente as poucas matérias ou tipos de falha que geram ~80% dos seus erros. Clique em uma barra ou linha para filtrar.'
+        }
         items={paretoItems}
         unitLabel={paretoMode === 'wrong_questions' ? 'erros' : 'registros'}
         selectedKey={
           paretoMode === 'by_type'
             ? search || null
-            : filterSubject === SIMULADOS_FILTER
-              ? SIMULADOS_STATS_KEY
+            : isExamStatsMode
+              ? simSubjectFilter !== 'all'
+                ? simSubjectFilter
+                : null
               : filterSubject !== 'Todas as Matérias' && filterSubject !== UNASSIGNED_SUBJECT_FILTER
                 ? filterSubject
                 : null
@@ -2511,6 +2912,10 @@ export const ErrorNotebookPage: React.FC = () => {
         onSelectKey={(key) => {
           if (paretoMode === 'by_type') {
             setSearch((prev) => (normalizeSearch(prev) === normalizeSearch(key) ? '' : key));
+          } else if (isExamStatsMode) {
+            setSimSubjectFilter((prev) =>
+              normalizeSearch(prev) === normalizeSearch(key) ? 'all' : key,
+            );
           } else if (normalizeSearch(key) === normalizeSearch(SIMULADOS_STATS_KEY)) {
             setFilterSubject((prev) =>
               prev === SIMULADOS_FILTER ? 'Todas as Matérias' : SIMULADOS_FILTER,
@@ -2527,7 +2932,7 @@ export const ErrorNotebookPage: React.FC = () => {
           <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
             {(
               [
-                { id: 'notebook', label: 'No caderno' },
+                { id: 'notebook', label: isExamStatsMode ? 'Na prova' : 'No caderno' },
                 { id: 'wrong_questions', label: 'Questões erradas' },
                 { id: 'by_type', label: 'Por tipo' },
               ] as const
@@ -2552,10 +2957,32 @@ export const ErrorNotebookPage: React.FC = () => {
       {/* Subject Error Rate Statistics Panel */}
       <Panel
         className="mb-4"
-        title="Estatísticas por Matéria · Maiores Índices de Erros"
-        subtitle="Identifique rapidamente em quais matérias fixadas você erra mais questões e concentra mais registros no caderno. Clique em uma matéria para filtrar."
+        title={
+          isExamStatsMode
+            ? activeSelectedExam
+              ? `Estatísticas da Prova · ${activeSelectedExam.label}`
+              : 'Estatísticas por Matéria · Provas & Simulados'
+            : 'Estatísticas por Matéria · Maiores Índices de Erros'
+        }
+        subtitle={
+          isExamStatsMode
+            ? activeSelectedExam
+              ? 'Desempenho e concentração de erros por matéria nesta prova. As matérias associadas ficam disponíveis aqui e também na matéria geral.'
+              : 'Ranking de erros por matéria considerando todas as provas e simulados realizados.'
+            : 'Identifique rapidamente em quais matérias gerais você erra mais questões e concentra mais registros no caderno. Clique em uma matéria para filtrar.'
+        }
         action={
           <div className="flex flex-wrap items-center gap-1.5">
+            {isExamStatsMode && simSubjectFilter !== 'all' && (
+              <button
+                type="button"
+                onClick={() => setSimSubjectFilter('all')}
+                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[11px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors cursor-pointer"
+              >
+                Matéria: {simSubjectFilter}
+                <X className="w-3 h-3" />
+              </button>
+            )}
             {subjectErrorStats.hasAttemptData && (
               <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
                 <button
@@ -2578,7 +3005,7 @@ export const ErrorNotebookPage: React.FC = () => {
                       : 'text-[var(--muted)] hover:text-[var(--text)]'
                   }`}
                 >
-                  Mais erros no caderno
+                  {isExamStatsMode ? 'Mais erros na prova' : 'Mais erros no caderno'}
                 </button>
               </div>
             )}
@@ -2604,6 +3031,83 @@ export const ErrorNotebookPage: React.FC = () => {
       >
         {statsExpanded && (
           <>
+            {isExamStatsMode && subjectErrorStats.examOverview && (
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-3 pb-3 border-b border-[var(--line)]">
+                {subjectErrorStats.examOverview.hasSimulationMetrics ? (
+                  <>
+                    <div className="rounded-xl border border-[var(--accent)]/35 bg-[var(--accent-soft)]/50 p-2.5">
+                      <span className="block text-[10.5px] font-bold uppercase tracking-wider text-[var(--accent)]">
+                        Aproveitamento da prova
+                      </span>
+                      <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--text)] mt-0.5">
+                        {subjectErrorStats.examOverview.accuracyPct}%
+                      </strong>
+                      <span className="block text-[11px] font-mono-num text-[var(--muted)]">
+                        {subjectErrorStats.examOverview.correct} acertos ·{' '}
+                        {subjectErrorStats.examOverview.wrong} erros
+                        {subjectErrorStats.examOverview.blank > 0
+                          ? ` · ${subjectErrorStats.examOverview.blank} branco`
+                          : ''}
+                      </span>
+                    </div>
+                    <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5">
+                      <span className="block text-[10.5px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                        Taxa de erro na prova
+                      </span>
+                      <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--bad)] mt-0.5">
+                        {subjectErrorStats.examOverview.errorPct}%
+                      </strong>
+                      <span className="block text-[11px] font-mono-num text-[var(--muted)]">
+                        {subjectErrorStats.examOverview.totalQuestions} questão(ões) no total
+                      </span>
+                    </div>
+                  </>
+                ) : (
+                  <div className="rounded-xl border border-[var(--accent)]/35 bg-[var(--accent-soft)]/50 p-2.5 sm:col-span-2">
+                    <span className="block text-[10.5px] font-bold uppercase tracking-wider text-[var(--accent)]">
+                      Registros da prova selecionada
+                    </span>
+                    <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--text)] mt-0.5">
+                      {subjectErrorStats.examOverview.notebookTotal} questão(ões)
+                    </strong>
+                    <span className="block text-[11px] text-[var(--muted)]">
+                      Erros vinculados a esta prova no caderno
+                    </span>
+                  </div>
+                )}
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5">
+                  <span className="block text-[10.5px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                    Correção nesta prova
+                  </span>
+                  <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--good)] mt-0.5">
+                    {subjectErrorStats.examOverview.notebookTotal > 0
+                      ? Math.round(
+                          (subjectErrorStats.examOverview.corrected /
+                            subjectErrorStats.examOverview.notebookTotal) *
+                            100,
+                        )
+                      : 0}
+                    %
+                  </strong>
+                  <span className="block text-[11px] font-mono-num text-[var(--muted)]">
+                    {subjectErrorStats.examOverview.corrected} corrig. ·{' '}
+                    {subjectErrorStats.examOverview.pending} pend.
+                  </span>
+                </div>
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-2.5">
+                  <span className="block text-[10.5px] font-bold uppercase tracking-wider text-[var(--muted)]">
+                    Matérias na prova
+                  </span>
+                  <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--text)] mt-0.5">
+                    {subjectErrorStats.rows.length}
+                  </strong>
+                  <span className="block text-[11px] text-[var(--muted)]">
+                    Clique abaixo para filtrar
+                  </span>
+                </div>
+              </div>
+            )}
+
             {subjectErrorStats.rows.length === 0 ? (
               <div className="text-[12.5px] text-[var(--muted)] py-2">
                 Nenhum erro ou questão respondida registrada ainda para gerar o ranking por matéria.
@@ -2614,7 +3118,7 @@ export const ErrorNotebookPage: React.FC = () => {
                   <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
                     <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)] mb-1">
                       <AlertTriangle className="w-3.5 h-3.5 text-[var(--bad)]" />
-                      Maior índice de erro
+                      {isExamStatsMode ? 'Maior concentração na prova' : 'Maior índice de erro'}
                     </div>
                     {subjectErrorStats.highestRateRow ? (
                       <>
@@ -2633,7 +3137,8 @@ export const ErrorNotebookPage: React.FC = () => {
                           {visibleName(subjectErrorStats.highestVolumeRow.subject)}
                         </strong>
                         <span className="block text-[12px] font-mono-num text-[var(--warning)] font-bold mt-0.5">
-                          {subjectErrorStats.highestVolumeRow.notebookSharePct}% do caderno (
+                          {subjectErrorStats.highestVolumeRow.notebookSharePct}%{' '}
+                          {isExamStatsMode ? 'dos erros da prova' : 'do caderno'} (
                           {subjectErrorStats.highestVolumeRow.notebookTotal} registro(s))
                         </span>
                       </>
@@ -2645,7 +3150,7 @@ export const ErrorNotebookPage: React.FC = () => {
                   <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
                     <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)] mb-1">
                       <BarChart3 className="w-3.5 h-3.5 text-[var(--warning)]" />
-                      Maior volume no caderno
+                      {isExamStatsMode ? 'Maior volume na prova' : 'Maior volume no caderno'}
                     </div>
                     {subjectErrorStats.highestVolumeRow ? (
                       <>
@@ -2656,7 +3161,8 @@ export const ErrorNotebookPage: React.FC = () => {
                           <strong className="text-[var(--text)]">
                             {subjectErrorStats.highestVolumeRow.notebookTotal}
                           </strong>{' '}
-                          registro(s) · {subjectErrorStats.highestVolumeRow.pendingCount} pendente(s)
+                          registro(s) · {subjectErrorStats.highestVolumeRow.pendingCount} pendente(s) ·{' '}
+                          {subjectErrorStats.highestVolumeRow.correctedCount} corrigido(s)
                         </span>
                       </>
                     ) : (
@@ -2667,31 +3173,39 @@ export const ErrorNotebookPage: React.FC = () => {
                   <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
                     <div className="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wider text-[var(--muted)] mb-1">
                       <Clock className="w-3.5 h-3.5 text-[var(--accent)]" />
-                      Matérias impactadas
+                      {isExamStatsMode ? 'Matérias nesta prova' : 'Matérias impactadas'}
                     </div>
                     <strong className="block text-[18px] font-extrabold font-mono-num text-[var(--text)]">
                       {subjectErrorStats.rows.length}
                     </strong>
                     <span className="block text-[12px] font-mono-num text-[var(--muted)] mt-0.5">
-                      {pendingCount} pendente(s) · {correctedCount} corrigido(s)
+                      {subjectErrorStats.scopedPending} pendente(s) ·{' '}
+                      {subjectErrorStats.scopedCorrected} corrigido(s)
                     </span>
                   </div>
                 </div>
 
-                <List
-                  rowComponent={SubjectStatListRow}
-                  rowCount={displayedStatsRows.length}
-                  rowHeight={statsDynamicHeight}
-                  rowKey={statsRowKey}
-                  rowProps={statsRowProps}
-                  overscanCount={3}
-                  style={{
-                    height: Math.min(360, Math.max(64, displayedStatsRows.length * 64)),
-                    width: '100%',
-                  }}
-                />
+                <div className="flex flex-col gap-1.5 max-h-[380px] overflow-y-auto pr-1">
+                  {displayedStatsRows.map((row, idx) => {
+                    const isSelected = isExamStatsMode
+                      ? normalizeSearch(simSubjectFilter) === normalizeSearch(row.subject)
+                      : (row.subject === SIMULADOS_STATS_KEY &&
+                          filterSubject === SIMULADOS_FILTER) ||
+                        normalizeSearch(filterSubject) === normalizeSearch(row.subject);
+                    return (
+                      <SubjectStatCard
+                        key={row.subject}
+                        row={row}
+                        index={idx}
+                        isSelected={isSelected}
+                        isExamScoped={isExamStatsMode}
+                        onToggleSubject={handleToggleStatsSubject}
+                      />
+                    );
+                  })}
+                </div>
 
-                {subjectErrorStats.rows.length > 5 && (
+                {subjectErrorStats.rows.length > 6 && (
                   <div className="flex justify-end">
                     <button
                       type="button"
@@ -2699,7 +3213,7 @@ export const ErrorNotebookPage: React.FC = () => {
                       className="text-[12px] font-bold text-[var(--accent)] hover:underline cursor-pointer"
                     >
                       {statsShowAll
-                        ? 'Mostrar apenas top 5'
+                        ? 'Mostrar apenas top 6'
                         : `Ver todas as ${subjectErrorStats.rows.length} matérias`}
                     </button>
                   </div>
@@ -2710,7 +3224,7 @@ export const ErrorNotebookPage: React.FC = () => {
         )}
       </Panel>
 
-      {/* Correction Status Tabs Bar */}
+      {/* Correction Status Tabs Bar (counts always match current filter scope) */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mb-3.5">
         <button
           type="button"
@@ -2728,12 +3242,14 @@ export const ErrorNotebookPage: React.FC = () => {
                 Pendentes de Correção
               </strong>
               <span className="block text-[11px] text-[var(--muted)]">
-                Erros que aguardam revisão
+                {scopedStatusCounts.pending !== pendingCount
+                  ? `Neste filtro (${pendingCount} no geral)`
+                  : 'Erros que aguardam revisão'}
               </span>
             </div>
           </div>
           <span className="font-mono-num font-extrabold text-[15px] px-2 py-0.5 rounded-md border border-[var(--warning)]/40 bg-[var(--warning)]/20 text-[var(--warning)]">
-            {pendingCount}
+            {scopedStatusCounts.pending}
           </span>
         </button>
 
@@ -2753,12 +3269,14 @@ export const ErrorNotebookPage: React.FC = () => {
                 Já Corrigidos
               </strong>
               <span className="block text-[11px] text-[var(--muted)]">
-                Questões revistas e superadas
+                {scopedStatusCounts.corrected !== correctedCount
+                  ? `Neste filtro (${correctedCount} no geral)`
+                  : 'Questões revistas e superadas'}
               </span>
             </div>
           </div>
           <span className="font-mono-num font-extrabold text-[15px] px-2 py-0.5 rounded-md border border-[var(--good)]/40 bg-[var(--good)]/20 text-[var(--good)]">
-            {correctedCount}
+            {scopedStatusCounts.corrected}
           </span>
         </button>
 
@@ -2780,19 +3298,21 @@ export const ErrorNotebookPage: React.FC = () => {
                 Todos os Registros
               </strong>
               <span className="block text-[11px] text-[var(--muted)]">
-                Visão completa do acervo
+                {scopedStatusCounts.total !== allErrorEntries.length
+                  ? `Neste filtro (${allErrorEntries.length} no geral)`
+                  : 'Visão completa do acervo'}
               </span>
             </div>
           </div>
           <span className="font-mono-num font-extrabold text-[15px] px-2 py-0.5 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)]">
-            {allErrorEntries.length}
+            {scopedStatusCounts.total}
           </span>
         </button>
       </div>
 
       <div className="flex flex-wrap items-center gap-2.5 mb-4">
         <select
-          aria-label="Filtrar caderno por matéria"
+          aria-label="Filtrar caderno por matéria ou prova"
           value={filterSubject}
           onChange={(e) => setFilterSubject(e.target.value)}
           className="ce-select w-auto min-w-[200px]"
@@ -2800,7 +3320,7 @@ export const ErrorNotebookPage: React.FC = () => {
           <option value="Todas as Matérias">Todas as Matérias</option>
           {simulationDirectory.totalEntries > 0 && (
             <option value={SIMULADOS_FILTER}>
-              Simulados ({simulationDirectory.exams.length}{' '}
+              Provas &amp; Simulados ({simulationDirectory.exams.length}{' '}
               {simulationDirectory.exams.length === 1 ? 'prova' : 'provas'} ·{' '}
               {simulationDirectory.totalEntries})
             </option>
@@ -2819,7 +3339,7 @@ export const ErrorNotebookPage: React.FC = () => {
 
         {filterSubject === SIMULADOS_FILTER && simulationDirectory.exams.length > 0 && (
           <select
-            aria-label="Escolher prova fechada dentro de Simulados"
+            aria-label="Escolher prova ou simulado"
             value={selectedSimulationKey}
             onChange={(e) => setSelectedSimulationKey(e.target.value)}
             className="ce-select w-auto min-w-[220px] max-w-[360px] !border-[var(--accent)]"
@@ -2829,7 +3349,7 @@ export const ErrorNotebookPage: React.FC = () => {
             </option>
             {simulationDirectory.exams.map((ex) => (
               <option key={ex.key} value={ex.key}>
-                {ex.label} ({ex.pending} pend.)
+                {ex.label} ({ex.pending} pend. · {ex.corrected} corrig.)
               </option>
             ))}
           </select>
@@ -3020,19 +3540,44 @@ export const ErrorNotebookPage: React.FC = () => {
         </Panel>
       )}
 
-      {/* Barra de Associação em Lote para Questões Pendentes */}
-      {(filteredPendingIds.length > 0 || selectedEntryIds.length > 0) && (
+      {/* Aviso transparente quando filtros secundários estão ocultando registros */}
+      {hiddenBySecondaryFiltersCount > 0 && (
+        <div className="rounded-xl border border-[var(--warning)]/50 bg-[var(--warning)]/10 px-3.5 py-2 mb-3 flex flex-wrap items-center justify-between gap-2 text-[12px]">
+          <span className="text-[var(--text)]">
+            <strong className="font-mono-num">{hiddenBySecondaryFiltersCount}</strong> registro(s) nesta aba está(ão) oculto(s) por filtros ativos
+            {simOnlyUnassigned ? ' ("Apenas sem matéria geral")' : ''}
+            {simSubjectFilter !== 'all' ? ` (Matéria: ${simSubjectFilter})` : ''}
+            {filterMode !== 'all' ? ` (Categoria: ${filterMode === 'errors' ? 'Questões erradas' : 'Anotações manuais'})` : ''}
+            {search.trim() ? ` (Busca: "${search.trim()}")` : ''}.
+          </span>
+          <button
+            type="button"
+            onClick={() => {
+              setSimOnlyUnassigned(false);
+              setSimSubjectFilter('all');
+              setFilterMode('all');
+              setSearch('');
+            }}
+            className="px-2.5 py-1 rounded-md border border-[var(--warning)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer whitespace-nowrap"
+          >
+            Mostrar todos nesta aba
+          </button>
+        </div>
+      )}
+
+      {/* Barra de Associação em Lote para Questões Visíveis */}
+      {(filteredSelectableIds.length > 0 || selectedEntryIds.length > 0) && (
         <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-3.5 py-2.5 mb-3.5 flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2.5">
-            {filteredPendingIds.length > 0 && (
+            {filteredSelectableIds.length > 0 && (
               <label className="inline-flex items-center gap-2 text-[12px] font-bold text-[var(--text)] cursor-pointer select-none">
                 <input
                   type="checkbox"
-                  checked={allFilteredPendingSelected}
-                  onChange={handleToggleSelectAllFilteredPending}
+                  checked={allFilteredSelected}
+                  onChange={handleToggleSelectAllFiltered}
                   className="accent-[var(--accent)] w-4 h-4 cursor-pointer"
                 />
-                Selecionar pendentes visíveis ({filteredPendingIds.length})
+                Selecionar visíveis ({filteredSelectableIds.length})
               </label>
             )}
             <span className="text-[11.5px] font-mono-num text-[var(--muted)]">
@@ -3051,7 +3596,7 @@ export const ErrorNotebookPage: React.FC = () => {
 
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-[11.5px] font-bold text-[var(--muted)] whitespace-nowrap">
-              Associar pendentes à matéria:
+              Associar à matéria geral:
             </span>
             <select
               aria-label="Matéria de destino para associação em lote"
@@ -3085,16 +3630,52 @@ export const ErrorNotebookPage: React.FC = () => {
 
       <div>
         {filteredEntries.length ? (
-          <List
-            scrollElement="window"
-            rowComponent={ErrorNotebookEntryRow}
-            rowCount={filteredEntries.length}
-            rowHeight={entriesDynamicHeight}
-            rowKey={entryRowKey}
-            rowProps={entryRowProps}
-            overscanCount={4}
-            defaultHeight={680}
-          />
+          <div className="flex flex-col gap-3">
+            {visibleEntries.map((entry) => (
+              <ErrorNotebookEntryCard
+                key={entry.id}
+                entry={entry}
+                completedSimulations={db.completedSimulations}
+                registeredSubjects={registeredSubjects}
+                registeredSubjectNorms={registeredSubjectNorms}
+                isSelected={selectedEntryIdSet.has(entry.id)}
+                onToggleSelectEntry={handleToggleSelectEntry}
+                todayIso={todayIso}
+                editingEntry={editingEntry}
+                setEditingEntry={setEditingEntry}
+                flushEditingDraft={flushEditingDraft}
+                handleSaveEdit={handleSaveEdit}
+                updateErrorEntrySubject={handleSafeUpdateEntrySubject}
+                markAnnotationCorrected={markAnnotationCorrected}
+                advanceErrorReview={advanceErrorReview}
+                reopenAnnotation={reopenAnnotation}
+                deleteAnnotation={deleteAnnotation}
+                setActivePage={setActivePage}
+              />
+            ))}
+
+            {filteredEntries.length > visibleEntries.length && (
+              <div className="flex flex-wrap items-center justify-center gap-2 pt-2 pb-1">
+                <span className="text-[12px] font-mono-num text-[var(--muted)]">
+                  Exibindo {visibleEntries.length} de {filteredEntries.length} registro(s)
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setVisibleLimit((prev) => prev + INITIAL_VISIBLE_ENTRIES)}
+                  className="px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer"
+                >
+                  Mostrar mais (+{Math.min(INITIAL_VISIBLE_ENTRIES, filteredEntries.length - visibleEntries.length)})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setVisibleLimit(filteredEntries.length)}
+                  className="px-3.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] cursor-pointer"
+                >
+                  Mostrar todos ({filteredEntries.length})
+                </button>
+              </div>
+            )}
+          </div>
         ) : (
           <EmptyState message="Nenhum registro encontrado para os filtros aplicados." />
         )}

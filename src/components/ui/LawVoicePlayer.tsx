@@ -331,7 +331,7 @@ export function splitIntoNaturalChunks(text: string, maxLen: number): string[] {
 // ============================================================================
 
 const MAX_NEURAL_CACHE_ENTRIES = 45;
-const PERSISTENT_TTS_CACHE_NAME = 'ce-neural-tts-audio-v1';
+const PERSISTENT_TTS_CACHE_NAME = 'ce-neural-tts-audio-v2';
 
 function hashTtsKey(input: string): string {
   let h1 = 0xdeadbeef ^ input.length;

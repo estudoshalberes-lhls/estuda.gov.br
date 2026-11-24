@@ -1567,6 +1567,44 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
         }
       }
     }
+    const candidateTitleNorm = normalizeSearch(
+      visibleName(ann.simulado_titulo || ann.arquivo_prova || ''),
+    );
+    if (candidateTitleNorm) {
+      const byTitle = completedSimsRaw.find((sim) => {
+        if (!sim) return false;
+        const simTitleNorm = normalizeSearch(visibleName(sim.titulo || ''));
+        const simFileNorm = normalizeSearch(visibleName(sim.arquivo || ''));
+        return (
+          (simTitleNorm && simTitleNorm === candidateTitleNorm) ||
+          (simFileNorm && simFileNorm === candidateTitleNorm)
+        );
+      });
+      if (byTitle) {
+        let qNum = ann.simulado_questao_numero;
+        if (qNum === undefined && ann.questao?.enunciado) {
+          const stmtNorm = normalizeSearch(ann.questao.enunciado).slice(0, 120);
+          if (stmtNorm.length >= 20) {
+            const matchedQ = toArraySafe(byTitle.questoes).find((q) =>
+              normalizeSearch(q.enunciado || '').includes(stmtNorm),
+            );
+            if (matchedQ) qNum = matchedQ.numero;
+          }
+        }
+        return { sim: byTitle, qNum };
+      }
+    }
+    const stmtNorm = normalizeSearch(ann.questao?.enunciado || '').slice(0, 120);
+    if (stmtNorm.length >= 24) {
+      for (const sim of completedSimsRaw) {
+        const matchedQ = toArraySafe(sim?.questoes).find(
+          (q) => !q.correta && normalizeSearch(q.enunciado || '').includes(stmtNorm),
+        );
+        if (matchedQ) {
+          return { sim, qNum: ann.simulado_questao_numero ?? matchedQ.numero };
+        }
+      }
+    }
     return { qNum: ann.simulado_questao_numero };
   };
 
@@ -1585,15 +1623,18 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
       matched.sim?.titulo ||
       (ann.arquivo_prova ? visibleName(ann.arquivo_prova) : undefined);
     const resolvedQNum = ann.simulado_questao_numero ?? matched.qNum;
+    const resolvedOrigem = ann.origem || 'Simulado Fechado';
     if (
       resolvedSimId === ann.simulado_id &&
       resolvedSimTitle === ann.simulado_titulo &&
-      resolvedQNum === ann.simulado_questao_numero
+      resolvedQNum === ann.simulado_questao_numero &&
+      resolvedOrigem === ann.origem
     ) {
       return ann;
     }
     return {
       ...ann,
+      origem: resolvedOrigem,
       ...(resolvedSimId ? { simulado_id: resolvedSimId } : {}),
       ...(resolvedSimTitle ? { simulado_titulo: resolvedSimTitle } : {}),
       ...(resolvedQNum !== undefined ? { simulado_questao_numero: resolvedQNum } : {}),
@@ -11007,9 +11048,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const proofEntries: ErrorNotebookEntry[] = [];
     db.proofFiles.forEach((pf) => {
       pf.correcoes.forEach((corr) => {
-        const q = corr.questao.trim();
-        if (!q) return;
-        const datePart = corr.criado_em.split('T')[0];
+        const q = (corr.questao || '').trim();
+        const fallbackText = (corr.texto || corr.observacoes || '').trim();
+        if (!q && !fallbackText) return;
+        const datePart = (corr.criado_em || '').split('T')[0];
         const formattedDate = datePart.includes('-')
           ? datePart.split('-').reverse().join('/')
           : localDateBrazilian();
@@ -11018,14 +11060,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           data: formattedDate,
           materia: corr.materia?.trim() || `Provas · ${pf.bank}`,
           tipo: corr.tipo?.trim() || 'Questão errada (prova)',
-          texto: corr.texto?.trim() || `Questão errada na prova: ${q}`,
+          texto: corr.texto?.trim() || (q ? `Questão errada na prova: ${q}` : fallbackText),
           corrigido: Boolean(corr.corrigido),
           corrigido_em: corr.corrigido_em,
           proxima_revisao: corr.proxima_revisao,
           nivel_revisao: corr.nivel_revisao,
           revisado_em: corr.revisado_em,
           questao: {
-            enunciado: q,
+            enunciado: q || fallbackText,
             alternativas: [],
             resposta: '',
             gabarito: '',
@@ -11682,18 +11724,49 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               item.id.startsWith('sim-err-') ||
               item.origem === 'Simulado Fechado' ||
               item.tipo === 'Erro em Simulado Fechado';
+            const matchedSim = isSimErr
+              ? prev.completedSimulations.find((s) => {
+                  if (item.simulado_id && s.id === item.simulado_id) return true;
+                  if (item.id.startsWith(`sim-err-${s.id}-`)) return true;
+                  const titleNorm = normalizeSearch(
+                    visibleName(item.simulado_titulo || item.arquivo_prova || ''),
+                  );
+                  if (titleNorm) {
+                    if (
+                      normalizeSearch(visibleName(s.titulo || '')) === titleNorm ||
+                      normalizeSearch(visibleName(s.arquivo || '')) === titleNorm
+                    ) {
+                      return true;
+                    }
+                  }
+                  const stmtNorm = normalizeSearch(item.questao?.enunciado || '').slice(0, 120);
+                  if (stmtNorm.length >= 24) {
+                    return s.questoes.some(
+                      (q) => !q.correta && normalizeSearch(q.enunciado || '').includes(stmtNorm),
+                    );
+                  }
+                  return false;
+                })
+              : undefined;
+            const preservedSimId = isSimErr ? item.simulado_id || matchedSim?.id : item.simulado_id;
             const preservedSimTitle =
               isSimErr && !item.simulado_titulo
-                ? prev.completedSimulations.find((s) => item.id.startsWith(`sim-err-${s.id}-`))?.titulo ||
-                  item.arquivo_prova ||
-                  item.materia
+                ? matchedSim?.titulo || item.arquivo_prova || item.materia
                 : item.simulado_titulo;
+            const preservedQNum =
+              item.simulado_questao_numero ??
+              (matchedSim && item.id.startsWith(`sim-err-${matchedSim.id}-`)
+                ? Number(item.id.slice(`sim-err-${matchedSim.id}-`.length).split('-')[0]) || undefined
+                : undefined);
             return {
               ...item,
               materia: cleanMateria,
               tipo: cleanTipo,
               texto: cleanTexto,
+              ...(isSimErr && !item.origem ? { origem: 'Simulado Fechado' } : {}),
+              ...(preservedSimId ? { simulado_id: preservedSimId } : {}),
               ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
+              ...(preservedQNum !== undefined ? { simulado_questao_numero: preservedQNum } : {}),
               ...(updatedQuestao ? { questao: updatedQuestao } : {}),
             };
           });
@@ -11713,8 +11786,14 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   (targetEntry.id.startsWith(prefix)
                     ? Number(targetEntry.id.slice(prefix.length).split('-')[0])
                     : NaN);
+                const stmtNorm = normalizeSearch(targetEntry.questao?.enunciado || '').slice(0, 120);
                 const nextQuestoes = sim.questoes.map((q) => {
-                  if (q.numero === parsedNum && q.materia !== cleanMateria) {
+                  const isTargetQ =
+                    (Number.isFinite(parsedNum) && q.numero === parsedNum) ||
+                    (!Number.isFinite(parsedNum) &&
+                      stmtNorm.length >= 24 &&
+                      normalizeSearch(q.enunciado || '').includes(stmtNorm));
+                  if (isTargetQ && q.materia !== cleanMateria) {
                     simTouched = true;
                     return { ...q, materia: cleanMateria };
                   }
@@ -11763,20 +11842,46 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               item.origem === 'Simulado Fechado' ||
               item.tipo === 'Erro em Simulado Fechado';
             const matchedSim = isSimErr
-              ? prev.completedSimulations.find(
-                  (s) => s.id === item.simulado_id || item.id.startsWith(`sim-err-${s.id}-`),
-                )
+              ? prev.completedSimulations.find((s) => {
+                  if (item.simulado_id && s.id === item.simulado_id) return true;
+                  if (item.id.startsWith(`sim-err-${s.id}-`)) return true;
+                  const titleNorm = normalizeSearch(
+                    visibleName(item.simulado_titulo || item.arquivo_prova || ''),
+                  );
+                  if (titleNorm) {
+                    if (
+                      normalizeSearch(visibleName(s.titulo || '')) === titleNorm ||
+                      normalizeSearch(visibleName(s.arquivo || '')) === titleNorm
+                    ) {
+                      return true;
+                    }
+                  }
+                  const stmtNorm = normalizeSearch(item.questao?.enunciado || '').slice(0, 120);
+                  if (stmtNorm.length >= 24) {
+                    return s.questoes.some(
+                      (q) => !q.correta && normalizeSearch(q.enunciado || '').includes(stmtNorm),
+                    );
+                  }
+                  return false;
+                })
               : undefined;
             const preservedSimTitle =
               isSimErr && !item.simulado_titulo
                 ? matchedSim?.titulo || item.arquivo_prova || item.materia
                 : item.simulado_titulo;
             const preservedSimId = isSimErr ? item.simulado_id || matchedSim?.id : item.simulado_id;
+            const preservedQNum =
+              item.simulado_questao_numero ??
+              (matchedSim && item.id.startsWith(`sim-err-${matchedSim.id}-`)
+                ? Number(item.id.slice(`sim-err-${matchedSim.id}-`.length).split('-')[0]) || undefined
+                : undefined);
             const nextItem: ErrorNotebookEntry = {
               ...item,
               materia: cleanMateria,
+              ...(isSimErr && !item.origem ? { origem: 'Simulado Fechado' } : {}),
               ...(preservedSimId ? { simulado_id: preservedSimId } : {}),
               ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
+              ...(preservedQNum !== undefined ? { simulado_questao_numero: preservedQNum } : {}),
             };
             updatedTarget = nextItem;
             return nextItem;
@@ -11794,9 +11899,15 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   (target.id.startsWith(prefix)
                     ? Number(target.id.slice(prefix.length).split('-')[0])
                     : NaN);
+                const stmtNorm = normalizeSearch(target.questao?.enunciado || '').slice(0, 120);
                 let simTouched = false;
                 const nextQuestoes = sim.questoes.map((q) => {
-                  if (q.numero === parsedNum && q.materia !== cleanMateria) {
+                  const isTargetQ =
+                    (Number.isFinite(parsedNum) && q.numero === parsedNum) ||
+                    (!Number.isFinite(parsedNum) &&
+                      stmtNorm.length >= 24 &&
+                      normalizeSearch(q.enunciado || '').includes(stmtNorm));
+                  if (isTargetQ && q.materia !== cleanMateria) {
                     simTouched = true;
                     return { ...q, materia: cleanMateria };
                   }
@@ -11838,20 +11949,47 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                 item.origem === 'Simulado Fechado' ||
                 item.tipo === 'Erro em Simulado Fechado';
               const matchedSim = isSimErr
-                ? prev.completedSimulations.find(
-                    (s) => s.id === item.simulado_id || item.id.startsWith(`sim-err-${s.id}-`),
-                  )
+                ? prev.completedSimulations.find((s) => {
+                    if (item.simulado_id && s.id === item.simulado_id) return true;
+                    if (item.id.startsWith(`sim-err-${s.id}-`)) return true;
+                    const titleNorm = normalizeSearch(
+                      visibleName(item.simulado_titulo || item.arquivo_prova || ''),
+                    );
+                    if (titleNorm) {
+                      if (
+                        normalizeSearch(visibleName(s.titulo || '')) === titleNorm ||
+                        normalizeSearch(visibleName(s.arquivo || '')) === titleNorm
+                      ) {
+                        return true;
+                      }
+                    }
+                    const stmtNorm = normalizeSearch(item.questao?.enunciado || '').slice(0, 120);
+                    if (stmtNorm.length >= 24) {
+                      return s.questoes.some(
+                        (q) => !q.correta && normalizeSearch(q.enunciado || '').includes(stmtNorm),
+                      );
+                    }
+                    return false;
+                  })
                 : undefined;
               const preservedSimTitle =
                 isSimErr && !item.simulado_titulo
                   ? matchedSim?.titulo || item.arquivo_prova || item.materia
                   : item.simulado_titulo;
               const preservedSimId = isSimErr ? item.simulado_id || matchedSim?.id : item.simulado_id;
+              const preservedQNum =
+                item.simulado_questao_numero ??
+                (matchedSim && item.id.startsWith(`sim-err-${matchedSim.id}-`)
+                  ? Number(item.id.slice(`sim-err-${matchedSim.id}-`.length).split('-')[0]) ||
+                    undefined
+                  : undefined);
               const nextItem: ErrorNotebookEntry = {
                 ...item,
                 materia: cleanMateria,
+                ...(isSimErr && !item.origem ? { origem: 'Simulado Fechado' } : {}),
                 ...(preservedSimId ? { simulado_id: preservedSimId } : {}),
                 ...(preservedSimTitle ? { simulado_titulo: preservedSimTitle } : {}),
+                ...(preservedQNum !== undefined ? { simulado_questao_numero: preservedQNum } : {}),
               };
               if (isSimErr) updatedSimTargets.push(nextItem);
               return nextItem;
@@ -11862,18 +12000,28 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ? prev.completedSimulations.map((sim) => {
               const prefix = `sim-err-${sim.id}-`;
               const matchingNums = new Set<number>();
+              const matchingStmts: string[] = [];
               updatedSimTargets.forEach((t) => {
                 if (t.simulado_id === sim.id || t.id.startsWith(prefix)) {
                   const num =
                     t.simulado_questao_numero ??
                     (t.id.startsWith(prefix) ? Number(t.id.slice(prefix.length).split('-')[0]) : NaN);
-                  if (Number.isFinite(num) && num > 0) matchingNums.add(num);
+                  if (Number.isFinite(num) && num > 0) {
+                    matchingNums.add(num);
+                  } else {
+                    const stmtNorm = normalizeSearch(t.questao?.enunciado || '').slice(0, 120);
+                    if (stmtNorm.length >= 24) matchingStmts.push(stmtNorm);
+                  }
                 }
               });
-              if (!matchingNums.size) return sim;
+              if (!matchingNums.size && !matchingStmts.length) return sim;
               let simTouched = false;
               const nextQuestoes = sim.questoes.map((q) => {
-                if (matchingNums.has(q.numero) && q.materia !== cleanMateria) {
+                const matches =
+                  matchingNums.has(q.numero) ||
+                  (matchingStmts.length > 0 &&
+                    matchingStmts.some((st) => normalizeSearch(q.enunciado || '').includes(st)));
+                if (matches && q.materia !== cleanMateria) {
                   simTouched = true;
                   return { ...q, materia: cleanMateria };
                 }
@@ -12198,21 +12346,35 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         if (!entry.questao?.enunciado) return false;
         if (onlyPending && entry.corrigido) return false;
         if (subjectFilter === '__SIMULADOS__') {
+          const isProofExam = Boolean(entry.correcao_prova && entry.arquivo_prova);
           const isSim =
             Boolean(entry.simulado_id || entry.simulado_titulo) ||
             entry.id.startsWith('sim-err-') ||
             entry.origem === 'Simulado Fechado' ||
             entry.tipo === 'Erro em Simulado Fechado';
-          if (!isSim) return false;
+          if (!isSim && !isProofExam) return false;
           if (simuladoKey && simuladoKey !== 'all') {
-            const matchedSim = db.completedSimulations.find(
-              (s) => s.id === entry.simulado_id || entry.id.startsWith(`sim-err-${s.id}-`),
-            );
-            const entrySimKey =
-              entry.simulado_id ||
-              matchedSim?.id ||
-              `title:${normalizeSearch(visibleName(entry.simulado_titulo || entry.arquivo_prova || entry.materia || 'Simulado Fechado'))}`;
-            if (entrySimKey !== simuladoKey) return false;
+            let entryExamKey: string;
+            if (isProofExam) {
+              entryExamKey = `proof:${normalizeSearch(entry.banca || '')}:${normalizeSearch(visibleName(entry.arquivo_prova || ''))}`;
+            } else {
+              const titleNorm = normalizeSearch(
+                visibleName(entry.simulado_titulo || entry.arquivo_prova || ''),
+              );
+              const matchedSim = db.completedSimulations.find(
+                (s) =>
+                  s.id === entry.simulado_id ||
+                  entry.id.startsWith(`sim-err-${s.id}-`) ||
+                  (titleNorm &&
+                    (normalizeSearch(visibleName(s.titulo || '')) === titleNorm ||
+                      normalizeSearch(visibleName(s.arquivo || '')) === titleNorm)),
+              );
+              entryExamKey =
+                entry.simulado_id ||
+                matchedSim?.id ||
+                `title:${normalizeSearch(visibleName(entry.simulado_titulo || entry.arquivo_prova || entry.materia || 'Simulado Fechado'))}`;
+            }
+            if (entryExamKey !== simuladoKey) return false;
           }
         } else if (subjectFilter === '__UNASSIGNED__') {
           const entryNorm = normalizeSearch(visibleName(entry.materia));
