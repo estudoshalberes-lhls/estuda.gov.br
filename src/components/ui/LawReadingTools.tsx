@@ -23,10 +23,12 @@ import { LawItem } from '../../types/study';
 
 export type LawFontSizeKey = 'sm' | 'md' | 'lg' | 'xl';
 export type LawLineHeightKey = 'normal' | 'relaxed' | 'loose';
+export type LawFontFamilyKey = 'sans' | 'serif';
 
 export interface LawReadingPrefs {
   fontSize: LawFontSizeKey;
   lineHeight: LawLineHeightKey;
+  fontFamily: LawFontFamilyKey;
   comfortableWidth: boolean;
   highlightExamWords: boolean;
   cleanMode: boolean;
@@ -38,6 +40,7 @@ const STORAGE_KEY = 'ce-law-reading-prefs-v1';
 const DEFAULT_PREFS: LawReadingPrefs = {
   fontSize: 'md',
   lineHeight: 'relaxed',
+  fontFamily: 'sans',
   comfortableWidth: false,
   highlightExamWords: true,
   cleanMode: false,
@@ -55,6 +58,11 @@ export const LINE_HEIGHT_VAL: Record<LawLineHeightKey, string> = {
   normal: '1.6',
   relaxed: '1.85',
   loose: '2.1',
+};
+
+export const FONT_FAMILY_CSS: Record<LawFontFamilyKey, string> = {
+  sans: 'inherit',
+  serif: '"Source Serif 4", Georgia, Cambria, "Times New Roman", serif',
 };
 
 const FONT_ORDER: LawFontSizeKey[] = ['sm', 'md', 'lg', 'xl'];
@@ -98,6 +106,12 @@ export function useLawReadingPrefs() {
     });
   };
 
+  const toggleFontFamily = () =>
+    setPrefs((prev) => ({
+      ...prev,
+      fontFamily: prev.fontFamily === 'serif' ? 'sans' : 'serif',
+    }));
+
   const toggleComfortableWidth = () =>
     setPrefs((prev) => ({ ...prev, comfortableWidth: !prev.comfortableWidth }));
 
@@ -115,6 +129,7 @@ export function useLawReadingPrefs() {
     setPrefs,
     stepFontSize,
     cycleLineHeight,
+    toggleFontFamily,
     toggleComfortableWidth,
     toggleHighlightExamWords,
     toggleCleanMode,
@@ -263,6 +278,7 @@ interface LawReadingToolbarProps {
   prefs: LawReadingPrefs;
   onStepFontSize: (dir: -1 | 1) => void;
   onCycleLineHeight: () => void;
+  onToggleFontFamily?: () => void;
   onToggleComfortableWidth: () => void;
   onToggleHighlightExamWords: () => void;
   showClozeModeToggle?: boolean;
@@ -279,6 +295,7 @@ export const LawReadingToolbar: React.FC<LawReadingToolbarProps> = ({
   prefs,
   onStepFontSize,
   onCycleLineHeight,
+  onToggleFontFamily,
   onToggleComfortableWidth,
   onToggleHighlightExamWords,
   showClozeModeToggle,
@@ -333,11 +350,27 @@ export const LawReadingToolbar: React.FC<LawReadingToolbarProps> = ({
           type="button"
           onClick={onCycleLineHeight}
           title="Alternar espaçamento entre linhas"
-          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)]"
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
         >
           <AlignJustify className="w-3 h-3 text-[var(--accent)]" />
           Entrelinha: {lineHeightLabel}
         </button>
+
+        {onToggleFontFamily && (
+          <button
+            type="button"
+            onClick={onToggleFontFamily}
+            title="Alternar entre fonte editorial com serifa (ideal para leitura longa) e sem serifa"
+            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors whitespace-nowrap ${
+              prefs.fontFamily === 'serif'
+                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                : 'border-[var(--line-strong)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+            }`}
+          >
+            <span className={prefs.fontFamily === 'serif' ? 'font-serif' : ''}>Aa</span>
+            {prefs.fontFamily === 'serif' ? 'Serifa' : 'Sem Serifa'}
+          </button>
+        )}
 
         <button
           type="button"

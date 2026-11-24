@@ -1,12 +1,44 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Check, Download, Eye, FileUp, Folder, FolderPlus, Highlighter, Maximize2, Minimize2, Pencil, RefreshCw, Trash2, X } from 'lucide-react';
+import {
+  BookmarkCheck,
+  Check,
+  Download,
+  Eye,
+  FileUp,
+  Folder,
+  FolderPlus,
+  Highlighter,
+  LayoutGrid,
+  List,
+  ListPlus,
+  Maximize2,
+  Minimize2,
+  Pencil,
+  RefreshCw,
+  Search,
+  Tag,
+  Trash2,
+  X,
+} from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import { getFileBlob, triggerBlobDownload } from '../lib/fileStorage';
 import { getKnownStudyDriveFolderNames, getPreferredStudyFolder } from '../lib/googleDrive';
-import { formatUploadSize, isReservedBackupFolderName, visibleName } from '../lib/parsers';
-import { PersonalPdfFile } from '../types/study';
+import {
+  formatUploadSize,
+  isReservedBackupFolderName,
+  normalizeSearch,
+  visibleName,
+} from '../lib/parsers';
+import { ContentStudyStatus, PersonalPdfFile } from '../types/study';
 import { PdfAnnotatorViewer } from '../components/ui/PdfAnnotatorViewer';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import {
+  PinToggleButton,
+  ReadingQueueButton,
+  STUDY_STATUS_LIST,
+  STUDY_STATUS_META,
+  StudyStatusSelect,
+} from '../components/ui/ContentReadingSurface';
 
 export const PersonalPdfsPage: React.FC = () => {
   const {
@@ -19,6 +51,13 @@ export const PersonalPdfsPage: React.FC = () => {
     replacePersonalPdf,
     deletePersonalPdf,
     deletePdfFolder,
+    updatePersonalPdfMeta,
+    setActivePage,
+    openLawAt,
+    addToReadingQueue,
+    removeFromReadingQueue,
+    toggleReadingQueueDone,
+    clearReadingQueue,
     toast,
     driveConnected,
     activeDriveFolderName,
@@ -63,6 +102,17 @@ export const PersonalPdfsPage: React.FC = () => {
   const [renamedValue, setRenamedValue] = useState('');
   const [dragOverTarget, setDragOverTarget] = useState<string | null>(null);
   const [previewPdf, setPreviewPdf] = useState<PersonalPdfFile | null>(null);
+
+  // Organization & filtering controls
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchAllFolders, setSearchAllFolders] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'all' | ContentStudyStatus>('all');
+  const [onlyPinned, setOnlyPinned] = useState(false);
+  const [onlyAnnotated, setOnlyAnnotated] = useState(false);
+  const [sortBy, setSortBy] = useState<'recent' | 'lastOpened' | 'alpha' | 'annotated'>('recent');
+  const [viewMode, setViewMode] = useState<'cards' | 'compact'>('cards');
+  const [editingSubtopicId, setEditingSubtopicId] = useState<string | null>(null);
+  const [subtopicDraft, setSubtopicDraft] = useState('');
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const replaceInputRef = useRef<HTMLInputElement | null>(null);
@@ -130,10 +180,101 @@ export const PersonalPdfsPage: React.FC = () => {
     }
   };
 
-  const activeFiles = activeFolder ? db.pdfFolders[activeFolder] || [] : [];
-  const activePreviewFile = previewPdf
-    ? activeFiles.find((f) => f.id === previewPdf.id) || previewPdf
-    : null;
+  const openPdfFile = (folder: string, file: PersonalPdfFile) => {
+    if (previewPdf?.id === file.id) {
+      setPreviewPdf(null);
+      return;
+    }
+    setSelectedFolder(folder);
+    updatePersonalPdfMeta(folder, file.id, { lastOpenedAt: new Date().toISOString() });
+    setPreviewPdf(file);
+  };
+
+  // Most recently opened PDF across all folders ("Continuar de onde parou")
+  const lastOpenedEntry = useMemo(() => {
+    let best: { folder: string; file: PersonalPdfFile } | null = null;
+    for (const folder of folderNames) {
+      for (const file of db.pdfFolders[folder] || []) {
+        if (!file.lastOpenedAt) continue;
+        if (!best || file.lastOpenedAt > (best.file.lastOpenedAt || '')) {
+          best = { folder, file };
+        }
+      }
+    }
+    return best;
+  }, [db.pdfFolders, folderNames]);
+
+  const activeFiles = useMemo(() => {
+    const base: Array<{ folder: string; file: PersonalPdfFile }> = searchAllFolders
+      ? folderNames.flatMap((folder) =>
+          (db.pdfFolders[folder] || []).map((file) => ({ folder, file })),
+        )
+      : activeFolder
+        ? (db.pdfFolders[activeFolder] || []).map((file) => ({ folder: activeFolder, file }))
+        : [];
+
+    const q = normalizeSearch(searchQuery);
+    const filtered = base.filter(({ folder, file }) => {
+      const fileAnn = db.pdfAnnotations?.[file.blobKey];
+      const annCount = (fileAnn?.strokes?.length || 0) + (fileAnn?.notes?.length || 0);
+      const isAnnotated = annCount > 0 || Boolean(file.hasAnnotations);
+      if (onlyPinned && !file.pinned) return false;
+      if (onlyAnnotated && !isAnnotated) return false;
+      if (statusFilter !== 'all' && (file.studyStatus || 'a_ler') !== statusFilter) return false;
+      if (q) {
+        const hay = normalizeSearch(
+          `${visibleName(folder)} ${visibleName(file.name)} ${file.subtopic || ''}`,
+        );
+        if (!hay.includes(q)) return false;
+      }
+      return true;
+    });
+
+    return filtered.sort((a, b) => {
+      const pinDiff = (b.file.pinned ? 1 : 0) - (a.file.pinned ? 1 : 0);
+      if (pinDiff !== 0) return pinDiff;
+      if (sortBy === 'alpha') {
+        return visibleName(a.file.name).localeCompare(visibleName(b.file.name), 'pt-BR');
+      }
+      if (sortBy === 'lastOpened') {
+        const ao = a.file.lastOpenedAt || a.file.updatedAt || a.file.createdAt || '';
+        const bo = b.file.lastOpenedAt || b.file.updatedAt || b.file.createdAt || '';
+        return bo.localeCompare(ao);
+      }
+      if (sortBy === 'annotated') {
+        const aAnn =
+          (db.pdfAnnotations?.[a.file.blobKey]?.strokes?.length || 0) +
+          (db.pdfAnnotations?.[a.file.blobKey]?.notes?.length || 0);
+        const bAnn =
+          (db.pdfAnnotations?.[b.file.blobKey]?.strokes?.length || 0) +
+          (db.pdfAnnotations?.[b.file.blobKey]?.notes?.length || 0);
+        if (bAnn !== aAnn) return bAnn - aAnn;
+      }
+      return (b.file.updatedAt || b.file.createdAt || '').localeCompare(
+        a.file.updatedAt || a.file.createdAt || '',
+      );
+    });
+  }, [
+    activeFolder,
+    db.pdfAnnotations,
+    db.pdfFolders,
+    folderNames,
+    onlyAnnotated,
+    onlyPinned,
+    searchAllFolders,
+    searchQuery,
+    sortBy,
+    statusFilter,
+  ]);
+
+  const activePreviewEntry = useMemo(() => {
+    if (!previewPdf) return null;
+    for (const folder of folderNames) {
+      const found = (db.pdfFolders[folder] || []).find((f) => f.id === previewPdf.id);
+      if (found) return { folder, file: found };
+    }
+    return activeFolder ? { folder: activeFolder, file: previewPdf } : null;
+  }, [activeFolder, db.pdfFolders, folderNames, previewPdf]);
 
   return (
     <div>
@@ -143,8 +284,8 @@ export const PersonalPdfsPage: React.FC = () => {
             <Maximize2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
             <span>
               Modo Leitura ·{' '}
-              {activePreviewFile
-                ? visibleName(activePreviewFile.name)
+              {activePreviewEntry
+                ? visibleName(activePreviewEntry.file.name)
                 : activeFolder
                   ? visibleName(activeFolder)
                   : 'PDFs Pessoais'}
@@ -166,6 +307,24 @@ export const PersonalPdfsPage: React.FC = () => {
           description="Organize apostilas em pastas temáticas, arraste arquivos diretamente para qualquer setor, visualize inline e atualize versões."
           actions={
             <div className="flex flex-wrap items-center gap-2">
+              <ReadingQueueButton
+                queue={db.preferences.reading_queue || []}
+                onToggleDone={toggleReadingQueueDone}
+                onRemove={removeFromReadingQueue}
+                onClearDone={() => clearReadingQueue(true)}
+                onOpenItem={(q) => {
+                  if (q.kind === 'law' && q.folder) {
+                    openLawAt(q.folder);
+                  } else if (q.kind === 'summary') {
+                    setActivePage('Resumos & Mapas');
+                  } else if (q.kind === 'caselaw') {
+                    setActivePage('Súmulas e Jurisprudência');
+                  } else if (q.kind === 'pdf' && q.folder && q.itemId) {
+                    const target = (db.pdfFolders[q.folder] || []).find((f) => f.id === q.itemId);
+                    if (target) openPdfFile(q.folder, target);
+                  }
+                }}
+              />
               <button
                 type="button"
                 onClick={() => setExamFocusMode(true)}
@@ -211,6 +370,29 @@ export const PersonalPdfsPage: React.FC = () => {
         />
       )}
 
+      {!examFocusMode && lastOpenedEntry && (!activePreviewEntry || activePreviewEntry.file.id !== lastOpenedEntry.file.id) && (
+        <div className="mb-4 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 text-[12.5px]">
+            <BookmarkCheck className="w-4 h-4 text-[var(--accent)] shrink-0" />
+            <span className="text-[var(--muted)] font-semibold shrink-0">Continuar leitura:</span>
+            <strong className="text-[var(--text)] truncate">
+              {visibleName(lastOpenedEntry.file.name)}
+            </strong>
+            <span className="text-[var(--muted)] text-[11.5px] hidden sm:inline">
+              · {visibleName(lastOpenedEntry.folder)}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => openPdfFile(lastOpenedEntry.folder, lastOpenedEntry.file)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            Retomar PDF
+          </button>
+        </div>
+      )}
+
       <input
         ref={replaceInputRef}
         type="file"
@@ -242,7 +424,7 @@ export const PersonalPdfsPage: React.FC = () => {
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
               {folderNames.map((folder) => {
                 const count = (db.pdfFolders[folder] || []).length;
-                const isSelected = folder === activeFolder;
+                const isSelected = folder === activeFolder && !searchAllFolders;
                 const isDrag = dragOverTarget === folder;
                 const isRenaming = renamingFolder === folder;
 
@@ -251,6 +433,7 @@ export const PersonalPdfsPage: React.FC = () => {
                     key={folder}
                     onClick={() => {
                       if (!isRenaming) {
+                        setSearchAllFolders(false);
                         setSelectedFolder(folder);
                         setPreviewPdf(null);
                       }
@@ -363,10 +546,114 @@ export const PersonalPdfsPage: React.FC = () => {
 
       {activeFolder ? (
         <Panel
-          title={`Pasta selecionada: ${visibleName(activeFolder)}`}
+          title={
+            searchAllFolders
+              ? `Todas as pastas (${activeFiles.length})`
+              : `Pasta selecionada: ${visibleName(activeFolder)}`
+          }
           subtitle={`${activeFiles.length} documento(s)`}
+          stackHeader
+          action={
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-[var(--muted)] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Buscar PDF ou assunto..."
+                  className="ce-input pl-8 h-[32px] w-[180px] text-[12px]"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setSearchAllFolders((v) => !v)}
+                className={`h-[32px] px-2.5 rounded-lg border text-[11.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  searchAllFolders
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                }`}
+              >
+                Todas pastas
+              </button>
+              <select
+                aria-label="Filtrar por status de leitura"
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as 'all' | ContentStudyStatus)}
+                className="ce-select h-[32px] w-auto text-[11.5px]"
+              >
+                <option value="all">Status: Todos</option>
+                {STUDY_STATUS_LIST.map((st) => (
+                  <option key={st} value={st}>
+                    {STUDY_STATUS_META[st].label}
+                  </option>
+                ))}
+              </select>
+              <select
+                aria-label="Ordenar PDFs"
+                value={sortBy}
+                onChange={(e) =>
+                  setSortBy(e.target.value as 'recent' | 'lastOpened' | 'alpha' | 'annotated')
+                }
+                className="ce-select h-[32px] w-auto text-[11.5px]"
+              >
+                <option value="recent">Mais recentes</option>
+                <option value="lastOpened">Último aberto</option>
+                <option value="alpha">Ordem alfabética</option>
+                <option value="annotated">Anotados primeiro</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => setOnlyPinned((v) => !v)}
+                className={`h-[32px] px-2.5 rounded-lg border text-[11.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  onlyPinned
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                }`}
+              >
+                Fixados
+              </button>
+              <button
+                type="button"
+                onClick={() => setOnlyAnnotated((v) => !v)}
+                className={`h-[32px] px-2.5 rounded-lg border text-[11.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  onlyAnnotated
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                }`}
+              >
+                Anotados
+              </button>
+              <div className="inline-flex rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setViewMode('cards')}
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                    viewMode === 'cards'
+                      ? 'bg-[var(--accent)] text-white'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  <LayoutGrid className="w-3.5 h-3.5" />
+                  Cartões
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode('compact')}
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-bold cursor-pointer ${
+                    viewMode === 'compact'
+                      ? 'bg-[var(--accent)] text-white'
+                      : 'text-[var(--muted)] hover:text-[var(--text)]'
+                  }`}
+                >
+                  <List className="w-3.5 h-3.5" />
+                  Compacta
+                </button>
+              </div>
+            </div>
+          }
         >
-          {!hideUpload && !examFocusMode && (
+          {!hideUpload && !examFocusMode && !searchAllFolders && (
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -410,36 +697,132 @@ export const PersonalPdfsPage: React.FC = () => {
             </div>
           )}
 
-          {activePreviewFile && (
+          {activePreviewEntry && (
             <PdfAnnotatorViewer
-              folder={activeFolder}
-              file={activePreviewFile}
+              folder={activePreviewEntry.folder}
+              file={activePreviewEntry.file}
               onClose={() => setPreviewPdf(null)}
             />
           )}
 
           {activeFiles.length ? (
+            viewMode === 'compact' ? (
+              <div className="mt-4 divide-y divide-[var(--line)] rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] overflow-hidden">
+                {activeFiles.map(({ folder, file }) => {
+                  const fileAnn = db.pdfAnnotations?.[file.blobKey];
+                  const annotationCount =
+                    (fileAnn?.strokes?.length || 0) + (fileAnn?.notes?.length || 0);
+                  const isAnnotated = annotationCount > 0 || Boolean(file.hasAnnotations);
+
+                  return (
+                    <div
+                      key={`${folder}-${file.id}`}
+                      className="flex flex-wrap items-center justify-between gap-2.5 px-3 py-2 hover:bg-[var(--panel)] transition-colors"
+                    >
+                      <div className="flex items-center gap-2 min-w-[min(100%,240px)] flex-1">
+                        <PinToggleButton
+                          pinned={file.pinned}
+                          onToggle={() =>
+                            updatePersonalPdfMeta(folder, file.id, { pinned: !file.pinned })
+                          }
+                        />
+                        <div className="min-w-0 flex-1">
+                          <button
+                            type="button"
+                            onClick={() => openPdfFile(folder, file)}
+                            className="text-left text-[13px] font-bold text-[var(--text)] hover:text-[var(--accent)] truncate block w-full cursor-pointer"
+                          >
+                            {visibleName(file.name)}
+                          </button>
+                          <div className="text-[11px] text-[var(--muted)] font-mono-num truncate">
+                            {searchAllFolders ? `${visibleName(folder)} · ` : ''}
+                            {file.subtopic ? `${file.subtopic} · ` : ''}
+                            {formatUploadSize(file.size)}
+                            {isAnnotated
+                              ? ` · ${annotationCount > 0 ? `${annotationCount} marcação(ões)` : 'Marcado'}`
+                              : ''}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        <StudyStatusSelect
+                          value={file.studyStatus}
+                          onChange={(next) =>
+                            updatePersonalPdfMeta(folder, file.id, { studyStatus: next })
+                          }
+                          compact
+                        />
+                        <button
+                          type="button"
+                          onClick={() => openPdfFile(folder, file)}
+                          className="inline-flex items-center gap-1 h-[28px] px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                        >
+                          <Eye className="w-3 h-3" />
+                          {previewPdf?.id === file.id ? 'Fechar' : 'Abrir'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            addToReadingQueue({
+                              kind: 'pdf',
+                              title: visibleName(file.name),
+                              subtitle: visibleName(folder),
+                              folder,
+                              itemId: file.id,
+                            })
+                          }
+                          title="Adicionar à Fila de Leitura"
+                          className="inline-flex items-center justify-center w-[28px] h-[28px] rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] cursor-pointer"
+                        >
+                          <ListPlus className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDownload(file)}
+                          title="Baixar"
+                          className="inline-flex items-center justify-center w-[28px] h-[28px] rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void deletePersonalPdf(folder, file.id)}
+                          title="Excluir"
+                          className="inline-flex items-center justify-center w-[28px] h-[28px] rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--bad)] hover:border-[var(--bad)] cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
             <div className="mt-4 flex flex-col gap-2.5">
-              {activeFiles.map((file) => {
+              {activeFiles.map(({ folder, file }) => {
                 const fileAnn = db.pdfAnnotations?.[file.blobKey];
                 const annotationCount =
                   (fileAnn?.strokes?.length || 0) + (fileAnn?.notes?.length || 0);
                 const isAnnotated = annotationCount > 0 || Boolean(file.hasAnnotations);
+                const isEditingSubtopic = editingSubtopicId === file.id;
 
                 return (
                 <div
-                  key={file.id}
-                  className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3"
+                  key={`${folder}-${file.id}`}
+                  className={`flex flex-wrap items-center justify-between gap-3 rounded-xl border bg-[var(--panel-soft)] p-3 ${
+                    file.pinned ? 'border-[var(--accent)]/60' : 'border-[var(--line)]'
+                  }`}
                 >
                   <div className="min-w-[min(100%,240px)] flex-1 text-left">
-                    <div className="flex flex-wrap items-center gap-2 min-w-0">
+                    <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5 min-w-0">
                       <strong className="text-[13.5px] font-bold leading-snug text-[var(--text)] break-words">
                         {visibleName(file.name)}
                       </strong>
                       {isAnnotated && (
                         <span
                           title="PDF com marcações salvas automaticamente"
-                          className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md border border-[var(--accent)]/35 bg-[var(--accent-soft)] text-[10.5px] font-bold text-[var(--accent)] shrink-0"
+                          className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] shrink-0"
                         >
                           <Highlighter className="w-3 h-3" />
                           {annotationCount > 0 ? `${annotationCount} marcação(ões)` : 'Marcado'}
@@ -447,26 +830,102 @@ export const PersonalPdfsPage: React.FC = () => {
                       )}
                     </div>
                     <span className="block text-[11.5px] text-[var(--muted)] font-mono-num">
+                      {searchAllFolders ? `${visibleName(folder)} · ` : ''}
+                      {file.subtopic ? `Assunto: ${file.subtopic} · ` : ''}
                       {formatUploadSize(file.size)} · Enviado em {file.createdAt}
                       {file.updatedAt ? ` · Atualizado em ${new Date(file.updatedAt).toLocaleDateString('pt-BR')}` : ''}
                     </span>
+                    {isEditingSubtopic && (
+                      <form
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          updatePersonalPdfMeta(folder, file.id, {
+                            subtopic: subtopicDraft.trim(),
+                          });
+                          setEditingSubtopicId(null);
+                        }}
+                        className="mt-2 flex items-center gap-1.5 max-w-[340px]"
+                      >
+                        <input
+                          type="text"
+                          value={subtopicDraft}
+                          onChange={(e) => setSubtopicDraft(e.target.value)}
+                          placeholder="Assunto / subtópico do PDF..."
+                          className="ce-input h-[28px] text-[11.5px] flex-1"
+                          autoFocus
+                        />
+                        <button
+                          type="submit"
+                          className="h-[28px] px-2.5 rounded-lg bg-[var(--accent)] text-white text-[11px] font-bold cursor-pointer"
+                        >
+                          Salvar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setEditingSubtopicId(null)}
+                          className="h-[28px] px-2 rounded-lg border border-[var(--line)] text-[11px] text-[var(--muted)] cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                      </form>
+                    )}
                   </div>
 
                   <div className="flex flex-wrap items-center gap-1.5 min-w-0 max-w-full">
+                    <PinToggleButton
+                      pinned={file.pinned}
+                      onToggle={() =>
+                        updatePersonalPdfMeta(folder, file.id, { pinned: !file.pinned })
+                      }
+                    />
+                    <StudyStatusSelect
+                      value={file.studyStatus}
+                      onChange={(next) =>
+                        updatePersonalPdfMeta(folder, file.id, { studyStatus: next })
+                      }
+                      compact
+                    />
                     <button
                       type="button"
-                      onClick={() =>
-                        setPreviewPdf(previewPdf?.id === file.id ? null : file)
-                      }
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                      onClick={() => {
+                        setEditingSubtopicId(file.id);
+                        setSubtopicDraft(file.subtopic || '');
+                      }}
+                      title="Definir assunto / subtópico"
+                      className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                    >
+                      <Tag className="w-3 h-3" />
+                      Assunto
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => openPdfFile(folder, file)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
                     >
                       <Eye className="w-3.5 h-3.5" />
                       {previewPdf?.id === file.id ? 'Fechar' : 'Abrir / Marcar'}
                     </button>
                     <button
                       type="button"
+                      onClick={() =>
+                        addToReadingQueue({
+                          kind: 'pdf',
+                          title: visibleName(file.name),
+                          subtitle: visibleName(folder),
+                          folder,
+                          itemId: file.id,
+                        })
+                      }
+                      title="Adicionar à Fila de Leitura"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                    >
+                      <ListPlus className="w-3.5 h-3.5 text-[var(--accent)]" />
+                      Na Fila
+                    </button>
+                    <button
+                      type="button"
                       onClick={() => void handleDownload(file)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
                       Baixar
@@ -474,15 +933,15 @@ export const PersonalPdfsPage: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => handleReplaceTrigger(file.id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
                     >
                       <RefreshCw className="w-3.5 h-3.5" />
                       Substituir
                     </button>
                     <button
                       type="button"
-                      onClick={() => void deletePersonalPdf(activeFolder, file.id)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap"
+                      onClick={() => void deletePersonalPdf(folder, file.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap cursor-pointer"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                       Excluir
@@ -492,8 +951,9 @@ export const PersonalPdfsPage: React.FC = () => {
                 );
               })}
             </div>
+            )
           ) : (
-            <EmptyState message="Esta pasta ainda não possui PDFs salvos." />
+            <EmptyState message="Nenhum PDF encontrado para este filtro ou pasta." />
           )}
         </Panel>
       ) : (

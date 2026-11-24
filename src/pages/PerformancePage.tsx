@@ -7,6 +7,7 @@ import {
   CalendarDays,
   CheckCircle2,
   ChevronDown,
+  ClipboardCheck,
   Clock,
   FileSpreadsheet,
   FileText,
@@ -15,6 +16,7 @@ import {
   Search,
   Timer,
   Trash2,
+  X,
   XCircle,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
@@ -24,11 +26,16 @@ import {
   formatScheduleDuration,
   inferFixedSubjectFromTopic,
   localDateIso,
+  normalizeSearch,
   scheduleDurationSeconds,
   visibleName,
 } from '../lib/parsers';
 import { captureD3ChartsFromContainer } from '../lib/d3SvgCapture';
-import { exportPerformanceReportPdf } from '../lib/pdfExport';
+import {
+  PerformancePdfExamContext,
+  PerformancePdfExamQuestionRow,
+  exportPerformanceReportPdf,
+} from '../lib/pdfExport';
 import {
   CsvDelimiter,
   PerformanceCsvDataset,
@@ -48,6 +55,13 @@ import {
   SubjectAccuracyEvolutionD3Chart,
   WeeklyStudyHoursD3Chart,
 } from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
+import {
+  ExamBlockPacingPoint,
+  ExamErrorTypeBreakdownRow,
+  ExamOutcomeAndPacingD3Chart,
+  ExamSubjectBreakdownD3Chart,
+  ExamSubjectBreakdownRow,
+} from '../components/charts/ExamPerformanceD3Panels';
 import { computeCareerSummary } from '../lib/careerGamification';
 
 type TimeRangePreset = 'today' | '7d' | '14d' | '30d' | 'all' | 'custom';
@@ -276,8 +290,489 @@ export const PerformancePage: React.FC = () => {
 
   const careerSummary = useMemo(() => computeCareerSummary(db), [db]);
 
+  const [selectedExamKey, setSelectedExamKey] = useState<string>('ALL');
   const [subjectFilter, setSubjectFilter] = useState('Todas');
   const [historySearch, setHistorySearch] = useState('');
+
+  // Unified list of available exams (Simulados Fechados + Provas da Biblioteca com correções)
+  const examSelectorGroups = useMemo(() => {
+    const simItems = [...db.completedSimulations]
+      .sort((a, b) => (b.criado_em || b.data || '').localeCompare(a.criado_em || a.data || ''))
+      .map((sim) => ({
+        key: `sim:${sim.id}`,
+        kind: 'simulado' as const,
+        id: sim.id,
+        title: visibleName(sim.titulo || sim.arquivo || 'Simulado Fechado'),
+        banca: sim.banca?.trim() || '',
+        data: sim.data || (sim.criado_em ? formatIsoToBr(sim.criado_em.slice(0, 10)) : ''),
+        aproveitamento: sim.aproveitamento,
+        acertos: sim.acertos,
+        total: sim.total || sim.questoes.length || sim.acertos + sim.erros,
+      }));
+
+    const proofMap = new Map<
+      string,
+      {
+        key: string;
+        kind: 'prova_biblioteca';
+        title: string;
+        banca: string;
+        count: number;
+      }
+    >();
+
+    (db.proofFiles || []).forEach((pf) => {
+      const count = (pf.correcoes || []).length;
+      if (count <= 0) return;
+      const cleanTitle = visibleName(pf.name || 'Prova');
+      const normKey = normalizeSearch(cleanTitle);
+      if (!normKey) return;
+      proofMap.set(normKey, {
+        key: `proof:${normKey}`,
+        kind: 'prova_biblioteca',
+        title: cleanTitle,
+        banca: pf.bank?.trim() || '',
+        count,
+      });
+    });
+
+    (db.annotations || []).forEach((ann) => {
+      if (!ann.correcao_prova || !ann.arquivo_prova?.trim()) return;
+      const cleanTitle = visibleName(ann.arquivo_prova);
+      const normKey = normalizeSearch(cleanTitle);
+      if (!normKey) return;
+      const existing = proofMap.get(normKey);
+      if (existing) {
+        if (!existing.banca && ann.banca?.trim()) existing.banca = ann.banca.trim();
+      } else {
+        proofMap.set(normKey, {
+          key: `proof:${normKey}`,
+          kind: 'prova_biblioteca',
+          title: cleanTitle,
+          banca: ann.banca?.trim() || '',
+          count: 1,
+        });
+      }
+    });
+
+    const proofItems = [...proofMap.values()].sort((a, b) => a.title.localeCompare(b.title, 'pt-BR'));
+
+    return { simItems, proofItems };
+  }, [db.completedSimulations, db.proofFiles, db.annotations]);
+
+  // Reset exam filter if selected exam no longer exists
+  useEffect(() => {
+    if (selectedExamKey === 'ALL') return;
+    const exists =
+      examSelectorGroups.simItems.some((i) => i.key === selectedExamKey) ||
+      examSelectorGroups.proofItems.some((i) => i.key === selectedExamKey);
+    if (!exists) setSelectedExamKey('ALL');
+  }, [selectedExamKey, examSelectorGroups]);
+
+  // Detailed exam-scoped analytics when a specific exam is selected
+  const selectedExamAnalysis = useMemo(() => {
+    if (selectedExamKey === 'ALL') return null;
+
+    const resolveExamSubject = (rawSubject: string | undefined, examTitle: string): string => {
+      const cleaned = visibleName(rawSubject || '').trim();
+      if (!cleaned) return 'Sem matéria associada';
+      const normClean = normalizeSearch(cleaned);
+      const normExam = normalizeSearch(visibleName(examTitle));
+      if (
+        normClean === 'geral' ||
+        normClean === 'sem materia' ||
+        normClean === 'sem materia associada' ||
+        normClean === 'simulado fechado' ||
+        (normExam && normClean === normExam)
+      ) {
+        return 'Sem matéria associada';
+      }
+      const inferred = inferFixedSubjectFromTopic({ materia: cleaned }, fixedSubjects);
+      return inferred || cleaned;
+    };
+
+    if (selectedExamKey.startsWith('sim:')) {
+      const simId = selectedExamKey.slice(4);
+      const sim = db.completedSimulations.find((s) => s.id === simId);
+      if (!sim) return null;
+
+      const examTitle = visibleName(sim.titulo || sim.arquivo || 'Simulado Fechado');
+
+      // Cross-reference error notebook entries for this simulation so subject overrides are always reflected
+      const overrideByNum = new Map<number, string>();
+      const overrideByEnunciado = new Map<string, string>();
+      (db.annotations || []).forEach((ann) => {
+        const matchesSim =
+          ann.simulado_id === sim.id ||
+          ann.id.startsWith(`sim-err-${sim.id}-`) ||
+          (ann.simulado_titulo &&
+            normalizeSearch(visibleName(ann.simulado_titulo)) === normalizeSearch(examTitle));
+        if (!matchesSim || !ann.materia?.trim()) return;
+        if (typeof ann.simulado_questao_numero === 'number') {
+          overrideByNum.set(ann.simulado_questao_numero, ann.materia);
+        }
+        const enunKey = normalizeSearch(ann.questao?.enunciado || '').slice(0, 80);
+        if (enunKey.length >= 20) {
+          overrideByEnunciado.set(enunKey, ann.materia);
+        }
+      });
+
+      const subjMap = new Map<
+        string,
+        { subject: string; total: number; correct: number; wrong: number; blank: number; timeSec: number }
+      >();
+      const missedQuestions: PerformancePdfExamQuestionRow[] = [];
+
+      const questions = sim.questoes || [];
+      questions.forEach((q, idx) => {
+        const num = q.numero ?? idx + 1;
+        const enunKey = normalizeSearch(q.enunciado || '').slice(0, 80);
+        const rawSubj =
+          overrideByNum.get(num) ||
+          (enunKey.length >= 20 ? overrideByEnunciado.get(enunKey) : undefined) ||
+          q.materia;
+        const subject = resolveExamSubject(rawSubj, examTitle);
+
+        const cur = subjMap.get(subject) || {
+          subject,
+          total: 0,
+          correct: 0,
+          wrong: 0,
+          blank: 0,
+          timeSec: 0,
+        };
+        cur.total += 1;
+        cur.timeSec += q.tempo_segundos || 0;
+
+        const isBlank = !q.resposta || !q.resposta.trim();
+        if (q.correta) {
+          cur.correct += 1;
+        } else if (isBlank) {
+          cur.blank += 1;
+          missedQuestions.push({
+            numero: num,
+            subject,
+            resposta: 'Em branco',
+            gabarito: q.gabarito || '-',
+            status: 'Em branco',
+            resumo: q.enunciado,
+          });
+        } else {
+          cur.wrong += 1;
+          missedQuestions.push({
+            numero: num,
+            subject,
+            resposta: q.resposta,
+            gabarito: q.gabarito || '-',
+            status: 'Erro',
+            resumo: q.enunciado,
+          });
+        }
+        subjMap.set(subject, cur);
+      });
+
+      // Fallback if simulation had no detailed questoes array
+      if (questions.length === 0) {
+        const fallbackSubj = resolveExamSubject(sim.materia, examTitle);
+        const total = sim.total || sim.acertos + sim.erros + (sim.em_branco || 0);
+        subjMap.set(fallbackSubj, {
+          subject: fallbackSubj,
+          total,
+          correct: sim.acertos,
+          wrong: sim.erros,
+          blank: sim.em_branco || 0,
+          timeSec: sim.tempo_segundos || 0,
+        });
+      }
+
+      const subjectBreakdown: ExamSubjectBreakdownRow[] = [...subjMap.values()]
+        .map((item) => ({
+          subject: item.subject,
+          total: item.total,
+          correct: item.correct,
+          wrong: item.wrong,
+          blank: item.blank,
+          accuracyPct: item.total > 0 ? Math.round((item.correct / item.total) * 100) : 0,
+        }))
+        .sort((a, b) => b.total - a.total || (a.accuracyPct ?? 0) - (b.accuracyPct ?? 0));
+
+      const filteredSubjectBreakdown =
+        subjectFilter === 'Todas'
+          ? subjectBreakdown
+          : subjectBreakdown.filter((r) => r.subject === subjectFilter);
+
+      const effectiveBreakdown =
+        filteredSubjectBreakdown.length > 0 ? filteredSubjectBreakdown : subjectBreakdown;
+
+      const subjectAnalytics: SubjectAnalyticsDatum[] = [...subjMap.values()].map((item) => ({
+        subject: item.subject,
+        answered: item.total,
+        correct: item.correct,
+        wrong: item.wrong + item.blank,
+        accuracyPct: item.total > 0 ? Math.round((item.correct / item.total) * 100) : null,
+        studySeconds: item.timeSec,
+        sparkline: [],
+        trendDelta: null,
+      }));
+
+      // Partition questions into sequential blocks (4 to 8 blocks) for pacing chart
+      const blockPacing: ExamBlockPacingPoint[] = [];
+      if (questions.length >= 4) {
+        const targetBlocks = Math.min(8, Math.max(4, Math.ceil(questions.length / 10)));
+        const blockSize = Math.ceil(questions.length / targetBlocks);
+        for (let start = 0; start < questions.length; start += blockSize) {
+          const slice = questions.slice(start, start + blockSize);
+          if (!slice.length) continue;
+          const firstNum = slice[0].numero ?? start + 1;
+          const lastNum = slice[slice.length - 1].numero ?? start + slice.length;
+          const cor = slice.filter((q) => q.correta).length;
+          const blk = slice.filter((q) => !q.correta && (!q.resposta || !q.resposta.trim())).length;
+          const wrg = slice.length - cor - blk;
+          blockPacing.push({
+            label: `Q${firstNum}-${lastNum}`,
+            rangeLabel: `Questões ${firstNum} a ${lastNum}`,
+            total: slice.length,
+            correct: cor,
+            wrong: wrg,
+            blank: blk,
+            accuracyPct: Math.round((cor / slice.length) * 100),
+          });
+        }
+      }
+
+      const totalQ = sim.total || questions.length || sim.acertos + sim.erros + (sim.em_branco || 0);
+      const blankCount =
+        typeof sim.em_branco === 'number'
+          ? sim.em_branco
+          : questions.filter((q) => !q.correta && (!q.resposta || !q.resposta.trim())).length;
+      const wrongCount = Math.max(0, totalQ - sim.acertos - blankCount);
+      const avgSecPerQ =
+        sim.tempo_segundos > 0 && totalQ > 0 ? Math.round(sim.tempo_segundos / totalQ) : 0;
+      const avgTimeFormatted =
+        avgSecPerQ > 0
+          ? avgSecPerQ >= 60
+            ? `${Math.floor(avgSecPerQ / 60)}m ${String(avgSecPerQ % 60).padStart(2, '0')}s`
+            : `${avgSecPerQ}s`
+          : undefined;
+      const examDateStr = sim.data || (sim.criado_em ? formatIsoToBr(sim.criado_em.slice(0, 10)) : '');
+
+      const examContext: PerformancePdfExamContext = {
+        title: examTitle,
+        kind: 'simulado',
+        banca: sim.banca?.trim() || 'Geral / Não informada',
+        data: examDateStr,
+        tempoFormatted: sim.tempo_segundos > 0 ? formatClock(sim.tempo_segundos) : undefined,
+        avgTimePerQuestionFormatted: avgTimeFormatted,
+        pontosLiquidos: sim.pontos_liquidos,
+        emBranco: blankCount,
+        subjectDetailRows: effectiveBreakdown,
+        missedQuestions:
+          subjectFilter === 'Todas'
+            ? missedQuestions
+            : missedQuestions.filter((q) => q.subject === subjectFilter),
+      };
+
+      return {
+        key: selectedExamKey,
+        kind: 'simulado' as const,
+        title: examTitle,
+        banca: sim.banca?.trim() || 'Geral / Não informada',
+        data: examDateStr,
+        total: totalQ,
+        correct: sim.acertos,
+        wrong: wrongCount,
+        blank: blankCount,
+        accuracyPct: sim.aproveitamento,
+        tempoSegundos: sim.tempo_segundos || 0,
+        avgTimeFormatted,
+        pontosLiquidos: sim.pontos_liquidos,
+        subjectBreakdown: effectiveBreakdown,
+        allExamSubjectBreakdown: subjectBreakdown,
+        subjectAnalytics,
+        blockPacing,
+        errorTypeBreakdown: [] as ExamErrorTypeBreakdownRow[],
+        examContext,
+      };
+    }
+
+    if (selectedExamKey.startsWith('proof:')) {
+      const normProofKey = selectedExamKey.slice(6);
+      const matchingProof = (db.proofFiles || []).find(
+        (pf) => normalizeSearch(visibleName(pf.name || '')) === normProofKey,
+      );
+
+      const itemMap = new Map<
+        string,
+        {
+          id: string;
+          subject: string;
+          type: string;
+          corrected: boolean;
+          questionLabel: string;
+          summary: string;
+        }
+      >();
+
+      const examTitle = matchingProof
+        ? visibleName(matchingProof.name)
+        : visibleName(
+            (db.annotations || []).find(
+              (a) => a.correcao_prova && normalizeSearch(visibleName(a.arquivo_prova || '')) === normProofKey,
+            )?.arquivo_prova || 'Prova da Biblioteca',
+          );
+      let banca = matchingProof?.bank?.trim() || '';
+
+      (matchingProof?.correcoes || []).forEach((c) => {
+        const subject = resolveExamSubject(c.materia, examTitle);
+        itemMap.set(c.id, {
+          id: c.id,
+          subject,
+          type: c.tipo?.trim() || 'Erro de Prova',
+          corrected: Boolean(c.corrigido),
+          questionLabel: c.questao || '',
+          summary: (c.texto || c.observacoes || '').trim(),
+        });
+      });
+
+      (db.annotations || []).forEach((ann) => {
+        if (!ann.correcao_prova || !ann.arquivo_prova) return;
+        if (normalizeSearch(visibleName(ann.arquivo_prova)) !== normProofKey) return;
+        if (!banca && ann.banca?.trim()) banca = ann.banca.trim();
+        const dedupeKey = ann.correcao_id || ann.id;
+        const subject = resolveExamSubject(ann.materia, examTitle);
+        itemMap.set(dedupeKey, {
+          id: dedupeKey,
+          subject,
+          type: ann.tipo?.trim() || 'Erro de Prova',
+          corrected: Boolean(ann.corrigido),
+          questionLabel: ann.questao?.enunciado?.slice(0, 60) || '',
+          summary: (ann.texto || ann.questao?.enunciado || '').trim(),
+        });
+      });
+
+      const items = [...itemMap.values()];
+      if (items.length === 0) return null;
+
+      const subjMap = new Map<
+        string,
+        { subject: string; total: number; corrected: number; pending: number }
+      >();
+      const typeMap = new Map<
+        string,
+        { type: string; count: number; pending: number; corrected: number }
+      >();
+      const missedQuestions: PerformancePdfExamQuestionRow[] = [];
+
+      items.forEach((it) => {
+        const s = subjMap.get(it.subject) || {
+          subject: it.subject,
+          total: 0,
+          corrected: 0,
+          pending: 0,
+        };
+        s.total += 1;
+        if (it.corrected) s.corrected += 1;
+        else s.pending += 1;
+        subjMap.set(it.subject, s);
+
+        const t = typeMap.get(it.type) || { type: it.type, count: 0, pending: 0, corrected: 0 };
+        t.count += 1;
+        if (it.corrected) t.corrected += 1;
+        else t.pending += 1;
+        typeMap.set(it.type, t);
+
+        const numMatch = it.questionLabel.match(/\d+/);
+        missedQuestions.push({
+          numero: numMatch ? Number(numMatch[0]) : undefined,
+          subject: it.subject,
+          status: it.corrected ? 'Corrigido' : 'Pendente',
+          resumo: it.summary || it.questionLabel,
+        });
+      });
+
+      const total = items.length;
+      const correctedCount = items.filter((i) => i.corrected).length;
+      const pendingCount = total - correctedCount;
+      const progressPct = total > 0 ? Math.round((correctedCount / total) * 100) : 0;
+
+      const subjectBreakdown: ExamSubjectBreakdownRow[] = [...subjMap.values()]
+        .map((s) => ({
+          subject: s.subject,
+          total: s.total,
+          correct: s.corrected,
+          wrong: s.pending,
+          blank: 0,
+          accuracyPct: s.total > 0 ? Math.round((s.corrected / s.total) * 100) : 0,
+          corrected: s.corrected,
+          pending: s.pending,
+        }))
+        .sort((a, b) => b.total - a.total);
+
+      const filteredSubjectBreakdown =
+        subjectFilter === 'Todas'
+          ? subjectBreakdown
+          : subjectBreakdown.filter((r) => r.subject === subjectFilter);
+      const effectiveBreakdown =
+        filteredSubjectBreakdown.length > 0 ? filteredSubjectBreakdown : subjectBreakdown;
+
+      const subjectAnalytics: SubjectAnalyticsDatum[] = subjectBreakdown.map((s) => ({
+        subject: s.subject,
+        answered: s.total,
+        correct: s.corrected ?? 0,
+        wrong: s.pending ?? 0,
+        accuracyPct: s.accuracyPct,
+        studySeconds: 0,
+        sparkline: [],
+        trendDelta: null,
+      }));
+
+      const errorTypeBreakdown: ExamErrorTypeBreakdownRow[] = [...typeMap.values()].sort(
+        (a, b) => b.count - a.count,
+      );
+
+      const examDateStr = matchingProof?.createdAt
+        ? formatIsoToBr(matchingProof.createdAt.slice(0, 10))
+        : '';
+
+      const examContext: PerformancePdfExamContext = {
+        title: examTitle,
+        kind: 'prova_biblioteca',
+        banca: banca || 'Geral / Não informada',
+        data: examDateStr,
+        pendingCorrections: pendingCount,
+        correctedCount,
+        subjectDetailRows: effectiveBreakdown,
+        missedQuestions:
+          subjectFilter === 'Todas'
+            ? missedQuestions
+            : missedQuestions.filter((q) => q.subject === subjectFilter),
+      };
+
+      return {
+        key: selectedExamKey,
+        kind: 'prova_biblioteca' as const,
+        title: examTitle,
+        banca: banca || 'Geral / Não informada',
+        data: examDateStr,
+        total,
+        correct: correctedCount,
+        wrong: pendingCount,
+        blank: 0,
+        accuracyPct: progressPct,
+        tempoSegundos: 0,
+        avgTimeFormatted: undefined,
+        pontosLiquidos: undefined,
+        subjectBreakdown: effectiveBreakdown,
+        allExamSubjectBreakdown: subjectBreakdown,
+        subjectAnalytics,
+        blockPacing: [] as ExamBlockPacingPoint[],
+        errorTypeBreakdown,
+        examContext,
+      };
+    }
+
+    return null;
+  }, [selectedExamKey, db.completedSimulations, db.annotations, db.proofFiles, fixedSubjects, subjectFilter]);
 
   // Filters for Study Time tracking by days, fixed subjects, and target contest
   const todayIso = localDateIso();
@@ -809,51 +1304,94 @@ export const PerformancePage: React.FC = () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
     try {
-      const filterDescParts = [
-        `Período tempo: ${periodLabel}`,
-        `Dia: ${weekdayFilter}`,
-        `Matéria Fixa: ${timeSubjectFilter === 'Todas' ? 'Todas' : visibleName(timeSubjectFilter)}`,
-      ];
-      if (timeContestFilter !== 'Todos') {
-        filterDescParts.push(`Concurso: ${timeContestFilter}`);
-      }
-      if (subjectFilter !== 'Todas') {
-        filterDescParts.push(`Disciplina desempenho: ${visibleName(subjectFilter)}`);
-      }
-      if (historySearch.trim()) {
-        filterDescParts.push(`Busca: "${historySearch.trim()}"`);
-      }
-
       const capturedCharts = await captureD3ChartsFromContainer(d3ChartsContainerRef.current);
 
-      exportPerformanceReportPdf({
-        totalAnswered,
-        totalCorrect,
-        totalWrong,
-        accuracy,
-        totalStudyFormatted: formatClock(totalStudySeconds),
-        completedSimulationsCount,
-        subjectRows,
-        bankRows,
-        recentSimulations: db.completedSimulations,
-        formatDuration: formatClock,
-        filterDescription: filterDescParts.join(' · '),
-        holderName: googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
-        charts: capturedCharts,
-        filteredStudySummary: {
-          totalFormatted: formatClock(filteredStudyStats.totalSec),
-          avgFormatted: formatClock(filteredStudyStats.avgSec),
-          activeDays: filteredStudyStats.activeDays,
-          sessionsCount: filteredStudyStats.sessionsCount,
-        },
-        filteredStudyByDate: filteredStudyStats.byDate,
-        dailySeries,
-      });
-      toast(
-        capturedCharts.length > 0
-          ? `Relatório oficial Gov.br em PDF gerado com ${capturedCharts.length} gráfico(s) D3!`
-          : 'Relatório oficial de desempenho em PDF gerado.',
-      );
+      if (selectedExamAnalysis) {
+        const examFilterParts = [
+          `Prova selecionada: ${selectedExamAnalysis.title}`,
+          `Banca: ${selectedExamAnalysis.banca}`,
+        ];
+        if (selectedExamAnalysis.data) {
+          examFilterParts.push(`Data: ${selectedExamAnalysis.data}`);
+        }
+        if (subjectFilter !== 'Todas') {
+          examFilterParts.push(`Matéria filtrada: ${visibleName(subjectFilter)}`);
+        }
+
+        const fileName = exportPerformanceReportPdf({
+          totalAnswered: selectedExamAnalysis.total,
+          totalCorrect: selectedExamAnalysis.correct,
+          totalWrong: selectedExamAnalysis.wrong,
+          accuracy: selectedExamAnalysis.accuracyPct,
+          totalStudyFormatted: selectedExamAnalysis.tempoSegundos
+            ? formatClock(selectedExamAnalysis.tempoSegundos)
+            : '—',
+          completedSimulationsCount: 1,
+          subjectRows: selectedExamAnalysis.subjectBreakdown.map((s) => ({
+            subject: s.subject,
+            answered: s.total,
+            correct: s.correct,
+            studySeconds: 0,
+          })),
+          bankRows: [],
+          recentSimulations: [],
+          formatDuration: formatClock,
+          filterDescription: examFilterParts.join(' · '),
+          holderName: googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
+          charts: capturedCharts,
+          examContext: selectedExamAnalysis.examContext,
+        });
+        toast(
+          capturedCharts.length > 0
+            ? `PDF oficial da prova gerado (${capturedCharts.length} gráfico(s)): ${fileName}`
+            : `PDF oficial da prova gerado: ${fileName}`,
+        );
+      } else {
+        const filterDescParts = [
+          `Escopo: Todas as provas e histórico geral`,
+          `Período tempo: ${periodLabel}`,
+          `Dia: ${weekdayFilter}`,
+          `Matéria Fixa: ${timeSubjectFilter === 'Todas' ? 'Todas' : visibleName(timeSubjectFilter)}`,
+        ];
+        if (timeContestFilter !== 'Todos') {
+          filterDescParts.push(`Concurso: ${timeContestFilter}`);
+        }
+        if (subjectFilter !== 'Todas') {
+          filterDescParts.push(`Disciplina desempenho: ${visibleName(subjectFilter)}`);
+        }
+        if (historySearch.trim()) {
+          filterDescParts.push(`Busca: "${historySearch.trim()}"`);
+        }
+
+        const fileName = exportPerformanceReportPdf({
+          totalAnswered,
+          totalCorrect,
+          totalWrong,
+          accuracy,
+          totalStudyFormatted: formatClock(totalStudySeconds),
+          completedSimulationsCount,
+          subjectRows,
+          bankRows,
+          recentSimulations: db.completedSimulations,
+          formatDuration: formatClock,
+          filterDescription: filterDescParts.join(' · '),
+          holderName: googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
+          charts: capturedCharts,
+          filteredStudySummary: {
+            totalFormatted: formatClock(filteredStudyStats.totalSec),
+            avgFormatted: formatClock(filteredStudyStats.avgSec),
+            activeDays: filteredStudyStats.activeDays,
+            sessionsCount: filteredStudyStats.sessionsCount,
+          },
+          filteredStudyByDate: filteredStudyStats.byDate,
+          dailySeries,
+        });
+        toast(
+          capturedCharts.length > 0
+            ? `Relatório oficial em PDF gerado com ${capturedCharts.length} gráfico(s): ${fileName}`
+            : `Relatório oficial de desempenho em PDF gerado: ${fileName}`,
+        );
+      }
     } catch (err) {
       toast((err as Error).message || 'Falha ao gerar o relatório oficial em PDF.', true);
     } finally {
@@ -1066,7 +1604,11 @@ export const PerformancePage: React.FC = () => {
               type="button"
               onClick={() => void handleExportPdf()}
               disabled={isExportingPdf}
-              title="Gerar relatório governamental oficial em PDF incluindo os gráficos D3 atuais"
+              title={
+                selectedExamAnalysis
+                  ? `Gerar PDF oficial com os gráficos filtrados da prova "${selectedExamAnalysis.title}"`
+                  : 'Gerar relatório governamental oficial em PDF incluindo os gráficos D3 atuais'
+              }
               className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[#071D41] bg-[#071D41] text-white text-[12px] font-bold hover:bg-[#0c2d64] disabled:opacity-60 whitespace-nowrap shadow-xs transition-colors cursor-pointer"
             >
               {isExportingPdf ? (
@@ -1074,11 +1616,135 @@ export const PerformancePage: React.FC = () => {
               ) : (
                 <FileText className="w-3.5 h-3.5 text-[#FFCD07]" />
               )}
-              {isExportingPdf ? 'Gerando Relatório…' : 'Exportar PDF Oficial'}
+              {isExportingPdf
+                ? 'Gerando Relatório…'
+                : selectedExamAnalysis
+                  ? 'Exportar PDF da Prova'
+                  : 'Exportar PDF Oficial'}
             </button>
           </div>
         }
       />
+
+      {/* Barra de Filtro por Prova / Simulado para Gráficos e Exportação Oficial em PDF */}
+      <section
+        aria-label="Filtro de prova do Monitor de Desempenho"
+        className="ce-panel rounded-xl px-4 py-3.5 mb-4"
+      >
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex flex-wrap items-center gap-2.5 min-w-0 flex-1">
+            <div className="w-9 h-9 rounded-lg border border-[var(--accent)]/35 bg-[var(--accent-soft)] grid place-items-center shrink-0">
+              <ClipboardCheck className="w-4.5 h-4.5 text-[var(--accent)]" aria-hidden="true" />
+            </div>
+            <div className="min-w-[200px] flex-1 max-w-[460px]">
+              <label
+                htmlFor="perf-exam-selector"
+                className="block text-[10.5px] font-extrabold uppercase tracking-[0.04em] text-[var(--muted)] mb-1"
+              >
+                Filtrar Gráficos e PDF Oficial por Prova / Simulado
+              </label>
+              <select
+                id="perf-exam-selector"
+                value={selectedExamKey}
+                onChange={(e) => {
+                  setSelectedExamKey(e.target.value);
+                  setSubjectFilter('Todas');
+                }}
+                className="ce-select w-full text-[12.5px] font-bold h-[36px] py-1"
+              >
+                <option value="ALL">Todas as Provas e Histórico Geral</option>
+                {examSelectorGroups.simItems.length > 0 && (
+                  <optgroup label={`Simulados Fechados Realizados (${examSelectorGroups.simItems.length})`}>
+                    {examSelectorGroups.simItems.map((sim) => (
+                      <option key={sim.key} value={sim.key}>
+                        {sim.title}
+                        {sim.banca ? ` · ${sim.banca}` : ''}
+                        {sim.data ? ` (${sim.data})` : ''} — {sim.aproveitamento}% ({sim.acertos}/{sim.total})
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+                {examSelectorGroups.proofItems.length > 0 && (
+                  <optgroup label={`Provas da Biblioteca com Correções (${examSelectorGroups.proofItems.length})`}>
+                    {examSelectorGroups.proofItems.map((pf) => (
+                      <option key={pf.key} value={pf.key}>
+                        {pf.title}
+                        {pf.banca ? ` · ${pf.banca}` : ''} — {pf.count} registro(s)
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {selectedExamAnalysis && (
+              <>
+                {subjectFilter !== 'Todas' && (
+                  <button
+                    type="button"
+                    onClick={() => setSubjectFilter('Todas')}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] text-[11.5px] font-bold hover:opacity-90 cursor-pointer"
+                  >
+                    <span>Matéria: {visibleName(subjectFilter)}</span>
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedExamKey('ALL');
+                    setSubjectFilter('Todas');
+                  }}
+                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[11.5px] font-bold hover:border-[var(--accent)] cursor-pointer"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Histórico Geral
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleExportPdf()}
+                  disabled={isExportingPdf}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[#071D41] bg-[#071D41] text-white text-[11.5px] font-bold hover:bg-[#0c2d64] disabled:opacity-60 cursor-pointer"
+                >
+                  {isExportingPdf ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#FFCD07]" />
+                  ) : (
+                    <FileText className="w-3.5 h-3.5 text-[#FFCD07]" />
+                  )}
+                  Exportar PDF desta Prova
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {selectedExamAnalysis && (
+          <div className="mt-3 pt-2.5 border-t border-[var(--line)] flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[11.5px] text-[var(--muted)]">
+            <span>
+              <strong className="text-[var(--text)]">Prova ativa:</strong> {selectedExamAnalysis.title}
+            </span>
+            <span>
+              <strong className="text-[var(--text)]">Banca:</strong> {selectedExamAnalysis.banca}
+            </span>
+            {selectedExamAnalysis.data && (
+              <span>
+                <strong className="text-[var(--text)]">Data:</strong> {selectedExamAnalysis.data}
+              </span>
+            )}
+            <span>
+              <strong className="text-[var(--text)]">Matérias:</strong>{' '}
+              {selectedExamAnalysis.allExamSubjectBreakdown.length}
+            </span>
+            {typeof selectedExamAnalysis.pontosLiquidos === 'number' && (
+              <span className="font-mono-num font-bold text-[var(--accent)]">
+                Pontos líquidos: {selectedExamAnalysis.pontosLiquidos}
+              </span>
+            )}
+          </div>
+        )}
+      </section>
 
       {uncountedCompletedSummary.count > 0 && (
         <div className="mb-4 rounded-xl border border-[var(--accent)]/45 bg-[var(--accent-soft)] px-4 py-3 flex flex-wrap items-center justify-between gap-3">
@@ -1155,115 +1821,305 @@ export const PerformancePage: React.FC = () => {
       </section>
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Questões respondidas</div>
-          <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
-            {totalAnswered.toLocaleString('pt-BR')}
-          </div>
-          <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
-            {totalCorrect} acertos · {totalWrong} erros
-          </div>
-        </article>
+        {selectedExamAnalysis ? (
+          selectedExamAnalysis.kind === 'simulado' ? (
+            <>
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Questões na prova</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                  {selectedExamAnalysis.total.toLocaleString('pt-BR')}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
+                  {selectedExamAnalysis.correct} acertos · {selectedExamAnalysis.wrong} erros
+                  {selectedExamAnalysis.blank > 0 ? ` · ${selectedExamAnalysis.blank} em branco` : ''}
+                </div>
+              </article>
 
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Aproveitamento geral</div>
-          <div className="font-mono-num text-[27px] font-extrabold text-[var(--good)] mt-1">
-            {accuracy}%
-          </div>
-          <div className="text-[11.5px] text-[var(--subtle)] mt-1">Média ponderada do histórico</div>
-        </article>
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Aproveitamento da prova</div>
+                <div
+                  className={`font-mono-num text-[27px] font-extrabold mt-1 ${
+                    selectedExamAnalysis.accuracyPct >= 80
+                      ? 'text-[var(--good)]'
+                      : selectedExamAnalysis.accuracyPct >= 60
+                        ? 'text-[var(--accent)]'
+                        : 'text-[var(--bad)]'
+                  }`}
+                >
+                  {selectedExamAnalysis.accuracyPct}%
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1">
+                  {typeof selectedExamAnalysis.pontosLiquidos === 'number'
+                    ? `Pontos líquidos: ${selectedExamAnalysis.pontosLiquidos}`
+                    : selectedExamAnalysis.accuracyPct >= 80
+                      ? 'Acima da meta de 80%'
+                      : 'Meta institucional: 80%'}
+                </div>
+              </article>
 
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Simulados concluídos</div>
-          <div className="font-mono-num text-[27px] font-extrabold text-[var(--accent)] mt-1">
-            {completedSimulationsCount}
-          </div>
-          <div className="text-[11.5px] text-[var(--subtle)] mt-1">
-            <button
-              type="button"
-              onClick={() => setActivePage('Simulados Realizados')}
-              className="text-[var(--accent)] hover:underline cursor-pointer"
-            >
-              Ver Boletim de Ocorrências →
-            </button>
-          </div>
-        </article>
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Tempo da prova</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--accent)] mt-1">
+                  {selectedExamAnalysis.tempoSegundos > 0
+                    ? formatClock(selectedExamAnalysis.tempoSegundos)
+                    : '—'}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
+                  {selectedExamAnalysis.avgTimeFormatted
+                    ? `Média de ${selectedExamAnalysis.avgTimeFormatted} por questão`
+                    : 'Duração registrada no simulado'}
+                </div>
+              </article>
 
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Tempo total estudado</div>
-          <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
-            {formatClock(totalStudySeconds)}
-          </div>
-          <div className="text-[11.5px] text-[var(--subtle)] mt-1">
-            Consolidado por Matérias Fixas
-          </div>
-        </article>
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Matérias avaliadas</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                  {selectedExamAnalysis.allExamSubjectBreakdown.length}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 truncate">
+                  Banca: {selectedExamAnalysis.banca}
+                </div>
+              </article>
+            </>
+          ) : (
+            <>
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Registros na prova</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                  {selectedExamAnalysis.total.toLocaleString('pt-BR')}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
+                  Questões e anotações vinculadas
+                </div>
+              </article>
+
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Progresso de correção</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--good)] mt-1">
+                  {selectedExamAnalysis.accuracyPct}%
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
+                  {selectedExamAnalysis.correct} corrigida(s)
+                </div>
+              </article>
+
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Pendentes de revisão</div>
+                <div
+                  className={`font-mono-num text-[27px] font-extrabold mt-1 ${
+                    selectedExamAnalysis.wrong > 0 ? 'text-[var(--warning)]' : 'text-[var(--good)]'
+                  }`}
+                >
+                  {selectedExamAnalysis.wrong}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1">
+                  <button
+                    type="button"
+                    onClick={() => setActivePage('Caderno de Erros')}
+                    className="text-[var(--accent)] hover:underline cursor-pointer"
+                  >
+                    Abrir Caderno de Erros →
+                  </button>
+                </div>
+              </article>
+
+              <article className="ce-panel p-4">
+                <div className="text-[11px] font-semibold text-[var(--muted)]">Matérias associadas</div>
+                <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                  {selectedExamAnalysis.allExamSubjectBreakdown.length}
+                </div>
+                <div className="text-[11.5px] text-[var(--subtle)] mt-1 truncate">
+                  Banca: {selectedExamAnalysis.banca}
+                </div>
+              </article>
+            </>
+          )
+        ) : (
+          <>
+            <article className="ce-panel p-4">
+              <div className="text-[11px] font-semibold text-[var(--muted)]">Questões respondidas</div>
+              <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                {totalAnswered.toLocaleString('pt-BR')}
+              </div>
+              <div className="text-[11.5px] text-[var(--subtle)] mt-1 tabular-nums">
+                {totalCorrect} acertos · {totalWrong} erros
+              </div>
+            </article>
+
+            <article className="ce-panel p-4">
+              <div className="text-[11px] font-semibold text-[var(--muted)]">Aproveitamento geral</div>
+              <div className="font-mono-num text-[27px] font-extrabold text-[var(--good)] mt-1">
+                {accuracy}%
+              </div>
+              <div className="text-[11.5px] text-[var(--subtle)] mt-1">Média ponderada do histórico</div>
+            </article>
+
+            <article className="ce-panel p-4">
+              <div className="text-[11px] font-semibold text-[var(--muted)]">Simulados concluídos</div>
+              <div className="font-mono-num text-[27px] font-extrabold text-[var(--accent)] mt-1">
+                {completedSimulationsCount}
+              </div>
+              <div className="text-[11.5px] text-[var(--subtle)] mt-1">
+                <button
+                  type="button"
+                  onClick={() => setActivePage('Simulados Realizados')}
+                  className="text-[var(--accent)] hover:underline cursor-pointer"
+                >
+                  Ver Boletim de Ocorrências →
+                </button>
+              </div>
+            </article>
+
+            <article className="ce-panel p-4">
+              <div className="text-[11px] font-semibold text-[var(--muted)]">Tempo total estudado</div>
+              <div className="font-mono-num text-[27px] font-extrabold text-[var(--text)] mt-1">
+                {formatClock(totalStudySeconds)}
+              </div>
+              <div className="text-[11.5px] text-[var(--subtle)] mt-1">
+                Consolidado por Matérias Fixas
+              </div>
+            </article>
+          </>
+        )}
       </div>
 
-      {/* Painel Analítico Interativo com D3.js */}
+      {/* Painel Analítico Interativo com D3.js (Global ou Filtrado pela Prova Selecionada) */}
       <div ref={d3ChartsContainerRef}>
-        <div
-          data-d3-chart-card=""
-          data-d3-chart-title="Evolução Temporal & Tendência de Acerto"
-          data-d3-chart-subtitle="Volume diário de questões, taxa de acerto e média móvel de 7 dias frente à meta de 80%."
-        >
-          <PerformanceEvolutionD3Chart
-            db={db}
-            subjectFilter={subjectFilter}
-            fixedSubjects={fixedSubjects}
-          />
-        </div>
+        {selectedExamAnalysis ? (
+          <>
+            <div
+              data-d3-chart-card=""
+              data-d3-chart-title={
+                selectedExamAnalysis.kind === 'simulado'
+                  ? `Desempenho por Matéria na Prova · ${selectedExamAnalysis.title}`
+                  : `Distribuição de Erros e Revisões por Matéria · ${selectedExamAnalysis.title}`
+              }
+              data-d3-chart-subtitle={
+                selectedExamAnalysis.kind === 'simulado'
+                  ? `Acertos, erros e questões em branco por matéria frente à meta de 80% (${selectedExamAnalysis.banca}).`
+                  : `Progresso de correções e pendências por matéria nesta prova (${selectedExamAnalysis.banca}).`
+              }
+            >
+              <ExamSubjectBreakdownD3Chart
+                examTitle={selectedExamAnalysis.title}
+                mode={selectedExamAnalysis.kind}
+                rows={selectedExamAnalysis.subjectBreakdown}
+                selectedSubject={subjectFilter}
+                onSelectSubject={setSubjectFilter}
+              />
+            </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
-          <div
-            data-d3-chart-card=""
-            data-d3-chart-title="Evolução da Taxa de Acertos por Matéria (Semanal)"
-            data-d3-chart-subtitle="Comparativo semanal de aproveitamento percentual nas principais disciplinas ativas."
-          >
-            <SubjectAccuracyEvolutionD3Chart
-              db={db}
-              fixedSubjects={fixedSubjects}
-              selectedSubject={subjectFilter}
-              onSelectSubject={setSubjectFilter}
-            />
-          </div>
-          <div
-            data-d3-chart-card=""
-            data-d3-chart-title="Tempo de Estudo Semanal (Horas Líquidas)"
-            data-d3-chart-subtitle="Distribuição semanal de horas líquidas registradas no Ponto Eletrônico."
-          >
-            <WeeklyStudyHoursD3Chart
-              db={db}
-              fixedSubjects={fixedSubjects}
-              subjectFilter={subjectFilter}
-            />
-          </div>
-        </div>
+            <div
+              className={`grid grid-cols-1 ${
+                selectedExamAnalysis.kind === 'simulado' ? 'xl:grid-cols-2' : ''
+              } gap-3.5 mb-4`}
+            >
+              <div
+                data-d3-chart-card=""
+                data-d3-chart-title={
+                  selectedExamAnalysis.kind === 'simulado'
+                    ? `Balanço de Questões & Ritmo por Blocos · ${selectedExamAnalysis.title}`
+                    : `Progresso de Correção & Tipos de Anotação · ${selectedExamAnalysis.title}`
+                }
+                data-d3-chart-subtitle={
+                  selectedExamAnalysis.kind === 'simulado'
+                    ? 'Composição geral (acertos, erros, em branco) e estabilidade da taxa de acerto ao longo da prova.'
+                    : 'Percentual revisado e classificação dos pontos registrados nesta prova.'
+                }
+              >
+                <ExamOutcomeAndPacingD3Chart
+                  examTitle={selectedExamAnalysis.title}
+                  mode={selectedExamAnalysis.kind}
+                  correct={selectedExamAnalysis.correct}
+                  wrong={selectedExamAnalysis.wrong}
+                  blank={selectedExamAnalysis.blank}
+                  accuracyPct={selectedExamAnalysis.accuracyPct}
+                  blockPacing={selectedExamAnalysis.blockPacing}
+                  errorTypeBreakdown={selectedExamAnalysis.errorTypeBreakdown}
+                />
+              </div>
 
-        <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
-          <div
-            data-d3-chart-card=""
-            data-d3-chart-title="Mapa de Consistência Anual"
-            data-d3-chart-subtitle="Frequência diária e regularidade de estudos ao longo das últimas 52 semanas."
-          >
-            <ConsistencyCalendarHeatmap db={db} />
-          </div>
-          <div
-            data-d3-chart-card=""
-            data-d3-chart-title="Matriz de Esforço × Desempenho por Disciplina"
-            data-d3-chart-subtitle="Posicionamento estratégico entre volume resolvido e taxa de acerto por matéria."
-          >
-            <PriorityQuadrantD3Chart
-              rows={subjectAnalyticsRows}
-              selectedSubject={subjectFilter}
-              onSelectSubject={setSubjectFilter}
-            />
-          </div>
-        </div>
+              {selectedExamAnalysis.kind === 'simulado' && (
+                <div
+                  data-d3-chart-card=""
+                  data-d3-chart-title={`Quadrante de Prioridade da Prova · ${selectedExamAnalysis.title}`}
+                  data-d3-chart-subtitle="Posicionamento estratégico entre volume de questões e taxa de acerto por matéria nesta prova."
+                >
+                  <PriorityQuadrantD3Chart
+                    rows={selectedExamAnalysis.subjectAnalytics}
+                    selectedSubject={subjectFilter}
+                    onSelectSubject={setSubjectFilter}
+                  />
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <>
+            <div
+              data-d3-chart-card=""
+              data-d3-chart-title="Evolução Temporal & Tendência de Acerto"
+              data-d3-chart-subtitle="Volume diário de questões, taxa de acerto e média móvel de 7 dias frente à meta de 80%."
+            >
+              <PerformanceEvolutionD3Chart
+                db={db}
+                subjectFilter={subjectFilter}
+                fixedSubjects={fixedSubjects}
+              />
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+              <div
+                data-d3-chart-card=""
+                data-d3-chart-title="Evolução da Taxa de Acertos por Matéria (Semanal)"
+                data-d3-chart-subtitle="Comparativo semanal de aproveitamento percentual nas principais disciplinas ativas."
+              >
+                <SubjectAccuracyEvolutionD3Chart
+                  db={db}
+                  fixedSubjects={fixedSubjects}
+                  selectedSubject={subjectFilter}
+                  onSelectSubject={setSubjectFilter}
+                />
+              </div>
+              <div
+                data-d3-chart-card=""
+                data-d3-chart-title="Tempo de Estudo Semanal (Horas Líquidas)"
+                data-d3-chart-subtitle="Distribuição semanal de horas líquidas registradas no Ponto Eletrônico."
+              >
+                <WeeklyStudyHoursD3Chart
+                  db={db}
+                  fixedSubjects={fixedSubjects}
+                  subjectFilter={subjectFilter}
+                />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-1 xl:grid-cols-2 gap-3.5 mb-4">
+              <div
+                data-d3-chart-card=""
+                data-d3-chart-title="Mapa de Consistência Anual"
+                data-d3-chart-subtitle="Frequência diária e regularidade de estudos ao longo das últimas 52 semanas."
+              >
+                <ConsistencyCalendarHeatmap db={db} />
+              </div>
+              <div
+                data-d3-chart-card=""
+                data-d3-chart-title="Matriz de Esforço × Desempenho por Disciplina"
+                data-d3-chart-subtitle="Posicionamento estratégico entre volume resolvido e taxa de acerto por matéria."
+              >
+                <PriorityQuadrantD3Chart
+                  rows={subjectAnalyticsRows}
+                  selectedSubject={subjectFilter}
+                  onSelectSubject={setSubjectFilter}
+                />
+              </div>
+            </div>
+          </>
+        )}
       </div>
 
       <AnalyticalSubjectsD3Table
-        rows={subjectAnalyticsRows}
+        rows={selectedExamAnalysis ? selectedExamAnalysis.subjectAnalytics : subjectAnalyticsRows}
         selectedSubject={subjectFilter}
         onSelectSubject={setSubjectFilter}
       />

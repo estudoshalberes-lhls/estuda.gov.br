@@ -17,6 +17,8 @@ import {
   Download,
   ExternalLink,
   Eye,
+  FileSpreadsheet,
+  FileText,
   Layers,
   Pencil,
   Play,
@@ -31,6 +33,7 @@ import {
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
 import {
+  cleanSafeName,
   inferFixedSubjectFromTopic,
   localDateIso,
   normalizeSearch,
@@ -40,7 +43,11 @@ import {
   formatCorrectionTextStructured,
   insertFormattedPaste,
 } from '../lib/legalTextFormatter';
-import { exportErrorNotebookPdf } from '../lib/pdfExport';
+import {
+  ExamErrorStatsPdfSection,
+  exportErrorNotebookPdf,
+  exportExamSubjectErrorStatsPdf,
+} from '../lib/pdfExport';
 import { clearFieldDraft, readFieldDraft, writeFieldDraft } from '../lib/draftStorage';
 import { CompletedSimulation, ErrorNotebookEntry, ModuleName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
@@ -973,6 +980,27 @@ export const ErrorNotebookPage: React.FC = () => {
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_VISIBLE_ENTRIES);
   const [flashcardMode, setFlashcardMode] = useState(false);
+  const [statsExportOpen, setStatsExportOpen] = useState(false);
+  const [statsExportTarget, setStatsExportTarget] = useState<string>('auto');
+  const statsExportMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!statsExportOpen) return;
+    const onPointerDown = (e: MouseEvent) => {
+      if (statsExportMenuRef.current && !statsExportMenuRef.current.contains(e.target as Node)) {
+        setStatsExportOpen(false);
+      }
+    };
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setStatsExportOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [statsExportOpen]);
   const [flashcardIndex, setFlashcardIndex] = useState(0);
   const [flashcardRevealed, setFlashcardRevealed] = useState(false);
 
@@ -2155,6 +2183,335 @@ export const ErrorNotebookPage: React.FC = () => {
     }
   };
 
+  // Build per-exam subject error statistics sections for PDF/CSV export
+  const buildExamErrorStatsExportPayload = useCallback(
+    (targetKey: string): {
+      scopeTitle: string;
+      subtitle: string;
+      fileNameSlug: string;
+      sections: ExamErrorStatsPdfSection[];
+    } => {
+      const effectiveTarget =
+        targetKey === 'auto'
+          ? isExamStatsMode && activeSelectedExam
+            ? activeSelectedExam.key
+            : simulationDirectory.exams.length > 0
+              ? 'all_exams'
+              : 'global'
+          : targetKey;
+
+      const buildSingleExamSection = (examKey: string): ExamErrorStatsPdfSection | null => {
+        const examInfo = simulationDirectory.exams.find((ex) => ex.key === examKey);
+        if (!examInfo) return null;
+
+        const scopedEntries = allErrorEntries.filter((entry) => {
+          if (!isExamEntry(entry)) return false;
+          return resolveSimulationExamMeta(entry, db.completedSimulations).key === examKey;
+        });
+
+        type Acc = {
+          subject: string;
+          notebookTotal: number;
+          notebookErrors: number;
+          pendingCount: number;
+          correctedCount: number;
+          answeredQuestions: number;
+          wrongQuestions: number;
+        };
+        const map = new Map<string, Acc>();
+        const ensureKey = (key: string): Acc => {
+          const norm = normalizeSearch(key);
+          const found = [...map.values()].find((r) => normalizeSearch(r.subject) === norm);
+          if (found) return found;
+          const created: Acc = {
+            subject: key,
+            notebookTotal: 0,
+            notebookErrors: 0,
+            pendingCount: 0,
+            correctedCount: 0,
+            answeredQuestions: 0,
+            wrongQuestions: 0,
+          };
+          map.set(key, created);
+          return created;
+        };
+
+        const entrySubjectBySimQ = new Map<string, string>();
+        let detectedBanca = examInfo.completedSim?.banca?.trim() || '';
+
+        scopedEntries.forEach((entry) => {
+          if (!detectedBanca && entry.banca?.trim()) detectedBanca = entry.banca.trim();
+          const subjKey = resolveExamSubjectLabel(
+            entry.materia,
+            examInfo.label,
+            examInfo.completedSim,
+          );
+          const row = ensureKey(subjKey);
+          row.notebookTotal += 1;
+          if (entry.questao || entry.correcao_prova || entry.tipo.includes('Erro')) {
+            row.notebookErrors += 1;
+          }
+          if (entry.corrigido) row.correctedCount += 1;
+          else row.pendingCount += 1;
+
+          if (examInfo.completedSim) {
+            const prefix = `sim-err-${examInfo.completedSim.id}-`;
+            const qNum =
+              entry.simulado_questao_numero ??
+              (entry.id.startsWith(prefix)
+                ? Number(entry.id.slice(prefix.length).split('-')[0])
+                : NaN);
+            if (Number.isFinite(qNum) && qNum > 0) {
+              entrySubjectBySimQ.set(`${examInfo.completedSim.id}::${qNum}`, entry.materia);
+            }
+          }
+        });
+
+        const sim = examInfo.completedSim;
+        let hasSimulationMetrics = false;
+        let totalQuestions = scopedEntries.length;
+        let correct = 0;
+        let wrong = scopedEntries.length;
+        let blank = 0;
+        let accuracyPct = 0;
+        let errorPct = 0;
+
+        if (sim) {
+          hasSimulationMetrics = true;
+          const qs = sim.questoes || [];
+          totalQuestions = sim.total || qs.length;
+          correct = sim.acertos || 0;
+          wrong = sim.erros || 0;
+          blank = sim.em_branco || 0;
+          const answered = correct + wrong;
+          accuracyPct = answered > 0 ? Math.round((correct / answered) * 100) : 0;
+          errorPct = answered > 0 ? Math.round((wrong / answered) * 100) : 0;
+
+          const simHasPerQuestionSubjects = qs.some(
+            (q) =>
+              q.correta &&
+              resolveExamSubjectLabel(q.materia, sim.titulo, sim) !== EXAM_UNASSIGNED_SUBJECT_LABEL,
+          );
+
+          qs.forEach((q) => {
+            if (!q.resposta) return;
+            const overridden = entrySubjectBySimQ.get(`${sim.id}::${q.numero}`);
+            const subjKey = resolveExamSubjectLabel(
+              overridden || q.materia || sim.materia,
+              sim.titulo,
+              sim,
+            );
+            const row = ensureKey(subjKey);
+            if (simHasPerQuestionSubjects) row.answeredQuestions += 1;
+            if (!q.correta) row.wrongQuestions += 1;
+          });
+        }
+
+        map.forEach((row) => {
+          if (row.wrongQuestions === 0 && row.notebookErrors > 0) {
+            row.wrongQuestions = row.notebookErrors;
+          }
+        });
+
+        const notebookTotal = scopedEntries.length;
+        const pending = scopedEntries.filter((e) => !e.corrigido).length;
+        const corrected = notebookTotal - pending;
+
+        const rows = [...map.values()]
+          .filter((r) => r.notebookTotal > 0 || r.wrongQuestions > 0)
+          .map((r) => ({
+            subject: r.subject,
+            notebookTotal: r.notebookTotal,
+            notebookSharePct: notebookTotal > 0 ? Math.round((r.notebookTotal / notebookTotal) * 100) : 0,
+            wrongQuestions: r.wrongQuestions,
+            answeredQuestions: r.answeredQuestions,
+            errorRatePct:
+              r.answeredQuestions > 0
+                ? Math.round((r.wrongQuestions / r.answeredQuestions) * 100)
+                : null,
+            pendingCount: r.pendingCount,
+            correctedCount: r.correctedCount,
+          }))
+          .sort((a, b) => {
+            if (statsSortBy === 'rate' && (a.errorRatePct !== null || b.errorRatePct !== null)) {
+              const diff = (b.errorRatePct ?? -1) - (a.errorRatePct ?? -1);
+              if (diff !== 0) return diff;
+            }
+            if (b.notebookTotal !== a.notebookTotal) return b.notebookTotal - a.notebookTotal;
+            return b.pendingCount - a.pendingCount;
+          });
+
+        return {
+          examLabel: examInfo.label,
+          kindLabel: examInfo.kind === 'prova' ? 'Prova da Biblioteca' : 'Simulado Fechado',
+          banca: detectedBanca || undefined,
+          data: sim?.data || undefined,
+          hasSimulationMetrics,
+          totalQuestions,
+          correct,
+          wrong,
+          blank,
+          accuracyPct,
+          errorPct,
+          notebookTotal,
+          pending,
+          corrected,
+          rows,
+        };
+      };
+
+      if (effectiveTarget === 'global') {
+        const rows = subjectErrorStats.rows.map((r) => ({
+          subject: r.subject,
+          notebookTotal: r.notebookTotal,
+          notebookSharePct: r.notebookSharePct,
+          wrongQuestions: r.wrongQuestions,
+          answeredQuestions: r.answeredQuestions,
+          errorRatePct: r.errorRatePct,
+          pendingCount: r.pendingCount,
+          correctedCount: r.correctedCount,
+        }));
+        return {
+          scopeTitle: 'Visão Geral · Todas as Matérias',
+          subtitle: 'Ranking consolidado de erros por matéria considerando todo o Caderno de Erros e histórico de questões.',
+          fileNameSlug: 'geral_materias',
+          sections: [
+            {
+              examLabel: 'Consolidado Geral por Matéria',
+              kindLabel: 'Caderno de Erros Completo',
+              notebookTotal: subjectErrorStats.totalNotebookAll,
+              pending: subjectErrorStats.scopedPending,
+              corrected: subjectErrorStats.scopedCorrected,
+              rows,
+            },
+          ],
+        };
+      }
+
+      if (effectiveTarget === 'all_exams') {
+        const sections = simulationDirectory.exams
+          .map((ex) => buildSingleExamSection(ex.key))
+          .filter((s): s is ExamErrorStatsPdfSection => Boolean(s && s.rows.length > 0));
+        return {
+          scopeTitle: `Todas as Provas & Simulados (${sections.length})`,
+          subtitle:
+            'Estatística detalhada de erros por matéria separada individualmente por prova/simulado, preservando a associação às matérias gerais.',
+          fileNameSlug: 'todas_as_provas',
+          sections,
+        };
+      }
+
+      const singleSection = buildSingleExamSection(effectiveTarget);
+      return {
+        scopeTitle: singleSection ? `Prova: ${singleSection.examLabel}` : 'Prova Selecionada',
+        subtitle: singleSection
+          ? `Distribuição e ranking de erros por matéria em "${singleSection.examLabel}".`
+          : '',
+        fileNameSlug: singleSection ? cleanSafeName(singleSection.examLabel) : 'prova',
+        sections: singleSection ? [singleSection] : [],
+      };
+    },
+    [
+      activeSelectedExam,
+      allErrorEntries,
+      db.completedSimulations,
+      isExamStatsMode,
+      resolveExamSubjectLabel,
+      simulationDirectory.exams,
+      statsSortBy,
+      subjectErrorStats,
+    ],
+  );
+
+  const handleDownloadExamStatsPdf = () => {
+    try {
+      const payload = buildExamErrorStatsExportPayload(statsExportTarget);
+      if (!payload.sections.length) {
+        toast('Não há estatísticas de erro por prova disponíveis para exportar.', true);
+        return;
+      }
+      const fileName = exportExamSubjectErrorStatsPdf({
+        scopeTitle: payload.scopeTitle,
+        subtitle: payload.subtitle,
+        holderName: googleUser?.displayName || googleUser?.email || 'Cidadão-Estudante Federal',
+        sections: payload.sections,
+        fileNameSlug: payload.fileNameSlug,
+      });
+      setStatsExportOpen(false);
+      toast(`PDF de estatísticas por prova gerado: ${fileName}`);
+    } catch (err) {
+      toast((err as Error).message || 'Falha ao gerar o PDF de estatísticas por prova.', true);
+    }
+  };
+
+  const handleDownloadExamStatsCsv = () => {
+    try {
+      const payload = buildExamErrorStatsExportPayload(statsExportTarget);
+      if (!payload.sections.length) {
+        toast('Não há estatísticas de erro por prova disponíveis para exportar.', true);
+        return;
+      }
+      const esc = (val: string | number | null | undefined) => {
+        const str = String(val ?? '');
+        return /[;"\r\n]/.test(str) ? `"${str.replace(/"/g, '""')}"` : str;
+      };
+      const lines: string[] = [
+        [
+          'Prova / Simulado',
+          'Modalidade',
+          'Banca',
+          'Data',
+          'Matéria',
+          'Erros na Prova',
+          '% na Prova',
+          'Questões Erradas',
+          'Questões Respondidas',
+          '% Taxa de Erro',
+          'Pendentes',
+          'Corrigidos',
+        ].join(';'),
+      ];
+      payload.sections.forEach((sec) => {
+        sec.rows.forEach((row) => {
+          lines.push(
+            [
+              esc(visibleName(sec.examLabel)),
+              esc(sec.kindLabel),
+              esc(sec.banca || ''),
+              esc(sec.data || ''),
+              esc(visibleName(row.subject)),
+              row.notebookTotal,
+              `${row.notebookSharePct}%`,
+              row.wrongQuestions,
+              row.answeredQuestions,
+              row.errorRatePct !== null ? `${row.errorRatePct}%` : '',
+              row.pendingCount,
+              row.correctedCount,
+            ].join(';'),
+          );
+        });
+      });
+
+      const blob = new Blob([`\uFEFF${lines.join('\r\n')}`], {
+        type: 'text/csv;charset=utf-8;',
+      });
+      const url = URL.createObjectURL(blob);
+      const slug = cleanSafeName(payload.fileNameSlug || 'por_prova', 'por_prova').replace(/\s+/g, '_');
+      const fileName = `estatistica_erros_materias_${slug}_${localDateIso()}.csv`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setStatsExportOpen(false);
+      toast(`Planilha CSV de estatísticas exportada: ${fileName}`);
+    } catch (err) {
+      toast((err as Error).message || 'Falha ao exportar CSV de estatísticas.', true);
+    }
+  };
+
   const flushEditingDraft = useCallback(
     (silent = true) => {
       const current = editingEntryRef.current;
@@ -3009,6 +3366,94 @@ export const ErrorNotebookPage: React.FC = () => {
                 </button>
               </div>
             )}
+            <div className="relative" ref={statsExportMenuRef}>
+              <button
+                type="button"
+                onClick={() => {
+                  setStatsExportTarget(
+                    isExamStatsMode && activeSelectedExam
+                      ? activeSelectedExam.key
+                      : simulationDirectory.exams.length > 0
+                        ? 'all_exams'
+                        : 'global',
+                  );
+                  setStatsExportOpen((prev) => !prev);
+                }}
+                aria-expanded={statsExportOpen}
+                aria-haspopup="dialog"
+                title="Baixar estatística de erro das matérias por prova em PDF ou CSV"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[11.5px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5" />
+                Baixar por Prova
+                <ChevronDown
+                  className={`w-3.5 h-3.5 transition-transform ${statsExportOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+
+              {statsExportOpen && (
+                <div
+                  role="dialog"
+                  aria-label="Baixar estatística de erro das matérias por prova"
+                  className="absolute right-0 mt-1.5 z-30 w-80 max-w-[90vw] rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] p-3 shadow-xl"
+                >
+                  <div className="text-[11px] font-extrabold uppercase tracking-wider text-[var(--text)] mb-1">
+                    Baixar Estatística por Prova
+                  </div>
+                  <p className="m-0 mb-2.5 text-[11px] text-[var(--muted)] leading-snug">
+                    Exporte o ranking de erros das matérias de uma prova específica ou de todas as provas separadamente.
+                  </p>
+
+                  <label
+                    htmlFor="err-stats-export-exam"
+                    className="block text-[10.5px] font-bold text-[var(--muted)] mb-1"
+                  >
+                    Escopo da estatística
+                  </label>
+                  <select
+                    id="err-stats-export-exam"
+                    value={statsExportTarget}
+                    onChange={(e) => setStatsExportTarget(e.target.value)}
+                    className="ce-select w-full text-[12px] h-[34px] py-1 mb-3 font-semibold"
+                  >
+                    {simulationDirectory.exams.length > 0 && (
+                      <option value="all_exams">
+                        Todas as provas — separadas por prova ({simulationDirectory.exams.length})
+                      </option>
+                    )}
+                    {simulationDirectory.exams.length > 0 && (
+                      <optgroup label="Prova / Simulado específico">
+                        {simulationDirectory.exams.map((ex) => (
+                          <option key={ex.key} value={ex.key}>
+                            {ex.label} ({ex.total} erro{ex.total === 1 ? '' : 's'})
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    <option value="global">Visão geral consolidada (todas as matérias)</option>
+                  </select>
+
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={handleDownloadExamStatsPdf}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[#071D41] bg-[#071D41] text-white text-[11.5px] font-bold hover:bg-[#0c2d64] transition-colors cursor-pointer"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-[#FFCD07]" />
+                      Baixar PDF
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleDownloadExamStatsCsv}
+                      className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[11.5px] font-bold hover:border-[var(--accent)] transition-colors cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5 text-[var(--good)]" />
+                      Baixar CSV
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
             <button
               type="button"
               onClick={() => setStatsExpanded((prev) => !prev)}

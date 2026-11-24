@@ -11,21 +11,34 @@ import {
   setAllNodesCollapsed,
 } from './mindMapLayout';
 import { cleanSafeName, localDateIso, localDateTimeBrazilian, visibleName } from './parsers';
+import { htmlToPlainText } from './richDocUtils';
 
 export function getSummaryItemKind(item: SummaryFile): SummaryItemKind {
   if (item.kind) return item.kind;
   if (item.mindMap) return 'mindmap';
-  if (typeof item.content === 'string' && item.content.trim()) return 'note';
+  if (
+    (typeof item.content === 'string' && item.content.trim()) ||
+    (typeof item.contentHtml === 'string' && item.contentHtml.trim())
+  ) {
+    return 'note';
+  }
   const lower = (item.name || '').toLowerCase();
   if (lower.endsWith('.pdf') || item.mimeType === 'application/pdf') return 'pdf';
-  if (lower.endsWith('.txt') || item.mimeType?.startsWith('text/plain')) return 'note';
+  if (
+    lower.endsWith('.txt') ||
+    lower.endsWith('.docx') ||
+    item.mimeType?.startsWith('text/plain') ||
+    item.mimeType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+  ) {
+    return 'note';
+  }
   return 'image';
 }
 
 export function getSummaryDisplayTitle(item: SummaryFile): string {
   if (item.title?.trim()) return item.title.trim();
   const base = visibleName(item.name || 'Sem título');
-  return base.replace(/\.(pdf|txt|png|jpe?g|webp|mindmap\.json)$/i, '') || base;
+  return base.replace(/\.(pdf|txt|docx|png|jpe?g|webp|mindmap\.json)$/i, '') || base;
 }
 
 export function flattenMindMapToOutline(
@@ -222,8 +235,12 @@ function buildNotesPdfBytes(
     if (kind === 'mindmap' && item.mindMap) {
       const outline = flattenMindMapToOutline(item.mindMap).join('\n');
       y = renderStructuredBodyToPdf(doc, outline, y, margin, maxWidth);
-    } else if (item.content?.trim()) {
-      y = renderStructuredBodyToPdf(doc, item.content, y, margin, maxWidth);
+    } else {
+      const textBody =
+        item.content?.trim() || (item.contentHtml ? htmlToPlainText(item.contentHtml).trim() : '');
+      if (textBody) {
+        y = renderStructuredBodyToPdf(doc, textBody, y, margin, maxWidth);
+      }
     }
 
     y += 4;

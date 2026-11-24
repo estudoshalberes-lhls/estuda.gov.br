@@ -39,6 +39,11 @@ import {
   deleteLocalRestorePoint,
 } from '../lib/fileStorage';
 import {
+  buildDocxBlobFromHtml,
+  htmlToPlainText,
+  sanitizeDocHtml,
+} from '../lib/richDocUtils';
+import {
   CLOUD_SYNC_FILENAME,
   DEFAULT_STUDY_FOLDER_ID,
   DRIVE_FOLDER_NAME,
@@ -270,6 +275,9 @@ import {
   StudyDatabase,
   StudyTimeRecord,
   SubmittedSimulation,
+  CaseLawVigencia,
+  ContentStudyStatus,
+  ReadingQueueItem,
   SummaryFile,
   ToastMessage,
   TopicSpacedReview,
@@ -896,6 +904,10 @@ interface StudyContextValue {
   saveCaseLaw: (
     payload: Omit<CaseLawItem, 'id' | 'criado_em'> & { id?: string },
   ) => void;
+  updateCaseLawMeta: (
+    id: string,
+    patch: Partial<Pick<CaseLawItem, 'pinned' | 'studyStatus' | 'materia' | 'vigencia' | 'lastOpenedAt'>>,
+  ) => void;
   deleteCaseLaw: (id: string) => void;
 
   // Contests & Editais
@@ -1072,6 +1084,11 @@ interface StudyContextValue {
   ) => Promise<boolean>;
   deletePersonalPdf: (folder: string, fileId: string) => Promise<void>;
   deletePdfFolder: (folder: string) => Promise<number>;
+  updatePersonalPdfMeta: (
+    folder: string,
+    fileId: string,
+    patch: Partial<Pick<PersonalPdfFile, 'pinned' | 'studyStatus' | 'subtopic' | 'lastOpenedAt'>>,
+  ) => void;
 
   // Summaries
   createSummaryFolder: (name: string) => string;
@@ -1081,14 +1098,36 @@ interface StudyContextValue {
   uploadSummaryFiles: (folder: string, files: File[]) => Promise<number>;
   saveSummaryNote: (
     folder: string,
-    payload: { id?: string; title: string; content: string; tags?: string[] },
+    payload: {
+      id?: string;
+      title: string;
+      content: string;
+      contentHtml?: string;
+      tags?: string[];
+      subtopic?: string;
+      studyStatus?: ContentStudyStatus;
+      pinned?: boolean;
+      silent?: boolean;
+      skipDriveUpload?: boolean;
+    },
   ) => Promise<SummaryFile>;
   saveSummaryMindMap: (
     folder: string,
     payload: { id?: string; title: string; mindMap: MindMapNode; tags?: string[] },
   ) => Promise<SummaryFile>;
+  updateSummaryItemMeta: (
+    folder: string,
+    fileId: string,
+    patch: Partial<Pick<SummaryFile, 'pinned' | 'studyStatus' | 'subtopic' | 'lastOpenedAt'>>,
+  ) => void;
   deleteSummaryFile: (folder: string, fileId: string) => Promise<void>;
   moveSummaryFileToFolder: (fromFolder: string, fileId: string, toFolder: string) => void;
+
+  // Reading Queue
+  addToReadingQueue: (item: Omit<ReadingQueueItem, 'id' | 'addedAt'>) => void;
+  removeFromReadingQueue: (id: string) => void;
+  toggleReadingQueueDone: (id: string) => void;
+  clearReadingQueue: (onlyDone?: boolean) => void;
 
   // Proofs
   createProofBank: (name: string) => string;
@@ -12445,6 +12484,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
                   tribunal: payload.tribunal,
                   identificador: payload.identificador,
                   fonte: payload.fonte,
+                  materia: payload.materia !== undefined ? payload.materia : item.materia,
+                  vigencia: payload.vigencia !== undefined ? payload.vigencia : item.vigencia,
+                  pinned: payload.pinned !== undefined ? payload.pinned : item.pinned,
+                  studyStatus: payload.studyStatus !== undefined ? payload.studyStatus : item.studyStatus,
                   texto: payload.texto,
                   atualizado_em: now,
                 }
@@ -12463,6 +12506,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               tribunal: payload.tribunal,
               identificador: payload.identificador,
               fonte: payload.fonte,
+              ...(payload.materia?.trim() ? { materia: payload.materia.trim() } : {}),
+              vigencia: (payload.vigencia || 'Vigente') as CaseLawVigencia,
+              ...(payload.pinned ? { pinned: true } : {}),
+              ...(payload.studyStatus ? { studyStatus: payload.studyStatus } : {}),
               texto: payload.texto,
               criado_em: now,
             },
@@ -12473,6 +12520,21 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       }
     },
     [toast],
+  );
+
+  const updateCaseLawMeta = useCallback(
+    (
+      id: string,
+      patch: Partial<Pick<CaseLawItem, 'pinned' | 'studyStatus' | 'materia' | 'vigencia' | 'lastOpenedAt'>>,
+    ) => {
+      setDb((prev) => ({
+        ...prev,
+        caseLaw: prev.caseLaw.map((item) =>
+          item.id === id ? { ...item, ...patch } : item,
+        ),
+      }));
+    },
+    [],
   );
 
   const deleteCaseLaw = useCallback(
@@ -15188,6 +15250,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [toast],
   );
 
+  const appendLawDateIfMissing = (
+    map: Record<string, LawReadingEntry[]> | undefined,
+    folder: string,
+    dateIso: string,
+  ): Record<string, LawReadingEntry[]> => {
+    const baseMap = map || {};
+    const current = baseMap[folder] || [];
+    if (current.some((e) => e.data === dateIso)) return baseMap;
+    const nextList: LawReadingEntry[] = [
+      { id: uid(8), data: dateIso },
+      ...current,
+    ].sort((a, b) => b.data.localeCompare(a.data));
+    return {
+      ...baseMap,
+      [folder]: nextList,
+    };
+  };
+
   const toggleLawItemRead = useCallback((folder: string, itemId: string) => {
     const todayIso = localDateIso();
     setDb((prev) => {
@@ -15219,6 +15299,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           }
         : undefined;
 
+      const nextLawReadDates = !exists
+        ? appendLawDateIfMissing(prev.lawReadDates, folder, todayIso)
+        : prev.lawReadDates;
+
       const next: StudyDatabase = {
         ...prev,
         ...(nextFolderData
@@ -15233,6 +15317,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ...map,
           [folder]: nextReadIds,
         },
+        ...(nextLawReadDates ? { lawReadDates: nextLawReadDates } : {}),
         lawLastReadPosition: lastPosKey
           ? {
               ...(prev.lawLastReadPosition || {}),
@@ -15280,6 +15365,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             }
           : folderData;
 
+      const nextLawReadDates = markAsRead
+        ? appendLawDateIfMissing(prev.lawReadDates, folder, todayIso)
+        : prev.lawReadDates;
+
       const next: StudyDatabase = {
         ...prev,
         ...(nextFolderData
@@ -15294,6 +15383,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ...map,
           [folder]: [...currentSet],
         },
+        ...(nextLawReadDates ? { lawReadDates: nextLawReadDates } : {}),
         lawLastReadPosition: lastPosKey
           ? {
               ...(prev.lawLastReadPosition || {}),
@@ -15413,6 +15503,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         const readSet = new Set(readMap[folder] || []);
         idSet.forEach((id) => readSet.add(id));
 
+        const nextLawReadDates = appendLawDateIfMissing(prev.lawReadDates, folder, cleanDate);
+
         const next: StudyDatabase = {
           ...prev,
           laws: {
@@ -15426,6 +15518,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             ...readMap,
             [folder]: [...readSet],
           },
+          lawReadDates: nextLawReadDates,
           lawLastReadPosition: lastPosKey
             ? {
                 ...(prev.lawLastReadPosition || {}),
@@ -15441,11 +15534,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       if (addedCount > 0) {
         toast(
           targetIds.length > 1
-            ? `Leitura de ${addedCount} dispositivo(s) registrada em ${formatIsoDateBr(cleanDate)}.`
-            : `Leitura do artigo registrada em ${formatIsoDateBr(cleanDate)}.`,
+            ? `Mais 1 dia de leitura registrado (${formatIsoDateBr(cleanDate)}) em ${addedCount} dispositivo(s).`
+            : `Mais 1 dia de leitura registrado (${formatIsoDateBr(cleanDate)}).`,
         );
       } else {
-        toast(`Leitura em ${formatIsoDateBr(cleanDate)} já está registrada.`);
+        toast(`Leitura em ${formatIsoDateBr(cleanDate)} já está registrada neste artigo.`);
       }
     },
     [toast],
@@ -16161,20 +16254,152 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [autoSyncFileToDrive, toast],
   );
 
+  const updatePersonalPdfMeta = useCallback(
+    (
+      folder: string,
+      fileId: string,
+      patch: Partial<Pick<PersonalPdfFile, 'pinned' | 'studyStatus' | 'subtopic' | 'lastOpenedAt'>>,
+    ) => {
+      setDb((prev) => {
+        const list = prev.pdfFolders[folder] || [];
+        if (!list.length) return prev;
+        return {
+          ...prev,
+          pdfFolders: {
+            ...prev.pdfFolders,
+            [folder]: list.map((f) => (f.id === fileId ? { ...f, ...patch } : f)),
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const updateSummaryItemMeta = useCallback(
+    (
+      folder: string,
+      fileId: string,
+      patch: Partial<Pick<SummaryFile, 'pinned' | 'studyStatus' | 'subtopic' | 'lastOpenedAt'>>,
+    ) => {
+      setDb((prev) => {
+        const list = prev.summaryFolders[folder] || [];
+        if (!list.length) return prev;
+        return {
+          ...prev,
+          summaryFolders: {
+            ...prev.summaryFolders,
+            [folder]: list.map((f) => (f.id === fileId ? { ...f, ...patch } : f)),
+          },
+        };
+      });
+    },
+    [],
+  );
+
+  const addToReadingQueue = useCallback(
+    (item: Omit<ReadingQueueItem, 'id' | 'addedAt'>) => {
+      let added = false;
+      setDb((prev) => {
+        const current = prev.preferences.reading_queue || [];
+        const exists = current.some(
+          (q) =>
+            q.kind === item.kind &&
+            (q.itemId || '') === (item.itemId || '') &&
+            (q.folder || '') === (item.folder || '') &&
+            q.title === item.title,
+        );
+        if (exists) return prev;
+        added = true;
+        const entry: ReadingQueueItem = {
+          ...item,
+          id: uid(12),
+          done: false,
+          addedAt: new Date().toISOString(),
+        };
+        return {
+          ...prev,
+          preferences: {
+            ...prev.preferences,
+            reading_queue: [...current, entry],
+          },
+        };
+      });
+      toast(added ? `"${item.title}" adicionado à Fila de Leitura.` : 'Este item já está na Fila de Leitura.');
+    },
+    [toast],
+  );
+
+  const removeFromReadingQueue = useCallback((id: string) => {
+    setDb((prev) => ({
+      ...prev,
+      preferences: {
+        ...prev.preferences,
+        reading_queue: (prev.preferences.reading_queue || []).filter((q) => q.id !== id),
+      },
+    }));
+  }, []);
+
+  const toggleReadingQueueDone = useCallback((id: string) => {
+    setDb((prev) => ({
+      ...prev,
+      preferences: {
+        ...prev.preferences,
+        reading_queue: (prev.preferences.reading_queue || []).map((q) =>
+          q.id === id ? { ...q, done: !q.done } : q,
+        ),
+      },
+    }));
+  }, []);
+
+  const clearReadingQueue = useCallback((onlyDone?: boolean) => {
+    setDb((prev) => ({
+      ...prev,
+      preferences: {
+        ...prev.preferences,
+        reading_queue: onlyDone
+          ? (prev.preferences.reading_queue || []).filter((q) => !q.done)
+          : [],
+      },
+    }));
+  }, []);
+
   const saveSummaryNote = useCallback(
     async (
       folder: string,
-      payload: { id?: string; title: string; content: string; tags?: string[] },
+      payload: {
+        id?: string;
+        title: string;
+        content: string;
+        contentHtml?: string;
+        tags?: string[];
+        subtopic?: string;
+        studyStatus?: ContentStudyStatus;
+        pinned?: boolean;
+        silent?: boolean;
+        skipDriveUpload?: boolean;
+      },
     ): Promise<SummaryFile> => {
       if (!folder) throw new Error('Selecione ou crie uma matéria.');
       const cleanTitle = payload.title.trim();
-      const cleanContent = payload.content.trim();
+      const safeHtml = payload.contentHtml ? sanitizeDocHtml(payload.contentHtml).trim() : '';
+      const cleanContent = (payload.content || '').trim() || (safeHtml ? htmlToPlainText(safeHtml).trim() : '');
       if (!cleanTitle) throw new Error('Informe um título para a anotação de resumo.');
       if (!cleanContent) throw new Error('Escreva o conteúdo da anotação antes de salvar.');
 
       const existing = payload.id
         ? (dbRef.current.summaryFolders[folder] || []).find((f) => f.id === payload.id)
         : undefined;
+
+      const cleanTags = Array.from(
+        new Set((payload.tags || []).map((t) => t.trim()).filter(Boolean)),
+      );
+      const cleanSubtopic =
+        payload.subtopic !== undefined
+          ? payload.subtopic.trim()
+          : existing?.subtopic?.trim() || '';
+      const resolvedPinned = payload.pinned !== undefined ? payload.pinned : existing?.pinned;
+      const resolvedStatus =
+        payload.studyStatus !== undefined ? payload.studyStatus : existing?.studyStatus;
 
       const safeSlug =
         cleanTitle
@@ -16183,30 +16408,52 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           .replace(/[^a-zA-Z0-9]+/g, '_')
           .replace(/^_+|_+$/g, '')
           .slice(0, 48) || 'anotacao';
-      const fileName = `${safeSlug}.txt`;
-      const noteFile = new File([`${cleanTitle}\n\n${cleanContent}`], fileName, {
-        type: 'text/plain;charset=utf-8',
-      });
+      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
+
+      let fileName = `${safeSlug}.txt`;
+      let mimeType = 'text/plain;charset=utf-8';
+      let noteFile: File;
+
+      if (safeHtml) {
+        const docxBlob = await buildDocxBlobFromHtml({
+          title: cleanTitle,
+          subject: folderLabel || visibleName(folder),
+          subtopic: cleanSubtopic || undefined,
+          tags: cleanTags.length > 0 ? cleanTags : undefined,
+          html: safeHtml,
+        });
+        fileName = `${safeSlug}.docx`;
+        mimeType = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+        noteFile = new File([docxBlob], fileName, { type: mimeType });
+      } else {
+        noteFile = new File([`${cleanTitle}\n\n${cleanContent}`], fileName, {
+          type: mimeType,
+        });
+      }
+
       const blobKey = existing?.blobKey || `summary-note-${uid(16)}`;
       await saveFileBlob(blobKey, noteFile);
-      const folderLabel = visibleName(folder).replace(/[\\/]+/g, ' - ').trim();
-      const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
-      await autoSyncFileToDrive(noteFile, fileName, driveSubfolders);
+      if (!payload.skipDriveUpload) {
+        const driveSubfolders = folderLabel ? ['Resumos e Mapas', folderLabel] : 'Resumos e Mapas';
+        await autoSyncFileToDrive(noteFile, fileName, driveSubfolders, blobKey);
+      }
 
-      const cleanTags = Array.from(
-        new Set((payload.tags || []).map((t) => t.trim()).filter(Boolean)),
-      );
       const nowIso = new Date().toISOString();
       const record: SummaryFile = {
         id: existing?.id || uid(12),
         name: fileName,
         title: cleanTitle,
         size: noteFile.size,
-        mimeType: 'text/plain;charset=utf-8',
+        mimeType,
         blobKey,
         kind: 'note',
         content: cleanContent,
+        ...(safeHtml ? { contentHtml: safeHtml } : {}),
         ...(cleanTags.length > 0 ? { tags: cleanTags } : {}),
+        ...(cleanSubtopic ? { subtopic: cleanSubtopic } : {}),
+        ...(resolvedPinned ? { pinned: true } : {}),
+        ...(resolvedStatus ? { studyStatus: resolvedStatus } : {}),
+        ...(existing?.lastOpenedAt ? { lastOpenedAt: existing.lastOpenedAt } : {}),
         createdAt: existing?.createdAt || localDateIso(),
         updatedAt: nowIso,
       };
@@ -16225,11 +16472,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         };
       });
 
-      toast(
-        existing
-          ? `Anotação "${cleanTitle}" atualizada.`
-          : `Anotação "${cleanTitle}" salva em ${visibleName(folder)}.`,
-      );
+      if (!payload.silent) {
+        toast(
+          existing
+            ? `Documento "${cleanTitle}" atualizado em ${visibleName(folder)}.`
+            : `Documento "${cleanTitle}" salvo em ${visibleName(folder)}.`,
+        );
+      }
       return record;
     },
     [autoSyncFileToDrive, toast],
@@ -17788,6 +18037,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         advanceErrorReview,
         startErrorNotebookQuiz,
         saveCaseLaw,
+        updateCaseLawMeta,
         deleteCaseLaw,
         addContest,
         updateContest,
@@ -17860,6 +18110,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         commitAnnotatedPersonalPdf,
         deletePersonalPdf,
         deletePdfFolder,
+        updatePersonalPdfMeta,
         createSummaryFolder,
         renameSummaryFolder,
         deleteSummaryFolder,
@@ -17867,8 +18118,13 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         uploadSummaryFiles,
         saveSummaryNote,
         saveSummaryMindMap,
+        updateSummaryItemMeta,
         deleteSummaryFile,
         moveSummaryFileToFolder,
+        addToReadingQueue,
+        removeFromReadingQueue,
+        toggleReadingQueueDone,
+        clearReadingQueue,
         createProofBank,
         uploadProofOnly,
         uploadProofWithAnswer,

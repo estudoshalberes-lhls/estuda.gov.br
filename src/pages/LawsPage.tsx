@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
+  BarChart3,
   BookOpenCheck,
   CalendarCheck2,
   CalendarPlus,
@@ -14,6 +15,7 @@ import {
   Link2,
   ListChecks,
   ListOrdered,
+  ListPlus,
   Maximize2,
   Minimize2,
   Newspaper,
@@ -49,6 +51,7 @@ import { HIGHLIGHT_COLOR_RGB, exportLawWithHighlightsPdf, buildHighlightedSegmen
 import { HighlightColorKey } from '../types/study';
 import {
   ArticleJumpBar,
+  FONT_FAMILY_CSS,
   FONT_SIZE_PX,
   LINE_HEIGHT_VAL,
   LawClozeText,
@@ -57,7 +60,9 @@ import {
   renderLawTextWithExamHighlights,
   useLawReadingPrefs,
 } from '../components/ui/LawReadingTools';
+import { ReadingQueueButton } from '../components/ui/ContentReadingSurface';
 import { FilePreview } from '../components/ui/FilePreview';
+import { LawReadingAnalyticsPanel } from '../components/laws/LawReadingAnalyticsPanel';
 import { LawVoicePlayerBar, useLawVoiceReader } from '../components/ui/LawVoicePlayer';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
@@ -81,6 +86,7 @@ export const LawsPage: React.FC = () => {
     addLawReadDate,
     removeLawReadDate,
     addLawItemReadDate,
+    removeLawItemReadDate,
     setLawLastPosition,
     reprocessLawFolder,
     deleteLawPdf,
@@ -88,11 +94,21 @@ export const LawsPage: React.FC = () => {
     toast,
     examFocusMode,
     setExamFocusMode,
+    setActivePage,
+    openLawAt,
+    addToReadingQueue,
+    removeFromReadingQueue,
+    toggleReadingQueueDone,
+    clearReadingQueue,
   } = useStudy();
   const [reprocessingLaw, setReprocessingLaw] = useState(false);
   const [eraserModeActive, setEraserModeActive] = useState(false);
   const [visibleArticleLimit, setVisibleArticleLimit] = useState(80);
   const [showStructuralOutline, setShowStructuralOutline] = useState(false);
+  const [outlineSearch, setOutlineSearch] = useState('');
+  const [showHighlightsDrawer, setShowHighlightsDrawer] = useState(false);
+  const [highlightColorFilter, setHighlightColorFilter] = useState<'all' | HighlightColorKey>('all');
+  const [onlyHighlightedArticles, setOnlyHighlightedArticles] = useState(false);
 
   const [clozeRevealSignal, setClozeRevealSignal] = useState(0);
   const [clozeHideSignal, setClozeHideSignal] = useState(0);
@@ -101,6 +117,7 @@ export const LawsPage: React.FC = () => {
     prefs: readingPrefs,
     stepFontSize,
     cycleLineHeight,
+    toggleFontFamily,
     toggleComfortableWidth,
     toggleHighlightExamWords,
     toggleClozeMode,
@@ -236,12 +253,14 @@ export const LawsPage: React.FC = () => {
   const [focusSearchTerm, setFocusSearchTerm] = useState('');
   const [filterOnlyMatches, setFilterOnlyMatches] = useState(false);
   const [editalFilterContestId, setEditalFilterContestId] = useState<string>('all');
-  const [readerTab, setReaderTab] = useState<'continuous' | 'devices'>('continuous');
+  const [readerTab, setReaderTab] = useState<'continuous' | 'devices' | 'history'>('continuous');
   const [checklistFilter, setChecklistFilter] = useState<'all' | 'unread' | 'read'>('all');
   const [previewPdf, setPreviewPdf] = useState<{ blobKey: string; name: string } | null>(null);
   const [readDateInput, setReadDateInput] = useState<string>(() => localDateIso());
   const [readDateNote, setReadDateNote] = useState('');
   const [showAllReadDates, setShowAllReadDates] = useState(false);
+  const [openReadDatesKey, setOpenReadDatesKey] = useState<string | null>(null);
+  const [articleCustomDate, setArticleCustomDate] = useState<string>(() => localDateIso());
   const focusMarkRef = useRef<HTMLSpanElement | null>(null);
 
   // Quick Edital association states (both Continuous & Devices tabs)
@@ -761,9 +780,59 @@ export const LawsPage: React.FC = () => {
     return entries;
   }, [groupedContinuousArticles]);
 
+  const filteredStructuralOutline = useMemo(() => {
+    const q = normalizeSearch(outlineSearch);
+    if (!q) return structuralOutline;
+    return structuralOutline.filter(
+      (entry) =>
+        normalizeSearch(entry.heading).includes(q) ||
+        normalizeSearch(entry.articleLabel).includes(q),
+    );
+  }, [outlineSearch, structuralOutline]);
+
+  const filteredHighlightsList = useMemo(() => {
+    const base =
+      highlightColorFilter === 'all'
+        ? highlights
+        : highlights.filter((h) => h.color === highlightColorFilter);
+    return base.map((h, idx) => {
+      const needle = (h.text || '').trim().toLowerCase();
+      const matchedGroup = needle
+        ? groupedContinuousArticles.find((g) =>
+            g.items.some((it) => (it.texto || '').toLowerCase().includes(needle)),
+          )
+        : undefined;
+      return {
+        key: h.id || `hl-${idx}-${h.text.slice(0, 16)}`,
+        highlight: h,
+        articleLabel: matchedGroup?.key || '',
+      };
+    });
+  }, [groupedContinuousArticles, highlightColorFilter, highlights]);
+
+  const displayedContinuousGroups = useMemo(() => {
+    if (!onlyHighlightedArticles || highlights.length === 0) {
+      return groupedContinuousArticles;
+    }
+    const activeHighlights =
+      highlightColorFilter === 'all'
+        ? highlights
+        : highlights.filter((h) => h.color === highlightColorFilter);
+    const needles = activeHighlights
+      .map((h) => (h.text || '').trim().toLowerCase())
+      .filter(Boolean);
+    if (!needles.length) return [];
+    return groupedContinuousArticles.filter((group) =>
+      group.items.some((it) => {
+        const txt = (it.texto || '').toLowerCase();
+        return needles.some((n) => txt.includes(n));
+      }),
+    );
+  }, [groupedContinuousArticles, highlightColorFilter, highlights, onlyHighlightedArticles]);
+
   const visibleContinuousGroups = useMemo(
-    () => groupedContinuousArticles.slice(0, visibleArticleLimit),
-    [groupedContinuousArticles, visibleArticleLimit],
+    () => displayedContinuousGroups.slice(0, visibleArticleLimit),
+    [displayedContinuousGroups, visibleArticleLimit],
   );
 
   const highlightedSegments = useMemo(
@@ -996,6 +1065,18 @@ export const LawsPage: React.FC = () => {
                   <ListChecks className="w-3 h-3" />
                   Checklist ({readingStats.read}/{readingStats.total})
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setReaderTab('history')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors ${
+                    readerTab === 'history'
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                  }`}
+                >
+                  <BarChart3 className="w-3 h-3" />
+                  Histórico & Gráfico
+                </button>
               </div>
             )}
           </div>
@@ -1020,7 +1101,7 @@ export const LawsPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setReaderTab('continuous')}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors cursor-pointer ${
                       readerTab === 'continuous'
                         ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
                         : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
@@ -1032,7 +1113,7 @@ export const LawsPage: React.FC = () => {
                   <button
                     type="button"
                     onClick={() => setReaderTab('devices')}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors ${
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors cursor-pointer ${
                       readerTab === 'devices'
                         ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
                         : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
@@ -1041,8 +1122,55 @@ export const LawsPage: React.FC = () => {
                     <ListChecks className="w-3.5 h-3.5" />
                     Checklist de Leitura ({readingStats.read}/{readingStats.total})
                   </button>
+                  <button
+                    type="button"
+                    onClick={() => setReaderTab('history')}
+                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-[12px] font-bold transition-colors cursor-pointer ${
+                      readerTab === 'history'
+                        ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]'
+                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)]'
+                    }`}
+                  >
+                    <BarChart3 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                    Histórico & Gráfico
+                  </button>
                 </>
               )}
+              {activeFolder && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    addToReadingQueue({
+                      kind: 'law',
+                      title: visibleName(activeFolder),
+                      subtitle: `${readingStats.read}/${readingStats.total} dispositivos lidos`,
+                      folder: activeFolder,
+                    })
+                  }
+                  title="Adicionar esta lei à Fila de Leitura"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                >
+                  <ListPlus className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Na Fila
+                </button>
+              )}
+              <ReadingQueueButton
+                queue={db.preferences.reading_queue || []}
+                onToggleDone={toggleReadingQueueDone}
+                onRemove={removeFromReadingQueue}
+                onClearDone={() => clearReadingQueue(true)}
+                onOpenItem={(q) => {
+                  if (q.kind === 'law' && q.folder) {
+                    openLawAt(q.folder);
+                  } else if (q.kind === 'summary') {
+                    setActivePage('Resumos & Mapas');
+                  } else if (q.kind === 'caselaw') {
+                    setActivePage('Súmulas e Jurisprudência');
+                  } else if (q.kind === 'pdf') {
+                    setActivePage('PDFs Pessoais');
+                  }
+                }}
+              />
               <button
                 type="button"
                 onClick={() => setExamFocusMode(true)}
@@ -1338,10 +1466,24 @@ export const LawsPage: React.FC = () => {
                     addLawReadDate(activeFolder, readDateInput, readDateNote);
                     setReadDateNote('');
                   }}
-                  className="inline-flex items-center gap-1 h-[34px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                  className="inline-flex items-center gap-1 h-[34px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
                 >
                   <CalendarPlus className="w-3.5 h-3.5 text-[var(--accent)]" />
                   Registrar dia
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setReaderTab((prev) => (prev === 'history' ? 'continuous' : 'history'))
+                  }
+                  className={`inline-flex items-center gap-1 h-[34px] px-3 rounded-lg border text-[11.5px] font-bold whitespace-nowrap cursor-pointer ${
+                    readerTab === 'history'
+                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                  }`}
+                >
+                  <BarChart3 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  {readerTab === 'history' ? 'Voltar ao leitor' : 'Ver gráfico e histórico'}
                 </button>
               </div>
             </div>
@@ -1492,6 +1634,7 @@ export const LawsPage: React.FC = () => {
             prefs={readingPrefs}
             onStepFontSize={stepFontSize}
             onCycleLineHeight={cycleLineHeight}
+            onToggleFontFamily={toggleFontFamily}
             onToggleComfortableWidth={toggleComfortableWidth}
             onToggleHighlightExamWords={toggleHighlightExamWords}
             showClozeModeToggle
@@ -1574,50 +1717,70 @@ export const LawsPage: React.FC = () => {
             </div>
           )}
 
-          <ArticleJumpBar
-            items={sequentialIndex.orderedItems}
-            readSet={readSet}
-            lastReadPosition={db.lawLastReadPosition?.[activeFolder]}
-            activeArticleKey={
-              voiceReader.isPlaying && voiceReader.currentItem
-                ? (voiceReader.currentItem.artigo_base || voiceReader.currentItem.dispositivo || '').trim()
-                : undefined
-            }
-            onSelectArticle={handleJumpToArticle}
-          />
+          {readerTab !== 'history' && (
+            <>
+              <ArticleJumpBar
+                items={sequentialIndex.orderedItems}
+                readSet={readSet}
+                lastReadPosition={db.lawLastReadPosition?.[activeFolder]}
+                activeArticleKey={
+                  voiceReader.isPlaying && voiceReader.currentItem
+                    ? (voiceReader.currentItem.artigo_base || voiceReader.currentItem.dispositivo || '').trim()
+                    : undefined
+                }
+                onSelectArticle={handleJumpToArticle}
+              />
 
-          <LawVoicePlayerBar
-            isSupported={voiceReader.isSupported}
-            isLocalSupported={voiceReader.isLocalSupported}
-            isPlaying={voiceReader.isPlaying}
-            isPaused={voiceReader.isPaused}
-            isBuffering={voiceReader.isBuffering}
-            errorMessage={voiceReader.errorMessage}
-            activeIndex={voiceReader.activeIndex}
-            totalItems={filteredItems.length}
-            currentItem={voiceReader.currentItem}
-            engine={voiceReader.engine}
-            localVoice={voiceReader.localVoice}
-            storedLocalVoices={voiceReader.storedLocalVoices}
-            localDownloadProgress={voiceReader.localDownloadProgress}
-            voices={voiceReader.voices}
-            rate={voiceReader.rate}
-            voiceURI={voiceReader.voiceURI}
-            autoMarkRead={voiceReader.autoMarkRead}
-            skipLegislativeNotes={voiceReader.skipLegislativeNotes}
-            onTogglePlayPause={voiceReader.togglePlayPause}
-            onStop={voiceReader.stop}
-            onStepArticle={voiceReader.stepArticle}
-            onChangeRate={voiceReader.setRate}
-            onChangeVoice={voiceReader.setVoiceURI}
-            onChangeEngine={voiceReader.setEngine}
-            onChangeLocalVoice={voiceReader.setLocalVoice}
-            onPreloadLocalVoice={voiceReader.preloadLocalVoice}
-            onToggleAutoMarkRead={voiceReader.toggleAutoMarkRead}
-            onToggleSkipLegislativeNotes={voiceReader.toggleSkipLegislativeNotes}
-          />
+              <LawVoicePlayerBar
+                isSupported={voiceReader.isSupported}
+                isLocalSupported={voiceReader.isLocalSupported}
+                isPlaying={voiceReader.isPlaying}
+                isPaused={voiceReader.isPaused}
+                isBuffering={voiceReader.isBuffering}
+                errorMessage={voiceReader.errorMessage}
+                activeIndex={voiceReader.activeIndex}
+                totalItems={filteredItems.length}
+                currentItem={voiceReader.currentItem}
+                engine={voiceReader.engine}
+                localVoice={voiceReader.localVoice}
+                storedLocalVoices={voiceReader.storedLocalVoices}
+                localDownloadProgress={voiceReader.localDownloadProgress}
+                voices={voiceReader.voices}
+                rate={voiceReader.rate}
+                voiceURI={voiceReader.voiceURI}
+                autoMarkRead={voiceReader.autoMarkRead}
+                skipLegislativeNotes={voiceReader.skipLegislativeNotes}
+                onTogglePlayPause={voiceReader.togglePlayPause}
+                onStop={voiceReader.stop}
+                onStepArticle={voiceReader.stepArticle}
+                onChangeRate={voiceReader.setRate}
+                onChangeVoice={voiceReader.setVoiceURI}
+                onChangeEngine={voiceReader.setEngine}
+                onChangeLocalVoice={voiceReader.setLocalVoice}
+                onPreloadLocalVoice={voiceReader.preloadLocalVoice}
+                onToggleAutoMarkRead={voiceReader.toggleAutoMarkRead}
+                onToggleSkipLegislativeNotes={voiceReader.toggleSkipLegislativeNotes}
+              />
+            </>
+          )}
 
-          {readerTab === 'continuous' ? (
+          {readerTab === 'history' ? (
+            <LawReadingAnalyticsPanel
+              laws={db.laws}
+              readLawItems={db.readLawItems || {}}
+              lawReadDates={db.lawReadDates || {}}
+              activeFolder={activeFolder}
+              onOpenLaw={(folder) => {
+                setSelectedFolder(folder);
+                setPreviewPdf(null);
+                setFocusSearchTerm('');
+                setReaderTab('continuous');
+              }}
+              onMarkLawReadToday={(folder) => addLawReadDate(folder, localDateIso())}
+              onRemoveLawReadDate={removeLawReadDate}
+              onRemoveArticleReadDate={removeLawItemReadDate}
+            />
+          ) : readerTab === 'continuous' ? (
             <Panel
               title={`Texto contínuo · ${visibleName(activeFolder)}`}
               subtitle="Selecione qualquer trecho abaixo e clique em uma cor para grifar, ou use Remover marcação para apagar um trecho já marcado."
@@ -1718,6 +1881,21 @@ export const LawsPage: React.FC = () => {
                     <Newspaper className="w-3 h-3" />
                     Modo Diário Oficial {douMode ? '(Ativo)' : ''}
                   </button>
+                  {highlights.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setShowHighlightsDrawer((v) => !v)}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                        showHighlightsDrawer || onlyHighlightedArticles
+                          ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                          : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                      }`}
+                      title="Abrir painel com todos os seus grifos nesta norma filtráveis por cor"
+                    >
+                      <Highlighter className="w-3 h-3 text-[var(--accent)]" />
+                      Meus Grifos ({highlights.length})
+                    </button>
+                  )}
                   {structuralOutline.length > 0 && (
                     <button
                       type="button"
@@ -1743,32 +1921,176 @@ export const LawsPage: React.FC = () => {
                 </div>
               }
             >
+              {showHighlightsDrawer && highlights.length > 0 && (
+                <div className="mb-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      <span className="text-[12px] font-bold text-[var(--text)] mr-1">
+                        Meus Grifos ({filteredHighlightsList.length})
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setHighlightColorFilter('all')}
+                        className={`px-2 py-0.5 rounded-md border text-[11px] font-bold cursor-pointer ${
+                          highlightColorFilter === 'all'
+                            ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                            : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)]'
+                        }`}
+                      >
+                        Todas ({highlights.length})
+                      </button>
+                      {(Object.keys(HIGHLIGHT_COLOR_RGB) as HighlightColorKey[]).map((ck) => {
+                        const count = highlights.filter((h) => h.color === ck).length;
+                        if (count === 0) return null;
+                        const spec = HIGHLIGHT_COLOR_RGB[ck];
+                        const active = highlightColorFilter === ck;
+                        return (
+                          <button
+                            key={ck}
+                            type="button"
+                            onClick={() => setHighlightColorFilter(active ? 'all' : ck)}
+                            style={
+                              active
+                                ? { backgroundColor: spec.bg, color: spec.fg }
+                                : undefined
+                            }
+                            className={`px-2 py-0.5 rounded-md border text-[11px] font-bold cursor-pointer ${
+                              active
+                                ? 'border-black/25'
+                                : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                            }`}
+                          >
+                            {spec.label} ({count})
+                          </button>
+                        );
+                      })}
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setOnlyHighlightedArticles((v) => !v)}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold cursor-pointer ${
+                          onlyHighlightedArticles
+                            ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                            : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                        }`}
+                      >
+                        <Eye className="w-3 h-3" />
+                        {onlyHighlightedArticles
+                          ? 'Exibindo só artigos grifados'
+                          : 'Só artigos grifados'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowHighlightsDrawer(false)}
+                        className="text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                      >
+                        Ocultar
+                      </button>
+                    </div>
+                  </div>
+
+                  {filteredHighlightsList.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-[210px] overflow-y-auto pr-1">
+                      {filteredHighlightsList.map(({ key, highlight, articleLabel }) => {
+                        const spec = HIGHLIGHT_COLOR_RGB[highlight.color] || HIGHLIGHT_COLOR_RGB.yellow;
+                        return (
+                          <div
+                            key={key}
+                            className="flex items-start justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel)] p-2.5"
+                          >
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (articleLabel) handleJumpToArticle(articleLabel);
+                              }}
+                              className="text-left flex-1 min-w-0 cursor-pointer"
+                            >
+                              <div className="flex items-center gap-2 mb-1 text-[11px] text-[var(--muted)]">
+                                <span
+                                  className="px-1.5 py-0.5 rounded font-bold text-[10px]"
+                                  style={{ backgroundColor: spec.bg, color: spec.fg }}
+                                >
+                                  {spec.label}
+                                </span>
+                                {articleLabel && (
+                                  <span className="font-bold text-[var(--accent)]">
+                                    {articleLabel}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="m-0 text-[12px] text-[var(--text)] leading-snug line-clamp-3">
+                                “{highlight.text}”
+                              </p>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => removeLawHighlightText(activeFolder, highlight.text)}
+                              title="Remover este grifo"
+                              aria-label="Remover este grifo"
+                              className="p-1 rounded text-[var(--muted)] hover:text-[var(--bad)] shrink-0 cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="text-[12px] text-[var(--muted)] py-2">
+                      Nenhum grifo encontrado para esta cor.
+                    </div>
+                  )}
+                </div>
+              )}
               {showStructuralOutline && structuralOutline.length > 0 && (
                 <div className="mb-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-soft)] p-3">
-                  <div className="flex items-center justify-between gap-2 mb-2">
-                    <span className="text-[11.5px] font-extrabold uppercase tracking-[0.06em] text-[var(--accent)]">
-                      Sumário Estrutural · Títulos, Capítulos e Seções
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                    <span className="text-[12px] font-bold text-[var(--text)]">
+                      Sumário Estrutural · Títulos, Capítulos e Seções ({filteredStructuralOutline.length})
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => setShowStructuralOutline(false)}
-                      className="text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)]"
-                    >
-                      Ocultar
-                    </button>
-                  </div>
-                  <div className="flex flex-wrap gap-1.5 max-h-[150px] overflow-y-auto pr-1">
-                    {structuralOutline.map((entry) => (
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        value={outlineSearch}
+                        onChange={(e) => setOutlineSearch(e.target.value)}
+                        placeholder="Filtrar título, capítulo ou artigo..."
+                        className="ce-input h-[28px] w-[210px] text-[11.5px]"
+                      />
                       <button
-                        key={entry.id}
                         type="button"
-                        onClick={() => handleJumpToArticle(entry.articleLabel)}
-                        className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] hover:border-[var(--accent)] text-[11px] font-semibold text-[var(--text)] transition-colors text-left"
+                        onClick={() => setShowStructuralOutline(false)}
+                        className="text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
                       >
-                        <span className="font-extrabold text-[var(--accent)]">{entry.articleLabel}</span>
-                        <span className="truncate max-w-[260px]">{entry.heading}</span>
+                        Ocultar
                       </button>
-                    ))}
+                    </div>
+                  </div>
+                  <div className="flex flex-col gap-1 max-h-[190px] overflow-y-auto pr-1">
+                    {filteredStructuralOutline.map((entry) => {
+                      const upper = entry.heading.toUpperCase();
+                      const indentClass = upper.startsWith('SUBSE')
+                        ? 'pl-8'
+                        : upper.startsWith('SEÇ') || upper.startsWith('SEC')
+                          ? 'pl-5'
+                          : upper.startsWith('CAP')
+                            ? 'pl-3'
+                            : 'pl-1.5';
+                      return (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          onClick={() => handleJumpToArticle(entry.articleLabel)}
+                          className={`flex items-center justify-between gap-2 py-1 pr-2 rounded-lg hover:bg-[var(--panel-raised)] text-[11.5px] text-[var(--text)] transition-colors text-left cursor-pointer ${indentClass}`}
+                        >
+                          <span className="truncate font-semibold">{entry.heading}</span>
+                          <span className="font-mono-num text-[11px] font-bold text-[var(--accent)] shrink-0">
+                            {entry.articleLabel}
+                          </span>
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -1877,6 +2199,7 @@ export const LawsPage: React.FC = () => {
                   style={{
                     fontSize: FONT_SIZE_PX[readingPrefs.fontSize],
                     lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
+                    fontFamily: FONT_FAMILY_CSS[readingPrefs.fontFamily],
                   }}
                   className={`law-reader min-h-[350px] max-h-[650px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-5 text-[var(--text)] select-text ${
                     !douMode && readingPrefs.comfortableWidth ? 'max-w-[82ch] mx-auto' : ''
@@ -1902,15 +2225,22 @@ export const LawsPage: React.FC = () => {
                   {showMatrixGuidesInContinuous ? (
                     <div className="space-y-4">
                       {visibleContinuousGroups.map((group) => {
+                        const todayIso = localDateIso();
+                        const groupIds = group.items.map((it) => it.id);
                         const groupReadCount = group.items.filter((it) => readSet.has(it.id)).length;
                         const allGroupRead = groupReadCount === group.items.length && group.items.length > 0;
                         const topGradeItem = group.items.find(
                           (it) => it.grau && it.grau !== 'Não Classificado',
                         );
-                        const groupDates = group.items
-                          .flatMap((it) => it.leituras || [])
-                          .sort((a, b) => b.data.localeCompare(a.data));
-                        const latestDate = groupDates[0]?.data;
+                        const groupEntries = group.items.flatMap((it) =>
+                          (it.leituras || []).map((entry) => ({ itemId: it.id, entry })),
+                        );
+                        const uniqueGroupDates = Array.from(
+                          new Set(groupEntries.map((g) => g.entry.data).filter(Boolean)),
+                        ).sort((a, b) => b.localeCompare(a));
+                        const readToday = uniqueGroupDates.includes(todayIso);
+                        const groupDateKey = `cont-${group.uid}`;
+                        const isDateMgrOpen = openReadDatesKey === groupDateKey;
                         const groupEditalLinks = Array.from(
                           new Map(
                             group.items
@@ -1959,10 +2289,27 @@ export const LawsPage: React.FC = () => {
                                     {topGradeItem.grau}
                                   </span>
                                 )}
-                                {latestDate && (
-                                  <span className="px-2 py-0.5 rounded border border-[var(--good)]/40 bg-[var(--good)]/10 text-[10px] font-bold text-[var(--good)]">
-                                    Lido em {formatIsoDateBr(latestDate)}
-                                  </span>
+                                {uniqueGroupDates.length > 0 && (
+                                  <button
+                                    type="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setArticleCustomDate(todayIso);
+                                      setOpenReadDatesKey(isDateMgrOpen ? null : groupDateKey);
+                                    }}
+                                    title="Clique para ver todos os dias em que este artigo foi lido ou adicionar outra data"
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded border border-[var(--good)]/40 bg-[var(--good)]/10 text-[10px] font-bold text-[var(--good)] hover:border-[var(--good)] cursor-pointer tabular-nums"
+                                  >
+                                    <CalendarCheck2 className="w-3 h-3" />
+                                    Lido {uniqueGroupDates.length}× ·{' '}
+                                    {uniqueGroupDates
+                                      .slice(0, 3)
+                                      .map((d) => formatIsoDateBr(d).slice(0, 5))
+                                      .join(', ')}
+                                    {uniqueGroupDates.length > 3
+                                      ? ` +${uniqueGroupDates.length - 3}`
+                                      : ''}
+                                  </button>
                                 )}
                                 {groupEditalLinks.map((lk) => (
                                   <button
@@ -1990,7 +2337,7 @@ export const LawsPage: React.FC = () => {
                                       voiceReader.playFromItemId(group.items[0].id);
                                     }}
                                     title={`Ouvir a partir de ${group.key}`}
-                                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-bold transition-colors ${
+                                    className={`inline-flex items-center gap-1 px-2 py-1 rounded-md border text-[11px] font-bold transition-colors cursor-pointer ${
                                       group.items.some((it) => it.id === voiceReader.speakingItemId)
                                         ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
                                         : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--accent)] hover:border-[var(--accent)]'
@@ -2004,33 +2351,133 @@ export const LawsPage: React.FC = () => {
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    if (allGroupRead) {
-                                      markLawItemsRead(
-                                        activeFolder,
-                                        group.items.map((it) => it.id),
-                                        false,
-                                      );
+                                    if (!allGroupRead || !readToday) {
+                                      addLawItemReadDate(activeFolder, groupIds, todayIso);
                                     } else {
-                                      addLawItemReadDate(
-                                        activeFolder,
-                                        group.items.map((it) => it.id),
-                                        localDateIso(),
-                                      );
+                                      setArticleCustomDate(todayIso);
+                                      setOpenReadDatesKey(isDateMgrOpen ? null : groupDateKey);
                                     }
                                   }}
-                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-bold transition-colors ${
-                                    allGroupRead
+                                  title={
+                                    !allGroupRead
+                                      ? 'Marcar este artigo como lido hoje'
+                                      : !readToday
+                                        ? 'Acrescentar hoje como mais um dia lido (mantém todas as datas anteriores)'
+                                        : 'Gerenciar dias em que este artigo foi lido'
+                                  }
+                                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                                    allGroupRead && readToday
                                       ? 'border-[var(--good)] bg-[var(--good)] text-white'
-                                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--good)]'
+                                      : allGroupRead
+                                        ? 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--good)] hover:bg-[var(--good)] hover:text-white'
+                                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--good)]'
                                   }`}
                                 >
                                   <Check className="w-3 h-3" />
-                                  {allGroupRead
-                                    ? 'Artigo lido'
-                                    : `Marcar lido (${groupReadCount}/${group.items.length})`}
+                                  {!allGroupRead
+                                    ? `Marcar lido (${groupReadCount}/${group.items.length})`
+                                    : !readToday
+                                      ? '+1 dia lido (hoje)'
+                                      : `Lido hoje (${uniqueGroupDates.length}×)`}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setArticleCustomDate(todayIso);
+                                    setOpenReadDatesKey(isDateMgrOpen ? null : groupDateKey);
+                                  }}
+                                  title="Registrar outra data ou ver histórico de dias lidos deste artigo"
+                                  aria-label={`Datas de leitura de ${group.key}`}
+                                  className={`inline-flex items-center justify-center w-[26px] h-[26px] rounded-md border transition-colors cursor-pointer ${
+                                    isDateMgrOpen
+                                      ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                                      : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)]'
+                                  }`}
+                                >
+                                  <CalendarPlus className="w-3.5 h-3.5" />
                                 </button>
                               </div>
                             </div>
+
+                            {isDateMgrOpen && (
+                              <div
+                                className="mb-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] p-2.5 select-none"
+                                contentEditable={false}
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+                                  <span className="text-[11px] font-bold text-[var(--text)]">
+                                    Dias em que {group.key} foi lido ({uniqueGroupDates.length})
+                                  </span>
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    <input
+                                      type="date"
+                                      aria-label={`Selecionar data para ${group.key}`}
+                                      value={articleCustomDate}
+                                      onChange={(e) => setArticleCustomDate(e.target.value)}
+                                      className="ce-input h-[28px] w-auto text-[11px] py-0 px-2"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        addLawItemReadDate(activeFolder, groupIds, articleCustomDate)
+                                      }
+                                      className="inline-flex items-center gap-1 h-[28px] px-2.5 rounded-md border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer"
+                                    >
+                                      + Adicionar dia
+                                    </button>
+                                    {allGroupRead && (
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          markLawItemsRead(activeFolder, groupIds, false);
+                                          setOpenReadDatesKey(null);
+                                        }}
+                                        className="h-[28px] px-2 rounded-md border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)] cursor-pointer"
+                                      >
+                                        Desmarcar lido
+                                      </button>
+                                    )}
+                                  </div>
+                                </div>
+                                {uniqueGroupDates.length > 0 ? (
+                                  <div className="flex flex-wrap items-center gap-1.5">
+                                    {uniqueGroupDates.map((d) => (
+                                      <span
+                                        key={d}
+                                        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--good)]/35 bg-[var(--panel)] text-[11px] font-mono-num font-bold text-[var(--text)]"
+                                      >
+                                        {formatIsoDateBr(d)}
+                                        <button
+                                          type="button"
+                                          onClick={() => {
+                                            groupEntries
+                                              .filter((ge) => ge.entry.data === d)
+                                              .forEach((ge) =>
+                                                removeLawItemReadDate(
+                                                  activeFolder,
+                                                  ge.itemId,
+                                                  ge.entry.id,
+                                                ),
+                                              );
+                                          }}
+                                          title={`Remover apenas o dia ${formatIsoDateBr(d)}`}
+                                          aria-label={`Remover dia ${formatIsoDateBr(d)}`}
+                                          className="text-[var(--muted)] hover:text-[var(--bad)] cursor-pointer"
+                                        >
+                                          <X className="w-3 h-3" />
+                                        </button>
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <div className="text-[11px] text-[var(--muted)]">
+                                    Nenhum dia registrado para este artigo ainda.
+                                  </div>
+                                )}
+                              </div>
+                            )}
 
                             <div className="space-y-2 whitespace-pre-wrap">
                               {group.items.map((item, idx) => {
@@ -2160,26 +2607,38 @@ export const LawsPage: React.FC = () => {
                           </div>
                         );
                       })}
-                      {visibleArticleLimit < groupedContinuousArticles.length && (
+                      {onlyHighlightedArticles && visibleContinuousGroups.length === 0 && (
+                        <div className="rounded-lg border border-[var(--line)] bg-[var(--panel)] p-4 text-center text-[12.5px] text-[var(--muted)]">
+                          Nenhum artigo grifado encontrado para a cor selecionada.{' '}
+                          <button
+                            type="button"
+                            onClick={() => setOnlyHighlightedArticles(false)}
+                            className="font-bold text-[var(--accent)] hover:underline cursor-pointer"
+                          >
+                            Voltar a exibir toda a norma
+                          </button>
+                        </div>
+                      )}
+                      {visibleArticleLimit < displayedContinuousGroups.length && (
                         <div className="pt-2 pb-1 flex flex-wrap items-center justify-center gap-2 select-none">
                           <button
                             type="button"
                             onClick={() =>
                               setVisibleArticleLimit((prev) =>
-                                Math.min(groupedContinuousArticles.length, prev + 100),
+                                Math.min(displayedContinuousGroups.length, prev + 100),
                               )
                             }
                             className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[12px] font-bold text-[var(--accent)] hover:bg-[var(--accent)] hover:text-white transition-colors"
                           >
                             Carregar mais artigos ({visibleContinuousGroups.length} de{' '}
-                            {groupedContinuousArticles.length})
+                            {displayedContinuousGroups.length})
                           </button>
                           <button
                             type="button"
-                            onClick={() => setVisibleArticleLimit(groupedContinuousArticles.length)}
+                            onClick={() => setVisibleArticleLimit(displayedContinuousGroups.length)}
                             className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
                           >
-                            Exibir todos os {groupedContinuousArticles.length} artigos
+                            Exibir todos os {displayedContinuousGroups.length} artigos
                           </button>
                         </div>
                       )}
@@ -2386,6 +2845,7 @@ export const LawsPage: React.FC = () => {
                   }`}
                 >
                   {checklistItems.map((item) => {
+                    const todayIso = localDateIso();
                     const isRead = readSet.has(item.id);
                     const isMatched = matchedIds.has(item.id);
                     const itemEditalLinks = itemToLinksMap.get(item.id) || [];
@@ -2396,9 +2856,15 @@ export const LawsPage: React.FC = () => {
                     const articleTarget =
                       itemMeta?.canonicalLabel || (item.artigo_base || item.dispositivo || '').trim();
                     const deviceTarget = formatSequentialDeviceLabel(item.dispositivo, item.artigo_base);
-                    const latestReadDate = [...(item.leituras || [])].sort((a, b) =>
+                    const itemReadings = [...(item.leituras || [])].sort((a, b) =>
                       b.data.localeCompare(a.data),
-                    )[0]?.data;
+                    );
+                    const uniqueItemDates = Array.from(
+                      new Set(itemReadings.map((r) => r.data).filter(Boolean)),
+                    );
+                    const readToday = uniqueItemDates.includes(todayIso);
+                    const itemDateKey = `chk-${item.id}`;
+                    const isDateMgrOpen = openReadDatesKey === itemDateKey;
                     const anchorCandidate = buildArticleAnchorId('law-dev-art', canonicalKey);
                     const assignAnchor = !seenChecklistArticleAnchors.has(anchorCandidate);
                     if (assignAnchor) seenChecklistArticleAnchors.add(anchorCandidate);
@@ -2450,16 +2916,34 @@ export const LawsPage: React.FC = () => {
                                   {item.grau}
                                 </span>
                               )}
-                              {latestReadDate && (
-                                <span className="px-1.5 py-0.5 rounded border border-[var(--good)]/40 bg-[var(--good)]/10 text-[10px] font-bold text-[var(--good)]">
-                                  Lido em {formatIsoDateBr(latestReadDate)}
-                                </span>
+                              {uniqueItemDates.length > 0 && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setArticleCustomDate(todayIso);
+                                    setOpenReadDatesKey(isDateMgrOpen ? null : itemDateKey);
+                                  }}
+                                  title="Ver todas as datas lidas deste dispositivo ou acrescentar mais um dia"
+                                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-[var(--good)]/40 bg-[var(--good)]/10 text-[10px] font-bold text-[var(--good)] hover:border-[var(--good)] cursor-pointer tabular-nums"
+                                >
+                                  <CalendarCheck2 className="w-3 h-3" />
+                                  Lido {uniqueItemDates.length}× ·{' '}
+                                  {uniqueItemDates
+                                    .slice(0, 3)
+                                    .map((d) => formatIsoDateBr(d).slice(0, 5))
+                                    .join(', ')}
+                                  {uniqueItemDates.length > 3
+                                    ? ` +${uniqueItemDates.length - 3}`
+                                    : ''}
+                                </button>
                               )}
                             </div>
                             <p
                               style={{
                                 fontSize: FONT_SIZE_PX[readingPrefs.fontSize],
                                 lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
+                                fontFamily: FONT_FAMILY_CSS[readingPrefs.fontFamily],
                               }}
                               className="m-0 text-[var(--text)] whitespace-pre-line text-justify break-words"
                             >
@@ -2570,18 +3054,126 @@ export const LawsPage: React.FC = () => {
                             </button>
                             <button
                               type="button"
-                              onClick={() => toggleLawItemRead(activeFolder, item.id)}
-                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition-colors ${
-                                isRead
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                if (!isRead || !readToday) {
+                                  addLawItemReadDate(activeFolder, item.id, todayIso);
+                                } else {
+                                  setArticleCustomDate(todayIso);
+                                  setOpenReadDatesKey(isDateMgrOpen ? null : itemDateKey);
+                                }
+                              }}
+                              title={
+                                !isRead
+                                  ? 'Marcar dispositivo como lido hoje'
+                                  : !readToday
+                                    ? 'Acrescentar hoje como mais um dia lido (mantém datas anteriores)'
+                                    : 'Ver ou acrescentar datas de leitura deste dispositivo'
+                              }
+                              className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                                isRead && readToday
                                   ? 'border-[var(--good)] bg-[var(--good)] text-white'
-                                  : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
+                                  : isRead
+                                    ? 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--good)] hover:bg-[var(--good)] hover:text-white'
+                                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
                               }`}
                             >
                               <Check className="w-3 h-3" />
-                              {isRead ? 'Lido' : 'Marcar lido'}
+                              {!isRead
+                                ? 'Marcar lido'
+                                : !readToday
+                                  ? '+1 dia lido'
+                                  : `Lido hoje (${uniqueItemDates.length}×)`}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setArticleCustomDate(todayIso);
+                                setOpenReadDatesKey(isDateMgrOpen ? null : itemDateKey);
+                              }}
+                              title="Gerenciar datas de leitura deste dispositivo"
+                              aria-label={`Datas de leitura de ${deviceTarget}`}
+                              className={`inline-flex items-center justify-center w-[28px] h-[28px] rounded-lg border transition-colors cursor-pointer ${
+                                isDateMgrOpen
+                                  ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                                  : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)]'
+                              }`}
+                            >
+                              <CalendarPlus className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         </div>
+
+                        {isDateMgrOpen && (
+                          <div
+                            className="mt-2.5 pt-2.5 border-t border-[var(--line)]/60 flex flex-col gap-2"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[11px] font-bold text-[var(--text)]">
+                                Histórico de dias lidos ({itemReadings.length})
+                              </span>
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <input
+                                  type="date"
+                                  aria-label={`Selecionar data para ${deviceTarget}`}
+                                  value={articleCustomDate}
+                                  onChange={(e) => setArticleCustomDate(e.target.value)}
+                                  className="ce-input h-[28px] w-auto text-[11px] py-0 px-2"
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    addLawItemReadDate(activeFolder, item.id, articleCustomDate)
+                                  }
+                                  className="inline-flex items-center gap-1 h-[28px] px-2.5 rounded-md border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer"
+                                >
+                                  + Adicionar dia
+                                </button>
+                                {isRead && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      toggleLawItemRead(activeFolder, item.id);
+                                      setOpenReadDatesKey(null);
+                                    }}
+                                    className="h-[28px] px-2 rounded-md border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)] cursor-pointer"
+                                  >
+                                    Desmarcar lido
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                            {itemReadings.length > 0 ? (
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                {itemReadings.map((entry) => (
+                                  <span
+                                    key={entry.id}
+                                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--good)]/35 bg-[var(--panel)] text-[11px] font-mono-num font-bold text-[var(--text)]"
+                                  >
+                                    {formatIsoDateBr(entry.data)}
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        removeLawItemReadDate(activeFolder, item.id, entry.id)
+                                      }
+                                      title={`Remover leitura de ${formatIsoDateBr(entry.data)}`}
+                                      aria-label={`Remover dia ${formatIsoDateBr(entry.data)}`}
+                                      className="text-[var(--muted)] hover:text-[var(--bad)] cursor-pointer"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  </span>
+                                ))}
+                              </div>
+                            ) : (
+                              <span className="text-[11px] text-[var(--muted)]">
+                                Nenhum dia registrado ainda.
+                              </span>
+                            )}
+                          </div>
+                        )}
 
                         {isLinkingThis && (
                           <div className="mt-2.5 pt-2.5 border-t border-[var(--line)]/60 flex flex-wrap items-center gap-2">

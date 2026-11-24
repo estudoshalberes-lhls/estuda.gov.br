@@ -160,6 +160,21 @@ export interface ErrorNotebookEntry {
   revisado_em?: string; // YYYY-MM-DD
 }
 
+export type ContentStudyStatus = 'a_ler' | 'em_leitura' | 'revisar' | 'dominado';
+
+export type CaseLawVigencia = 'Vigente' | 'Superada' | 'Cancelada';
+
+export interface ReadingQueueItem {
+  id: string;
+  kind: 'law' | 'summary' | 'caselaw' | 'pdf';
+  title: string;
+  subtitle?: string;
+  folder?: string;
+  itemId?: string;
+  done?: boolean;
+  addedAt: string;
+}
+
 export interface CaseLawItem {
   id: string;
   categoria: string;
@@ -167,6 +182,11 @@ export interface CaseLawItem {
   tribunal: string;
   identificador: string;
   fonte?: string;
+  materia?: string;
+  vigencia?: CaseLawVigencia;
+  pinned?: boolean;
+  studyStatus?: ContentStudyStatus;
+  lastOpenedAt?: string;
   texto: string;
   criado_em: string;
   atualizado_em?: string;
@@ -353,6 +373,10 @@ export interface PersonalPdfFile {
   createdAt: string;
   updatedAt?: string;
   hasAnnotations?: boolean;
+  pinned?: boolean;
+  studyStatus?: ContentStudyStatus;
+  subtopic?: string;
+  lastOpenedAt?: string;
 }
 
 export type SummaryItemKind = 'note' | 'pdf' | 'mindmap' | 'image';
@@ -410,7 +434,12 @@ export interface SummaryFile {
   kind?: SummaryItemKind;
   title?: string;
   content?: string;
+  contentHtml?: string;
   tags?: string[];
+  subtopic?: string;
+  pinned?: boolean;
+  studyStatus?: ContentStudyStatus;
+  lastOpenedAt?: string;
   mindMap?: MindMapNode;
 }
 
@@ -590,6 +619,7 @@ export interface AppPreferences {
   pomodoro_auto_commit?: boolean;
   flashcard_srs?: Record<string, FlashcardSrsState>;
   push_notifications?: DailyPushNotificationPrefs;
+  reading_queue?: ReadingQueueItem[];
 }
 
 export interface QuizAnswer {

@@ -35,20 +35,42 @@ function resolveCssVariables(raw: string): string {
 
 function normalizeSvgForPdfPrint(svg: SVGSVGElement, width: number, height: number): SVGSVGElement {
   const clone = svg.cloneNode(true) as SVGSVGElement;
-  const pad = 8;
-  const totalW = Math.max(120, Math.round(width) + pad * 2);
-  const totalH = Math.max(80, Math.round(height) + pad * 2);
+  const pad = 12;
+  const existingVb = svg.getAttribute('viewBox');
+  let totalW = Math.max(120, Math.round(width) + pad * 2);
+  let totalH = Math.max(80, Math.round(height) + pad * 2);
+  let viewBoxStr = `${-pad} ${-pad} ${totalW} ${totalH}`;
+
+  if (existingVb) {
+    const parts = existingVb.trim().split(/[\s,]+/).map(Number);
+    if (parts.length === 4 && parts.every((n) => Number.isFinite(n)) && parts[2] > 0 && parts[3] > 0) {
+      totalW = Math.max(120, Math.round(parts[2]) + pad * 2);
+      totalH = Math.max(80, Math.round(parts[3]) + pad * 2);
+      viewBoxStr = `${parts[0] - pad} ${parts[1] - pad} ${totalW} ${totalH}`;
+    }
+  }
 
   clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
   clone.setAttribute('xmlns:xlink', 'http://www.w3.org/1999/xlink');
   clone.setAttribute('width', String(totalW));
   clone.setAttribute('height', String(totalH));
-  clone.setAttribute('viewBox', `${-pad} ${-pad} ${totalW} ${totalH}`);
+  clone.setAttribute('viewBox', viewBoxStr);
   clone.setAttribute('color', '#071d41');
   clone.setAttribute(
     'style',
     "font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; color: #071d41; background: #ffffff;",
   );
+
+  // Embed inline print CSS so Tailwind utility classes on SVG <text> remain sharp in standalone SVG blobs
+  const styleEl = document.createElementNS('http://www.w3.org/2000/svg', 'style');
+  styleEl.textContent = `
+    text { font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif; }
+    .font-semibold { font-weight: 600; }
+    .font-bold { font-weight: 700; }
+    .font-extrabold { font-weight: 800; }
+    .font-mono-num { font-variant-numeric: tabular-nums; }
+  `;
+  clone.insertBefore(styleEl, clone.firstChild);
 
   // Strip interactive hover overlays if any
   clone.querySelectorAll('rect[fill="transparent"]').forEach((el) => el.remove());
@@ -58,8 +80,13 @@ function normalizeSvgForPdfPrint(svg: SVGSVGElement, width: number, height: numb
   for (const node of allNodes) {
     for (const attr of attrNames) {
       const val = node.getAttribute(attr);
-      if (val && val.includes('var(')) {
-        node.setAttribute(attr, resolveCssVariables(val));
+      if (!val) continue;
+      let nextVal = val.includes('var(') ? resolveCssVariables(val) : val;
+      if (nextVal.includes('currentColor')) {
+        nextVal = nextVal.replace(/currentColor/g, '#071d41');
+      }
+      if (nextVal !== val) {
+        node.setAttribute(attr, nextVal);
       }
     }
     if (node.tagName.toLowerCase() === 'text') {
@@ -80,11 +107,11 @@ async function svgElementToPngDataUrl(
   svg: SVGSVGElement,
   width: number,
   height: number,
-  scale = 2.2,
+  scale = 2.5,
 ): Promise<{ dataUrl: string; widthPx: number; heightPx: number }> {
   const normalized = normalizeSvgForPdfPrint(svg, width, height);
-  const outW = Number(normalized.getAttribute('width')) || Math.round(width) + 16;
-  const outH = Number(normalized.getAttribute('height')) || Math.round(height) + 16;
+  const outW = Number(normalized.getAttribute('width')) || Math.round(width) + 24;
+  const outH = Number(normalized.getAttribute('height')) || Math.round(height) + 24;
 
   const serializer = new XMLSerializer();
   const svgString = serializer.serializeToString(normalized);

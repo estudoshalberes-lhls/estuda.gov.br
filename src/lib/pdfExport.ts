@@ -1327,6 +1327,41 @@ export interface PerformancePdfDayStudyRow {
   subjects: Record<string, number>;
 }
 
+export interface PerformancePdfExamSubjectRow {
+  subject: string;
+  total: number;
+  correct: number;
+  wrong: number;
+  blank: number;
+  accuracyPct: number | null;
+  pending?: number;
+  corrected?: number;
+}
+
+export interface PerformancePdfExamQuestionRow {
+  numero?: number;
+  subject: string;
+  resposta?: string;
+  gabarito?: string;
+  status: 'Erro' | 'Em branco' | 'Pendente' | 'Corrigido';
+  resumo?: string;
+}
+
+export interface PerformancePdfExamContext {
+  title: string;
+  kind: 'simulado' | 'prova_biblioteca';
+  banca?: string;
+  data?: string;
+  tempoFormatted?: string;
+  avgTimePerQuestionFormatted?: string;
+  pontosLiquidos?: number;
+  emBranco?: number;
+  pendingCorrections?: number;
+  correctedCount?: number;
+  subjectDetailRows?: PerformancePdfExamSubjectRow[];
+  missedQuestions?: PerformancePdfExamQuestionRow[];
+}
+
 export function exportPerformanceReportPdf(params: {
   totalAnswered: number;
   totalCorrect: number;
@@ -1349,76 +1384,156 @@ export function exportPerformanceReportPdf(params: {
   };
   filteredStudyByDate?: PerformancePdfDayStudyRow[];
   dailySeries?: PerformancePdfDailyRow[];
-}): void {
+  examContext?: PerformancePdfExamContext;
+}): string {
   const ctx = createDoc();
-  const { doc, margin, maxWidth, pageWidth } = ctx;
-  const protocolNumber = `TRANSP-${String(
+  const { doc, margin, maxWidth, pageWidth, pageHeight } = ctx;
+  const exam = params.examContext;
+  const isExamScoped = Boolean(exam);
+  const protocolNumber = `${isExamScoped ? 'PROVA' : 'TRANSP'}-${String(
     params.totalAnswered * 17 + params.completedSimulationsCount * 29 + 2026,
   ).padStart(6, '0')}`;
-  const issuedAt = new Date().toLocaleString('pt-BR');
+  const issuedAt = localDateTimeBrazilian();
+  const issuedDateOnly = localDateBrazilian();
+
+  const pdfText = (value: unknown) => normalizePdfLegalText(safePdfText(value));
 
   // Helper: Draw Gov.br Official Section Heading
   const drawSectionHeading = (num: number, heading: string) => {
     ctx.ensureSpace(16);
     doc.setFillColor(237, 242, 248);
     doc.setDrawColor(182, 198, 220);
+    doc.setLineWidth(0.28);
     doc.rect(margin, ctx.y - 4.5, maxWidth, 7.2, 'FD');
     doc.setFillColor(19, 81, 180);
     doc.rect(margin, ctx.y - 4.5, 2.2, 7.2, 'F');
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(10.5);
+    doc.setFontSize(10.2);
     doc.setTextColor(7, 29, 65);
-    doc.text(safePdfText(`${num}. ${heading.toUpperCase()}`), margin + 4.8, ctx.y + 0.3);
+    doc.text(pdfText(`${num}. ${heading.toUpperCase()}`), margin + 4.8, ctx.y + 0.3);
     ctx.y += 7;
   };
 
   // --- Official Federal Header Banner ---
   doc.setFillColor(7, 29, 65);
-  doc.rect(0, 0, pageWidth, 33, 'F');
+  doc.rect(0, 0, pageWidth, 34, 'F');
 
   const third = pageWidth / 3;
   doc.setFillColor(22, 136, 33);
-  doc.rect(0, 33, third, 2, 'F');
+  doc.rect(0, 34, third, 2, 'F');
   doc.setFillColor(255, 205, 7);
-  doc.rect(third, 33, third, 2, 'F');
+  doc.rect(third, 34, third, 2, 'F');
   doc.setFillColor(19, 81, 180);
-  doc.rect(third * 2, 33, pageWidth - third * 2, 2, 'F');
+  doc.rect(third * 2, 34, pageWidth - third * 2, 2, 'F');
 
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9);
+  doc.setFontSize(8.2);
   doc.setTextColor(255, 205, 7);
-  doc.text('PORTAL DA TRANSPARENCIA ESTUDANTIL · ESTUDA.GOV.BR', margin, 11);
+  doc.text('PORTAL DA TRANSPARÊNCIA ESTUDANTIL · ESTUDA.GOV.BR', margin, 10.5);
 
-  doc.setFontSize(14.5);
+  doc.setFontSize(isExamScoped ? 13.8 : 14.5);
   doc.setTextColor(255, 255, 255);
-  doc.text('RELATORIO OFICIAL DE DESEMPENHO E EVOLUCAO ANALITICA', margin, 19.5);
+  doc.text(
+    pdfText(
+      isExamScoped
+        ? 'RELATÓRIO OFICIAL DE DESEMPENHO — PROVA SELECIONADA'
+        : 'RELATÓRIO OFICIAL DE DESEMPENHO E EVOLUÇÃO ANALÍTICA',
+    ),
+    margin,
+    19.2,
+  );
 
   doc.setFont('helvetica', 'normal');
   doc.setFontSize(8.2);
   doc.setTextColor(215, 225, 240);
-  doc.text(
-    safePdfText(
-      `Titular: ${params.holderName || 'Cidadao-Estudante Federal'} · Protocolo ${protocolNumber} · Emitido em ${issuedAt}`,
-    ),
-    margin,
-    27,
-  );
+  const subBannerText = isExamScoped && exam
+    ? `Prova: ${visibleName(exam.title)} · Protocolo ${protocolNumber} · Emitido em ${issuedAt}`
+    : `Titular: ${params.holderName || 'Cidadão-Estudante Federal'} · Protocolo ${protocolNumber} · Emitido em ${issuedAt}`;
+  const subBannerLine = (doc.splitTextToSize(pdfText(subBannerText), maxWidth) as string[])[0] || '';
+  doc.text(subBannerLine, margin, 27.2);
 
-  ctx.y = 43;
+  ctx.y = 43.5;
+
+  // --- Official Exam Technical Sheet (when filtered by a specific exam) ---
+  if (exam) {
+    const metaRows: Array<{ label: string; value: string }> = [
+      { label: 'PROVA / SIMULADO', value: visibleName(exam.title) },
+      { label: 'MODALIDADE', value: exam.kind === 'simulado' ? 'Simulado Fechado Oficial' : 'Prova da Biblioteca (Correções)' },
+      { label: 'BANCA EXAMINADORA', value: exam.banca || 'Geral / Não informada' },
+      { label: 'DATA / REGISTRO', value: exam.data || issuedDateOnly },
+    ];
+    if (exam.tempoFormatted) {
+      metaRows.push({
+        label: 'DURAÇÃO DA PROVA',
+        value: exam.avgTimePerQuestionFormatted
+          ? `${exam.tempoFormatted} (${exam.avgTimePerQuestionFormatted}/questão)`
+          : exam.tempoFormatted,
+      });
+    }
+    if (typeof exam.pontosLiquidos === 'number') {
+      metaRows.push({ label: 'PONTOS LÍQUIDOS', value: String(exam.pontosLiquidos) });
+    }
+    metaRows.push({
+      label: 'TITULAR',
+      value: params.holderName || 'Cidadão-Estudante Federal',
+    });
+
+    const cols = 2;
+    const rowsCount = Math.ceil(metaRows.length / cols);
+    const boxH = 8 + rowsCount * 6.2 + 2;
+    ctx.ensureSpace(boxH + 4);
+
+    doc.setFillColor(246, 249, 253);
+    doc.setDrawColor(182, 198, 220);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, ctx.y - 3, maxWidth, boxH, 'FD');
+
+    doc.setFillColor(7, 29, 65);
+    doc.rect(margin, ctx.y - 3, 2.2, boxH, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.6);
+    doc.setTextColor(19, 81, 180);
+    doc.text('FICHA TÉCNICA DA PROVA SELECIONADA', margin + 4.8, ctx.y + 1.5);
+
+    const colW = (maxWidth - 10) / cols;
+    metaRows.forEach((item, idx) => {
+      const col = idx % cols;
+      const rowIdx = Math.floor(idx / cols);
+      const cellX = margin + 4.8 + col * (colW + 2);
+      const cellY = ctx.y + 7.2 + rowIdx * 6.2;
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(6.8);
+      doc.setTextColor(86, 104, 130);
+      doc.text(pdfText(`${item.label}:`), cellX, cellY);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(7, 29, 65);
+      const labelW = doc.getTextWidth(pdfText(`${item.label}: `));
+      const valStr =
+        (doc.splitTextToSize(pdfText(item.value), Math.max(24, colW - labelW - 2)) as string[])[0] || '';
+      doc.text(valStr, cellX + labelW + 1, cellY);
+    });
+
+    ctx.y += boxH + 3.5;
+  }
 
   // --- Active Filters Notice ---
   if (params.filterDescription) {
     const filterLines = doc.splitTextToSize(
-      safePdfText(`Parametros e filtros vigentes: ${params.filterDescription}`),
+      pdfText(`Parâmetros e filtros vigentes: ${params.filterDescription}`),
       maxWidth - 6,
     ) as string[];
     const filterBoxH = filterLines.length * 4.4 + 4;
     ctx.ensureSpace(filterBoxH + 4);
     doc.setFillColor(247, 249, 252);
     doc.setDrawColor(195, 208, 228);
+    doc.setLineWidth(0.25);
     doc.rect(margin, ctx.y - 3, maxWidth, filterBoxH, 'FD');
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(8.3);
+    doc.setFontSize(8.2);
     doc.setTextColor(61, 79, 107);
     filterLines.forEach((line, idx) => {
       doc.text(line, margin + 3, ctx.y + 1 + idx * 4.4);
@@ -1428,65 +1543,137 @@ export function exportPerformanceReportPdf(params: {
 
   // --- Section 1: Executive KPIs ---
   let sectionIdx = 1;
-  drawSectionHeading(sectionIdx++, 'Indicadores Consolidados de Rendimento');
+  drawSectionHeading(
+    sectionIdx++,
+    isExamScoped ? 'Indicadores Oficiais da Prova Selecionada' : 'Indicadores Consolidados de Rendimento',
+  );
 
   ctx.ensureSpace(22);
   const kpiGap = 3;
   const kpiW = (maxWidth - kpiGap * 3) / 4;
-  const kpis: Array<{ label: string; value: string; note: string; accent: [number, number, number] }> = [
-    {
-      label: 'QUESTOES RESPONDIDAS',
-      value: params.totalAnswered.toLocaleString('pt-BR'),
-      note: `${params.totalCorrect} acertos / ${params.totalWrong} erros`,
-      accent: [7, 29, 65],
-    },
-    {
-      label: 'APROVEITAMENTO GERAL',
-      value: `${params.accuracy}%`,
-      note: params.accuracy >= 80 ? 'Acima da meta (80%)' : 'Meta institucional: 80%',
-      accent: params.accuracy >= 80 ? [22, 136, 33] : [19, 81, 180],
-    },
-    {
-      label: 'SIMULADOS CONCLUIDOS',
-      value: String(params.completedSimulationsCount),
-      note: 'Boletim de Ocorrencias',
-      accent: [19, 81, 180],
-    },
-    {
-      label: 'TEMPO CRONOMETRADO',
-      value: params.totalStudyFormatted,
-      note: 'Ponto Eletronico liquido',
-      accent: [7, 29, 65],
-    },
-  ];
+  const kpis: Array<{ label: string; value: string; note: string; accent: [number, number, number] }> =
+    exam?.kind === 'simulado'
+      ? [
+          {
+            label: 'QUESTÕES DA PROVA',
+            value: params.totalAnswered.toLocaleString('pt-BR'),
+            note: `${params.totalCorrect} acertos · ${params.totalWrong} erros${
+              exam.emBranco ? ` · ${exam.emBranco} br.` : ''
+            }`,
+            accent: [7, 29, 65],
+          },
+          {
+            label: 'APROVEITAMENTO',
+            value: `${params.accuracy}%`,
+            note: params.accuracy >= 80 ? 'Acima da meta (80%)' : 'Meta institucional: 80%',
+            accent: params.accuracy >= 80 ? [22, 136, 33] : params.accuracy >= 60 ? [19, 81, 180] : [201, 42, 42],
+          },
+          {
+            label: typeof exam.pontosLiquidos === 'number' ? 'PONTOS LÍQUIDOS' : 'MATÉRIAS NA PROVA',
+            value:
+              typeof exam.pontosLiquidos === 'number'
+                ? String(exam.pontosLiquidos)
+                : String(exam.subjectDetailRows?.length ?? params.subjectRows.length),
+            note:
+              typeof exam.pontosLiquidos === 'number'
+                ? `${exam.subjectDetailRows?.length ?? params.subjectRows.length} matéria(s) avaliada(s)`
+                : 'Disciplinas identificadas',
+            accent: [19, 81, 180],
+          },
+          {
+            label: 'TEMPO DE PROVA',
+            value: exam.tempoFormatted || params.totalStudyFormatted,
+            note: exam.avgTimePerQuestionFormatted
+              ? `Média: ${exam.avgTimePerQuestionFormatted}/questão`
+              : 'Duração registrada',
+            accent: [7, 29, 65],
+          },
+        ]
+      : exam?.kind === 'prova_biblioteca'
+        ? [
+            {
+              label: 'REGISTROS NA PROVA',
+              value: params.totalAnswered.toLocaleString('pt-BR'),
+              note: 'Questões/anotações registradas',
+              accent: [7, 29, 65],
+            },
+            {
+              label: 'CORREÇÕES CONCLUÍDAS',
+              value: `${params.accuracy}%`,
+              note: `${exam.correctedCount ?? params.totalCorrect} corrigida(s)`,
+              accent: [22, 136, 33],
+            },
+            {
+              label: 'PENDENTES DE REVISÃO',
+              value: String(exam.pendingCorrections ?? params.totalWrong),
+              note: 'Aguardando revisão no Caderno',
+              accent: (exam.pendingCorrections ?? params.totalWrong) > 0 ? [180, 83, 9] : [22, 136, 33],
+            },
+            {
+              label: 'MATÉRIAS ASSOCIADAS',
+              value: String(exam.subjectDetailRows?.length ?? params.subjectRows.length),
+              note: exam.banca || 'Banca não informada',
+              accent: [19, 81, 180],
+            },
+          ]
+        : [
+            {
+              label: 'QUESTÕES RESPONDIDAS',
+              value: params.totalAnswered.toLocaleString('pt-BR'),
+              note: `${params.totalCorrect} acertos / ${params.totalWrong} erros`,
+              accent: [7, 29, 65],
+            },
+            {
+              label: 'APROVEITAMENTO GERAL',
+              value: `${params.accuracy}%`,
+              note: params.accuracy >= 80 ? 'Acima da meta (80%)' : 'Meta institucional: 80%',
+              accent: params.accuracy >= 80 ? [22, 136, 33] : [19, 81, 180],
+            },
+            {
+              label: 'SIMULADOS CONCLUÍDOS',
+              value: String(params.completedSimulationsCount),
+              note: 'Boletim de Ocorrências',
+              accent: [19, 81, 180],
+            },
+            {
+              label: 'TEMPO CRONOMETRADO',
+              value: params.totalStudyFormatted,
+              note: 'Ponto Eletrônico líquido',
+              accent: [7, 29, 65],
+            },
+          ];
 
   kpis.forEach((kpi, idx) => {
     const x = margin + idx * (kpiW + kpiGap);
     doc.setFillColor(255, 255, 255);
     doc.setDrawColor(182, 198, 220);
+    doc.setLineWidth(0.28);
     doc.rect(x, ctx.y - 2, kpiW, 18, 'FD');
     doc.setFillColor(...kpi.accent);
     doc.rect(x, ctx.y - 2, kpiW, 1.4, 'F');
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6.8);
+    doc.setFontSize(6.6);
     doc.setTextColor(92, 110, 138);
-    doc.text(kpi.label, x + 2.5, ctx.y + 3);
+    doc.text(pdfText(kpi.label), x + 2.5, ctx.y + 3);
 
-    doc.setFontSize(12.5);
+    doc.setFontSize(12.2);
     doc.setTextColor(...kpi.accent);
-    doc.text(safePdfText(kpi.value), x + 2.5, ctx.y + 10);
+    doc.text(pdfText(kpi.value), x + 2.5, ctx.y + 10);
 
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7);
+    doc.setFontSize(6.9);
     doc.setTextColor(61, 79, 107);
-    doc.text(safePdfText(doc.splitTextToSize(kpi.note, kpiW - 5)[0]), x + 2.5, ctx.y + 14.2);
+    doc.text(pdfText(doc.splitTextToSize(pdfText(kpi.note), kpiW - 5)[0]), x + 2.5, ctx.y + 14.2);
   });
   ctx.y += 22;
 
   // --- Section 2: Captured D3 Charts ---
   if (params.charts && params.charts.length > 0) {
-    drawSectionHeading(sectionIdx++, 'Paineis Graficos Analiticos (D3.js)');
+    drawSectionHeading(
+      sectionIdx++,
+      isExamScoped ? 'Painéis Gráficos Analíticos Filtrados pela Prova' : 'Painéis Gráficos Analíticos (D3.js)',
+    );
 
     params.charts.forEach((chart, idx) => {
       const boxPadX = 3;
@@ -1495,7 +1682,7 @@ export function exportPerformanceReportPdf(params: {
       const aspect = chart.widthPx > 0 ? chart.heightPx / chart.widthPx : 0.45;
       let renderW = availW;
       let renderH = renderW * aspect;
-      const maxChartH = 82;
+      const maxChartH = isExamScoped ? 94 : 82;
       if (renderH > maxChartH) {
         renderH = maxChartH;
         renderW = renderH / aspect;
@@ -1507,6 +1694,7 @@ export function exportPerformanceReportPdf(params: {
       const cardTop = ctx.y - 2;
       doc.setFillColor(255, 255, 255);
       doc.setDrawColor(182, 198, 220);
+      doc.setLineWidth(0.28);
       doc.rect(margin, cardTop, maxWidth, cardH, 'FD');
 
       doc.setFillColor(247, 249, 252);
@@ -1517,7 +1705,7 @@ export function exportPerformanceReportPdf(params: {
       doc.setFontSize(8.8);
       doc.setTextColor(7, 29, 65);
       doc.text(
-        safePdfText(`Grafico ${idx + 1} · ${chart.title}`),
+        pdfText(`Gráfico ${idx + 1} · ${chart.title}`),
         margin + 3,
         cardTop + 4.8,
       );
@@ -1526,7 +1714,7 @@ export function exportPerformanceReportPdf(params: {
         doc.setFont('helvetica', 'normal');
         doc.setFontSize(7.4);
         doc.setTextColor(61, 79, 107);
-        const subLine = doc.splitTextToSize(safePdfText(chart.subtitle), maxWidth - 6)[0];
+        const subLine = doc.splitTextToSize(pdfText(chart.subtitle), maxWidth - 6)[0];
         doc.text(subLine, margin + 3, cardTop + 9.4);
       }
 
@@ -1539,7 +1727,87 @@ export function exportPerformanceReportPdf(params: {
   }
 
   // --- Section 3: Subject Breakdown Table ---
-  if (params.subjectRows.length > 0) {
+  if (exam?.subjectDetailRows && exam.subjectDetailRows.length > 0) {
+    drawSectionHeading(sectionIdx++, 'Desempenho Detalhado por Matéria na Prova');
+
+    const isProofMode = exam.kind === 'prova_biblioteca';
+
+    const drawExamSubjectHeader = () => {
+      ctx.ensureSpace(12);
+      doc.setFillColor(7, 29, 65);
+      doc.rect(margin, ctx.y - 4.2, maxWidth, 6.8, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.6);
+      doc.setTextColor(255, 255, 255);
+      doc.text('DISCIPLINA / MATÉRIA', margin + 2.5, ctx.y + 0.4);
+      if (isProofMode) {
+        doc.text('REGISTROS', margin + maxWidth * 0.58, ctx.y + 0.4, { align: 'right' });
+        doc.text('CORRIGIDOS', margin + maxWidth * 0.72, ctx.y + 0.4, { align: 'right' });
+        doc.text('PENDENTES', margin + maxWidth * 0.85, ctx.y + 0.4, { align: 'right' });
+        doc.text('PROGR.', margin + maxWidth - 2.5, ctx.y + 0.4, { align: 'right' });
+      } else {
+        doc.text('QUESTÕES', margin + maxWidth * 0.54, ctx.y + 0.4, { align: 'right' });
+        doc.text('ACERTOS', margin + maxWidth * 0.65, ctx.y + 0.4, { align: 'right' });
+        doc.text('ERROS', margin + maxWidth * 0.75, ctx.y + 0.4, { align: 'right' });
+        doc.text('BRANCO', margin + maxWidth * 0.86, ctx.y + 0.4, { align: 'right' });
+        doc.text('TAXA', margin + maxWidth - 2.5, ctx.y + 0.4, { align: 'right' });
+      }
+      ctx.y += 5.5;
+    };
+
+    drawExamSubjectHeader();
+
+    exam.subjectDetailRows.forEach((row, idx) => {
+      if (ctx.y + 7 > pageHeight - 16) {
+        ctx.doc.addPage();
+        ctx.y = 18;
+        drawExamSubjectHeader();
+      }
+      if (idx % 2 === 1) {
+        doc.setFillColor(247, 249, 252);
+        doc.rect(margin, ctx.y - 3.8, maxWidth, 6, 'F');
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.line(margin, ctx.y + 2.2, margin + maxWidth, ctx.y + 2.2);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.3);
+      doc.setTextColor(7, 29, 65);
+      const subjLabel = doc.splitTextToSize(pdfText(visibleName(row.subject)), maxWidth * 0.44)[0];
+      doc.text(subjLabel, margin + 2.5, ctx.y);
+
+      if (isProofMode) {
+        const corr = row.corrected ?? 0;
+        const pend = row.pending ?? Math.max(0, row.total - corr);
+        const pct = row.total > 0 ? Math.round((corr / row.total) * 100) : 0;
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(61, 79, 107);
+        doc.text(String(row.total), margin + maxWidth * 0.58, ctx.y, { align: 'right' });
+        doc.setTextColor(22, 136, 33);
+        doc.text(String(corr), margin + maxWidth * 0.72, ctx.y, { align: 'right' });
+        doc.setTextColor(pend > 0 ? 180 : 61, pend > 0 ? 83 : 79, pend > 0 ? 9 : 107);
+        doc.text(String(pend), margin + maxWidth * 0.85, ctx.y, { align: 'right' });
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(pct >= 80 ? 22 : 19, pct >= 80 ? 136 : 81, pct >= 80 ? 33 : 180);
+        doc.text(`${pct}%`, margin + maxWidth - 2.5, ctx.y, { align: 'right' });
+      } else {
+        const pct = row.accuracyPct ?? (row.total ? Math.round((row.correct / row.total) * 100) : 0);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(61, 79, 107);
+        doc.text(String(row.total), margin + maxWidth * 0.54, ctx.y, { align: 'right' });
+        doc.text(String(row.correct), margin + maxWidth * 0.65, ctx.y, { align: 'right' });
+        doc.text(String(row.wrong), margin + maxWidth * 0.75, ctx.y, { align: 'right' });
+        doc.text(String(row.blank), margin + maxWidth * 0.86, ctx.y, { align: 'right' });
+        doc.setFont('helvetica', 'bold');
+        if (pct >= 80) doc.setTextColor(22, 136, 33);
+        else if (pct >= 60) doc.setTextColor(19, 81, 180);
+        else doc.setTextColor(201, 42, 42);
+        doc.text(`${pct}%`, margin + maxWidth - 2.5, ctx.y, { align: 'right' });
+      }
+      ctx.y += 6;
+    });
+    ctx.y += 4;
+  } else if (params.subjectRows.length > 0) {
     drawSectionHeading(sectionIdx++, 'Desempenho Detalhado por Disciplina');
 
     const drawSubjectTableHeader = () => {
@@ -1549,8 +1817,8 @@ export function exportPerformanceReportPdf(params: {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(7.8);
       doc.setTextColor(255, 255, 255);
-      doc.text('DISCIPLINA / MATERIA', margin + 2.5, ctx.y + 0.4);
-      doc.text('QUESTOES', margin + maxWidth * 0.54, ctx.y + 0.4, { align: 'right' });
+      doc.text('DISCIPLINA / MATÉRIA', margin + 2.5, ctx.y + 0.4);
+      doc.text('QUESTÕES', margin + maxWidth * 0.54, ctx.y + 0.4, { align: 'right' });
       doc.text('ACERTOS', margin + maxWidth * 0.66, ctx.y + 0.4, { align: 'right' });
       doc.text('ERROS', margin + maxWidth * 0.76, ctx.y + 0.4, { align: 'right' });
       doc.text('TAXA', margin + maxWidth * 0.87, ctx.y + 0.4, { align: 'right' });
@@ -1561,7 +1829,7 @@ export function exportPerformanceReportPdf(params: {
     drawSubjectTableHeader();
 
     params.subjectRows.forEach((row, idx) => {
-      if (ctx.y + 7 > ctx.pageHeight - 16) {
+      if (ctx.y + 7 > pageHeight - 16) {
         ctx.doc.addPage();
         ctx.y = 18;
         drawSubjectTableHeader();
@@ -1579,7 +1847,7 @@ export function exportPerformanceReportPdf(params: {
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(8.3);
       doc.setTextColor(7, 29, 65);
-      const subjLabel = doc.splitTextToSize(safePdfText(visibleName(row.subject)), maxWidth * 0.44)[0];
+      const subjLabel = doc.splitTextToSize(pdfText(visibleName(row.subject)), maxWidth * 0.44)[0];
       doc.text(subjLabel, margin + 2.5, ctx.y);
 
       doc.setFont('helvetica', 'normal');
@@ -1596,7 +1864,7 @@ export function exportPerformanceReportPdf(params: {
 
       doc.setFont('helvetica', 'normal');
       doc.setTextColor(7, 29, 65);
-      doc.text(safePdfText(params.formatDuration(row.studySeconds)), margin + maxWidth - 2.5, ctx.y, {
+      doc.text(pdfText(params.formatDuration(row.studySeconds)), margin + maxWidth - 2.5, ctx.y, {
         align: 'right',
       });
       ctx.y += 6;
@@ -1604,147 +1872,231 @@ export function exportPerformanceReportPdf(params: {
     ctx.y += 4;
   }
 
-  // --- Section 4: Filtered Study Time Breakdown ---
-  if (params.filteredStudySummary) {
-    drawSectionHeading(sectionIdx++, 'Apuracao de Carga Horaria no Periodo Filtrado');
-
-    ctx.ensureSpace(14);
-    doc.setFillColor(247, 249, 252);
-    doc.setDrawColor(182, 198, 220);
-    doc.rect(margin, ctx.y - 3, maxWidth, 9.5, 'FD');
-    doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8.8);
-    doc.setTextColor(7, 29, 65);
-    doc.text(
-      safePdfText(
-        `Total acumulado: ${params.filteredStudySummary.totalFormatted}   ·   Media/dia ativo: ${params.filteredStudySummary.avgFormatted}   ·   ${params.filteredStudySummary.activeDays} dia(s) ativo(s)   ·   ${params.filteredStudySummary.sessionsCount} sessao(oes)`,
-      ),
-      margin + 3,
-      ctx.y + 2.5,
+  // --- Section 4 (Exam Mode): Critical / Missed Questions Audit Table ---
+  if (exam?.missedQuestions && exam.missedQuestions.length > 0) {
+    drawSectionHeading(
+      sectionIdx++,
+      exam.kind === 'simulado'
+        ? `Quadro de Questões Críticas da Prova (${exam.missedQuestions.length})`
+        : `Registros e Pontos de Revisão da Prova (${exam.missedQuestions.length})`,
     );
-    ctx.y += 11;
 
-    if (params.filteredStudyByDate && params.filteredStudyByDate.length > 0) {
-      params.filteredStudyByDate.slice(0, 20).forEach((dRow, idx) => {
-        const [yy, mm, dd] = /^\d{4}-\d{2}-\d{2}$/.test(dRow.date) ? dRow.date.split('-') : ['', '', ''];
-        const brDate = yy ? `${dd}/${mm}/${yy}` : dRow.date;
-        const subjectsText = Object.entries(dRow.subjects)
-          .map(([subj, sec]) => `${visibleName(subj)} (${params.formatDuration(sec)})`)
-          .join(', ');
+    exam.missedQuestions.slice(0, 60).forEach((item, idx) => {
+      const qPrefix = item.numero ? `Q${String(item.numero).padStart(2, '0')}` : `#${String(idx + 1).padStart(2, '0')}`;
+      const answerMeta =
+        item.resposta || item.gabarito
+          ? ` · Marcada: ${item.resposta || 'Em branco'} | Gabarito: ${item.gabarito || '-'}`
+          : '';
+      const headerLine = `${qPrefix} · ${visibleName(item.subject)} [${item.status}]${answerMeta}`;
+      const snippet = item.resumo?.trim() ? item.resumo.trim().replace(/\s+/g, ' ').slice(0, 210) : '';
+
+      ctx.ensureSpace(snippet ? 11.5 : 6.5);
+      if (idx % 2 === 1) {
+        doc.setFillColor(247, 249, 252);
+        doc.rect(margin, ctx.y - 3.6, maxWidth, snippet ? 9.8 : 5.4, 'F');
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.1);
+      doc.setTextColor(
+        item.status === 'Corrigido' ? 22 : item.status === 'Erro' ? 185 : 7,
+        item.status === 'Corrigido' ? 118 : item.status === 'Erro' ? 28 : 29,
+        item.status === 'Corrigido' ? 33 : item.status === 'Erro' ? 28 : 65,
+      );
+      const hLine = (doc.splitTextToSize(pdfText(headerLine), maxWidth - 4) as string[])[0] || '';
+      doc.text(hLine, margin + 2, ctx.y);
+      ctx.y += 4.3;
+
+      if (snippet) {
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(7.6);
+        doc.setTextColor(61, 79, 107);
+        const sLines = (doc.splitTextToSize(pdfText(snippet), maxWidth - 6) as string[]).slice(0, 2);
+        sLines.forEach((sl) => {
+          ctx.ensureSpace(4.2);
+          doc.text(sl, margin + 3.5, ctx.y);
+          ctx.y += 3.8;
+        });
+      }
+      ctx.y += 1.2;
+    });
+    ctx.y += 2;
+  }
+
+  // --- General Mode Sections (Study Time, 14-Day Evolution, Banks, Recent Simulations) ---
+  if (!isExamScoped) {
+    if (params.filteredStudySummary) {
+      drawSectionHeading(sectionIdx++, 'Apuração de Carga Horária no Período Filtrado');
+
+      ctx.ensureSpace(14);
+      doc.setFillColor(247, 249, 252);
+      doc.setDrawColor(182, 198, 220);
+      doc.rect(margin, ctx.y - 3, maxWidth, 9.5, 'FD');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.6);
+      doc.setTextColor(7, 29, 65);
+      doc.text(
+        pdfText(
+          `Total acumulado: ${params.filteredStudySummary.totalFormatted}   ·   Média/dia ativo: ${params.filteredStudySummary.avgFormatted}   ·   ${params.filteredStudySummary.activeDays} dia(s) ativo(s)   ·   ${params.filteredStudySummary.sessionsCount} sessão(ões)`,
+        ),
+        margin + 3,
+        ctx.y + 2.5,
+      );
+      ctx.y += 11;
+
+      if (params.filteredStudyByDate && params.filteredStudyByDate.length > 0) {
+        params.filteredStudyByDate.slice(0, 20).forEach((dRow, idx) => {
+          const [yy, mm, dd] = /^\d{4}-\d{2}-\d{2}$/.test(dRow.date) ? dRow.date.split('-') : ['', '', ''];
+          const brDate = yy ? `${dd}/${mm}/${yy}` : dRow.date;
+          const subjectsText = Object.entries(dRow.subjects)
+            .map(([subj, sec]) => `${visibleName(subj)} (${params.formatDuration(sec)})`)
+            .join(', ');
+          ctx.ensureSpace(7);
+          if (idx % 2 === 1) {
+            doc.setFillColor(247, 249, 252);
+            doc.rect(margin, ctx.y - 3.6, maxWidth, 5.4, 'F');
+          }
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8.2);
+          doc.setTextColor(7, 29, 65);
+          ctx.writeWrapped(
+            pdfText(
+              `${brDate} (${dRow.day}) - ${params.formatDuration(dRow.seconds)}${subjectsText ? ` · ${subjectsText}` : ''}`,
+            ),
+            4.6,
+          );
+        });
+        ctx.y += 3;
+      }
+    }
+
+    if (params.dailySeries && params.dailySeries.length > 0) {
+      const activeDays = params.dailySeries.filter((d) => d.answered > 0 || d.simulations > 0 || d.studySeconds > 0);
+      if (activeDays.length > 0) {
+        drawSectionHeading(sectionIdx++, 'Registro Diário dos Últimos 14 Dias');
+
+        activeDays.forEach((day, idx) => {
+          const pct = day.answered ? Math.round((day.correct / day.answered) * 100) : 0;
+          const simLabel = day.simulations > 0 ? ` · ${day.simulations} simulado(s)` : '';
+          ctx.ensureSpace(7);
+          if (idx % 2 === 1) {
+            doc.setFillColor(247, 249, 252);
+            doc.rect(margin, ctx.y - 3.6, maxWidth, 5, 'F');
+          }
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.5);
+          doc.setTextColor(35, 45, 65);
+          doc.text(
+            pdfText(
+              `${day.label}: ${day.answered} questões (${day.correct} acertos / ${day.wrong} erros · ${pct}%)${simLabel} · Tempo: ${params.formatDuration(day.studySeconds)}`,
+            ),
+            margin + 2,
+            ctx.y,
+          );
+          ctx.y += 5;
+        });
+        ctx.y += 3;
+      }
+    }
+
+    if (params.bankRows.length > 0) {
+      drawSectionHeading(sectionIdx++, 'Aproveitamento Consolidado por Banca');
+
+      params.bankRows.forEach((b, idx) => {
         ctx.ensureSpace(7);
         if (idx % 2 === 1) {
           doc.setFillColor(247, 249, 252);
           doc.rect(margin, ctx.y - 3.6, maxWidth, 5.4, 'F');
         }
         doc.setFont('helvetica', 'bold');
-        doc.setFontSize(8.2);
-        doc.setTextColor(7, 29, 65);
-        ctx.writeWrapped(
-          `${brDate} (${dRow.day}) - ${params.formatDuration(dRow.seconds)}${subjectsText ? ` · ${subjectsText}` : ''}`,
-          4.6,
-        );
-      });
-      ctx.y += 3;
-    }
-  }
-
-  // --- Section 5: 14-day Evolution ---
-  if (params.dailySeries && params.dailySeries.length > 0) {
-    const activeDays = params.dailySeries.filter((d) => d.answered > 0 || d.simulations > 0 || d.studySeconds > 0);
-    if (activeDays.length > 0) {
-      drawSectionHeading(sectionIdx++, 'Registro Diario dos Ultimos 14 Dias');
-
-      activeDays.forEach((day, idx) => {
-        const pct = day.answered ? Math.round((day.correct / day.answered) * 100) : 0;
-        const simLabel = day.simulations > 0 ? ` · ${day.simulations} simulado(s)` : '';
-        ctx.ensureSpace(7);
-        if (idx % 2 === 1) {
-          doc.setFillColor(247, 249, 252);
-          doc.rect(margin, ctx.y - 3.6, maxWidth, 5, 'F');
-        }
-        doc.setFont('helvetica', 'normal');
         doc.setFontSize(8.5);
-        doc.setTextColor(35, 45, 65);
+        doc.setTextColor(7, 29, 65);
+        doc.text(pdfText(b.bank), margin + 2, ctx.y);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(61, 79, 107);
         doc.text(
-          safePdfText(
-            `${day.label}: ${day.answered} questoes (${day.correct} acertos / ${day.wrong} erros · ${pct}%)${simLabel} · Tempo: ${params.formatDuration(day.studySeconds)}`,
-          ),
-          margin + 2,
+          pdfText(`${b.accuracy}% (${b.correct}/${b.totalQuestions} questões em ${b.simulations} simulado(s))`),
+          margin + maxWidth - 2,
           ctx.y,
+          { align: 'right' },
         );
-        ctx.y += 5;
+        ctx.y += 5.4;
       });
       ctx.y += 3;
     }
+
+    if (params.recentSimulations.length > 0) {
+      drawSectionHeading(sectionIdx++, 'Boletim de Ocorrências (Simulados Recentes)');
+
+      params.recentSimulations.slice(0, 15).forEach((sim, idx) => {
+        ctx.ensureSpace(10);
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.6);
+        doc.setTextColor(7, 29, 65);
+        const bankTag = sim.banca ? ` [${sim.banca}]` : '';
+        const ptsTag = typeof sim.pontos_liquidos === 'number' ? ` · Líquidos: ${sim.pontos_liquidos}` : '';
+        ctx.writeWrapped(
+          pdfText(
+            `${idx + 1}. ${sim.titulo}${bankTag} (${sim.data}) - ${sim.acertos}/${sim.total} (${sim.aproveitamento}%)${ptsTag}`,
+          ),
+          4.8,
+        );
+      });
+    }
   }
 
-  // --- Section 6: Bank Breakdown & Recent Simulations ---
-  if (params.bankRows.length > 0) {
-    drawSectionHeading(sectionIdx++, 'Aproveitamento Consolidado por Banca');
-
-    params.bankRows.forEach((b, idx) => {
-      ctx.ensureSpace(7);
-      if (idx % 2 === 1) {
-        doc.setFillColor(247, 249, 252);
-        doc.rect(margin, ctx.y - 3.6, maxWidth, 5.4, 'F');
-      }
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8.5);
-      doc.setTextColor(7, 29, 65);
-      doc.text(safePdfText(b.bank), margin + 2, ctx.y);
-      doc.setFont('helvetica', 'normal');
-      doc.setTextColor(61, 79, 107);
-      doc.text(
-        safePdfText(`${b.accuracy}% (${b.correct}/${b.totalQuestions} questoes em ${b.simulations} simulado(s))`),
-        margin + maxWidth - 2,
-        ctx.y,
-        { align: 'right' },
-      );
-      ctx.y += 5.4;
-    });
-    ctx.y += 3;
-  }
-
-  if (params.recentSimulations.length > 0) {
-    drawSectionHeading(sectionIdx++, 'Boletim de Ocorrencias (Simulados Recentes)');
-
-    params.recentSimulations.slice(0, 15).forEach((sim, idx) => {
-      ctx.ensureSpace(10);
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8.6);
-      doc.setTextColor(7, 29, 65);
-      const bankTag = sim.banca ? ` [${sim.banca}]` : '';
-      const ptsTag = typeof sim.pontos_liquidos === 'number' ? ` · Liquidos: ${sim.pontos_liquidos}` : '';
-      ctx.writeWrapped(
-        `${idx + 1}. ${sim.titulo}${bankTag} (${sim.data}) - ${sim.acertos}/${sim.total} (${sim.aproveitamento}%)${ptsTag}`,
-        4.8,
-      );
-    });
-  }
-
+  // --- Running Headers (Pages 2+) & Institutional Footers (All Pages) ---
   const totalPages = doc.getNumberOfPages();
+  const runningRightLabel = isExamScoped && exam ? visibleName(exam.title) : 'Monitor de Desempenho · Visão Geral';
+
   for (let p = 1; p <= totalPages; p++) {
     doc.setPage(p);
+
+    if (p > 1) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.4);
+      doc.setTextColor(7, 29, 65);
+      doc.text('estuda.gov.br · Relatório Oficial de Desempenho', margin, 9.5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.4);
+      doc.setTextColor(82, 98, 124);
+      const shortRight = (doc.splitTextToSize(pdfText(runningRightLabel), 82) as string[])[0] || '';
+      doc.text(shortRight, pageWidth - margin, 9.5, { align: 'right' });
+
+      doc.setDrawColor(198, 211, 228);
+      doc.setLineWidth(0.25);
+      doc.line(margin, 11.5, pageWidth - margin, 11.5);
+    }
+
     doc.setDrawColor(214, 224, 236);
     doc.setLineWidth(0.3);
     doc.line(margin, 285, margin + maxWidth, 285);
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(7.8);
+    doc.setFontSize(7.6);
     doc.setTextColor(92, 110, 138);
     doc.text(
-      safePdfText(`estuda.gov.br · Portal da Transparencia Estudantil · Protocolo ${protocolNumber}`),
+      pdfText(`estuda.gov.br · Portal da Transparência Estudantil · Protocolo ${protocolNumber} · ${issuedDateOnly}`),
       margin,
       289.5,
     );
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(7, 29, 65);
     doc.text(
-      safePdfText(`Pagina ${p} de ${totalPages}`),
+      pdfText(`Página ${p} de ${totalPages}`),
       margin + maxWidth,
       289.5,
       { align: 'right' },
     );
   }
 
-  doc.save(`relatorio_oficial_desempenho_${localDateIso()}.pdf`);
+  const fileName =
+    isExamScoped && exam
+      ? `relatorio_oficial_prova_${cleanSafeName(visibleName(exam.title)).replace(/\s+/g, '_')}_${localDateIso()}.pdf`
+      : `relatorio_oficial_desempenho_${localDateIso()}.pdf`;
+
+  doc.save(fileName);
+  return fileName;
 }
 
 export interface StudentCertificateParams {
@@ -2646,5 +2998,349 @@ export function exportWeeklyCompletedReportPdf(params: WeeklyCompletedReportPdfP
   const slug = cleanSafeName(params.weekKey || params.weekLabel, 'semana').replace(/\s+/g, '_');
   doc.save(`atestado_semanal_${slug}.pdf`);
 }
+
+export interface ExamSubjectErrorStatPdfRow {
+  subject: string;
+  notebookTotal: number;
+  notebookSharePct: number;
+  wrongQuestions: number;
+  answeredQuestions: number;
+  errorRatePct: number | null;
+  pendingCount: number;
+  correctedCount: number;
+}
+
+export interface ExamErrorStatsPdfSection {
+  examLabel: string;
+  kindLabel: string;
+  banca?: string;
+  data?: string;
+  hasSimulationMetrics?: boolean;
+  totalQuestions?: number;
+  correct?: number;
+  wrong?: number;
+  blank?: number;
+  accuracyPct?: number;
+  errorPct?: number;
+  notebookTotal: number;
+  pending: number;
+  corrected: number;
+  rows: ExamSubjectErrorStatPdfRow[];
+}
+
+export function exportExamSubjectErrorStatsPdf(params: {
+  scopeTitle: string;
+  subtitle?: string;
+  holderName?: string;
+  sections: ExamErrorStatsPdfSection[];
+  fileNameSlug?: string;
+}): string {
+  const validSections = params.sections.filter((s) => s.rows.length > 0);
+  if (!validSections.length) {
+    throw new Error('Não há estatísticas de erro por matéria para exportar.');
+  }
+
+  const ctx = createDoc();
+  const { doc, margin, maxWidth, pageWidth, pageHeight } = ctx;
+  const pdfText = (value: unknown) => normalizePdfLegalText(safePdfText(value));
+  const issuedAt = localDateTimeBrazilian();
+  const issuedDate = localDateBrazilian();
+
+  const totalErrors = validSections.reduce((acc, s) => acc + s.notebookTotal, 0);
+  const totalPending = validSections.reduce((acc, s) => acc + s.pending, 0);
+  const totalCorrected = validSections.reduce((acc, s) => acc + s.corrected, 0);
+  const distinctSubjects = new Set(
+    validSections.flatMap((s) => s.rows.map((r) => normalizeSearch(visibleName(r.subject)))),
+  ).size;
+
+  // --- Official Federal Header Banner ---
+  doc.setFillColor(7, 29, 65);
+  doc.rect(0, 0, pageWidth, 33, 'F');
+
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, 33, third, 1.9, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(third, 33, third, 1.9, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, 33, pageWidth - third * 2, 1.9, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(255, 205, 7);
+  doc.text('ESTUDA.GOV.BR · OUVIDORIA & CADERNO DE ERROS', margin, 10);
+
+  doc.setFontSize(13.8);
+  doc.setTextColor(255, 255, 255);
+  doc.text('ESTATÍSTICA DE ERRO DAS MATÉRIAS POR PROVA', margin, 18.6);
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.1);
+  doc.setTextColor(215, 227, 244);
+  const bannerMeta = `${params.scopeTitle}${params.holderName ? ` · ${params.holderName}` : ''} · Emitido em ${issuedAt}`;
+  doc.text((doc.splitTextToSize(pdfText(bannerMeta), maxWidth) as string[])[0] || '', margin, 26.2);
+
+  ctx.y = 42;
+
+  if (params.subtitle) {
+    const subLines = doc.splitTextToSize(pdfText(params.subtitle), maxWidth - 6) as string[];
+    const subH = subLines.length * 4.3 + 4;
+    ctx.ensureSpace(subH + 3);
+    doc.setFillColor(246, 249, 253);
+    doc.setDrawColor(194, 209, 228);
+    doc.setLineWidth(0.25);
+    doc.rect(margin, ctx.y - 3, maxWidth, subH, 'FD');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(8.1);
+    doc.setTextColor(61, 79, 107);
+    subLines.forEach((line, i) => {
+      doc.text(line, margin + 3, ctx.y + 0.9 + i * 4.3);
+    });
+    ctx.y += subH + 3;
+  }
+
+  // --- Executive 4-column Summary Strip ---
+  const summaryH = 15;
+  ctx.ensureSpace(summaryH + 6);
+  doc.setFillColor(250, 252, 255);
+  doc.setDrawColor(186, 204, 228);
+  doc.setLineWidth(0.3);
+  doc.rect(margin, ctx.y - 2, maxWidth, summaryH, 'FD');
+
+  const kpiItems: Array<[string, string, [number, number, number]]> = [
+    [
+      validSections.length === 1 ? 'PROVA ANALISADA' : 'PROVAS ANALISADAS',
+      validSections.length === 1 ? visibleName(validSections[0].examLabel) : `${validSections.length} prova(s)`,
+      [7, 29, 65],
+    ],
+    ['ERROS REGISTRADOS', `${totalErrors} registro(s)`, [185, 28, 28]],
+    ['BALANÇO DE CORREÇÃO', `${totalCorrected} corrig. · ${totalPending} pend.`, [22, 136, 33]],
+    ['MATÉRIAS MAPEADAS', `${distinctSubjects} disciplina(s)`, [19, 81, 180]],
+  ];
+
+  const kpiColW = maxWidth / 4;
+  kpiItems.forEach(([lbl, val, color], idx) => {
+    const cx = margin + idx * kpiColW;
+    if (idx > 0) {
+      doc.setDrawColor(214, 224, 238);
+      doc.line(cx, ctx.y, cx, ctx.y + summaryH - 4);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(6.6);
+    doc.setTextColor(86, 104, 130);
+    doc.text(pdfText(lbl), cx + 2.8, ctx.y + 3);
+
+    doc.setFontSize(8.8);
+    doc.setTextColor(...color);
+    const valLine = (doc.splitTextToSize(pdfText(val), kpiColW - 5.5) as string[])[0] || '';
+    doc.text(valLine, cx + 2.8, ctx.y + 9.4);
+  });
+  ctx.y += summaryH + 5;
+
+  // --- Per-Exam Sections ---
+  validSections.forEach((section, secIdx) => {
+    ctx.ensureSpace(34);
+
+    // Exam Banner
+    const bannerH = 9.5;
+    doc.setFillColor(235, 241, 250);
+    doc.setDrawColor(182, 198, 220);
+    doc.setLineWidth(0.3);
+    doc.rect(margin, ctx.y - 4.2, maxWidth, bannerH, 'FD');
+    doc.setFillColor(7, 29, 65);
+    doc.rect(margin, ctx.y - 4.2, 2.3, bannerH, 'F');
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(9.8);
+    doc.setTextColor(7, 29, 65);
+    const titlePrefix = validSections.length > 1 ? `${secIdx + 1}. ` : '';
+    const titleLine =
+      (doc.splitTextToSize(pdfText(`${titlePrefix}${visibleName(section.examLabel)}`), maxWidth - 58) as string[])[0] ||
+      '';
+    doc.text(titleLine, margin + 5, ctx.y + 1.8);
+
+    const metaParts = [section.kindLabel];
+    if (section.banca) metaParts.push(section.banca);
+    if (section.data) metaParts.push(section.data);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(7.4);
+    doc.setTextColor(19, 81, 180);
+    const rightMeta = (doc.splitTextToSize(pdfText(metaParts.join(' · ')), 54) as string[])[0] || '';
+    doc.text(rightMeta, margin + maxWidth - 2.5, ctx.y + 1.6, { align: 'right' });
+
+    ctx.y += bannerH - 1.2;
+
+    // Optional Exam Metrics Strip
+    const corrPct =
+      section.notebookTotal > 0 ? Math.round((section.corrected / section.notebookTotal) * 100) : 0;
+    const stripParts: string[] = [];
+    if (section.hasSimulationMetrics) {
+      stripParts.push(`Aproveitamento: ${section.accuracyPct ?? 0}%`);
+      stripParts.push(`Taxa de erro: ${section.errorPct ?? 0}%`);
+      stripParts.push(
+        `Questões: ${section.correct ?? 0} acertos / ${section.wrong ?? 0} erros${
+          section.blank ? ` / ${section.blank} branco` : ''
+        } (${section.totalQuestions ?? 0} total)`,
+      );
+    } else {
+      stripParts.push(`Erros vinculados: ${section.notebookTotal}`);
+    }
+    stripParts.push(`Correção: ${corrPct}% (${section.corrected} corrig. / ${section.pending} pend.)`);
+
+    ctx.ensureSpace(8);
+    doc.setFillColor(248, 250, 253);
+    doc.setDrawColor(214, 224, 238);
+    doc.setLineWidth(0.22);
+    doc.rect(margin, ctx.y - 1.8, maxWidth, 6.4, 'FD');
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.6);
+    doc.setTextColor(52, 70, 96);
+    const stripLine = (doc.splitTextToSize(pdfText(stripParts.join('   ·   ')), maxWidth - 5) as string[])[0] || '';
+    doc.text(stripLine, margin + 2.5, ctx.y + 2.3);
+    ctx.y += 7.5;
+
+    // Subject Table Header
+    const drawTableHeader = () => {
+      ctx.ensureSpace(12);
+      doc.setFillColor(7, 29, 65);
+      doc.rect(margin, ctx.y - 3.8, maxWidth, 6.4, 'F');
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.4);
+      doc.setTextColor(255, 255, 255);
+      doc.text('#', margin + 2.2, ctx.y + 0.5);
+      doc.text('MATÉRIA', margin + 9.5, ctx.y + 0.5);
+      doc.text('ERROS', margin + maxWidth * 0.54, ctx.y + 0.5, { align: 'right' });
+      doc.text('% PROVA', margin + maxWidth * 0.65, ctx.y + 0.5, { align: 'right' });
+      doc.text('TAXA ERRO', margin + maxWidth * 0.78, ctx.y + 0.5, { align: 'right' });
+      doc.text('PEND.', margin + maxWidth * 0.88, ctx.y + 0.5, { align: 'right' });
+      doc.text('CORRIG.', margin + maxWidth - 2.2, ctx.y + 0.5, { align: 'right' });
+      ctx.y += 5.4;
+    };
+
+    drawTableHeader();
+
+    section.rows.forEach((row, rIdx) => {
+      if (ctx.y + 9 > pageHeight - 16) {
+        doc.addPage();
+        ctx.y = 18;
+        drawTableHeader();
+      }
+
+      const barPct = Math.max(0, Math.min(100, row.errorRatePct !== null ? row.errorRatePct : row.notebookSharePct));
+      const barColor: [number, number, number] =
+        barPct >= 50 ? [201, 42, 42] : barPct >= 25 ? [180, 83, 9] : [19, 81, 180];
+
+      if (rIdx % 2 === 1) {
+        doc.setFillColor(247, 249, 252);
+        doc.rect(margin, ctx.y - 3.6, maxWidth, 7.6, 'F');
+      }
+      doc.setDrawColor(226, 232, 240);
+      doc.setLineWidth(0.2);
+      doc.line(margin, ctx.y + 4, margin + maxWidth, ctx.y + 4);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.8);
+      doc.setTextColor(92, 110, 138);
+      doc.text(`${rIdx + 1}º`, margin + 2.2, ctx.y + 0.1);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(7, 29, 65);
+      const subjShort =
+        (doc.splitTextToSize(pdfText(visibleName(row.subject)), maxWidth * 0.41) as string[])[0] || '';
+      doc.text(subjShort, margin + 9.5, ctx.y + 0.1);
+
+      // Visual mini progress bar under subject name
+      const barX = margin + 9.5;
+      const barY = ctx.y + 1.5;
+      const barTotalW = maxWidth * 0.36;
+      doc.setFillColor(229, 235, 243);
+      doc.rect(barX, barY, barTotalW, 1.35, 'F');
+      doc.setFillColor(...barColor);
+      doc.rect(barX, barY, Math.max(1.2, (barTotalW * barPct) / 100), 1.35, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8.2);
+      doc.setTextColor(7, 29, 65);
+      doc.text(String(row.notebookTotal), margin + maxWidth * 0.54, ctx.y + 0.4, { align: 'right' });
+
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(61, 79, 107);
+      doc.text(`${row.notebookSharePct}%`, margin + maxWidth * 0.65, ctx.y + 0.4, { align: 'right' });
+
+      if (row.errorRatePct !== null) {
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(...barColor);
+        doc.text(
+          `${row.errorRatePct}% (${row.wrongQuestions}/${row.answeredQuestions})`,
+          margin + maxWidth * 0.78,
+          ctx.y + 0.4,
+          { align: 'right' },
+        );
+      } else {
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(120, 134, 156);
+        doc.text('—', margin + maxWidth * 0.78, ctx.y + 0.4, { align: 'right' });
+      }
+
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(row.pendingCount > 0 ? 180 : 92, row.pendingCount > 0 ? 83 : 110, row.pendingCount > 0 ? 9 : 138);
+      doc.text(String(row.pendingCount), margin + maxWidth * 0.88, ctx.y + 0.4, { align: 'right' });
+
+      doc.setTextColor(22, 136, 33);
+      doc.text(String(row.correctedCount), margin + maxWidth - 2.2, ctx.y + 0.4, { align: 'right' });
+
+      ctx.y += 7.6;
+    });
+
+    ctx.y += 5;
+  });
+
+  // --- Running Headers & Institutional Footers ---
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (p > 1) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.4);
+      doc.setTextColor(7, 29, 65);
+      doc.text('estuda.gov.br · Estatística de Erro das Matérias por Prova', margin, 9.5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.4);
+      doc.setTextColor(82, 98, 124);
+      const shortScope = (doc.splitTextToSize(pdfText(params.scopeTitle), 80) as string[])[0] || '';
+      doc.text(shortScope, pageWidth - margin, 9.5, { align: 'right' });
+
+      doc.setDrawColor(198, 211, 228);
+      doc.setLineWidth(0.25);
+      doc.line(margin, 11.5, pageWidth - margin, 11.5);
+    }
+
+    doc.setDrawColor(214, 224, 236);
+    doc.setLineWidth(0.28);
+    doc.line(margin, pageHeight - 12, margin + maxWidth, pageHeight - 12);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(92, 110, 138);
+    doc.text(
+      pdfText(`estuda.gov.br · Caderno de Erros · Emitido em ${issuedDate}`),
+      margin,
+      pageHeight - 7.5,
+    );
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(7, 29, 65);
+    doc.text(pdfText(`Página ${p} de ${totalPages}`), margin + maxWidth, pageHeight - 7.5, {
+      align: 'right',
+    });
+  }
+
+  const slug = cleanSafeName(params.fileNameSlug || 'por_prova', 'por_prova').replace(/\s+/g, '_');
+  const fileName = `estatistica_erros_materias_${slug}_${localDateIso()}.pdf`;
+  doc.save(fileName);
+  return fileName;
+}
+
 
 
