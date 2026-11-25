@@ -420,7 +420,7 @@ export function htmlToPlainText(html: string): string {
 
   const walk = (node: Node) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      const txt = node.textContent || '';
+      const txt = (node.textContent || '').replace(/\u200B/g, '');
       if (txt) {
         if (lines.length === 0) lines.push('');
         lines[lines.length - 1] += txt;
@@ -590,7 +590,8 @@ function parseFontSizeHalfPt(raw?: string | null): number | undefined {
 }
 
 function buildRunXml(text: string, state: RunStyleState): string {
-  if (!text) return '';
+  const cleanedText = text.replace(/\u200B/g, '');
+  if (!cleanedText) return '';
   const rPr: string[] = [];
   if (state.fontFamily) {
     const cleanFace = escapeXml(state.fontFamily.split(',')[0].replace(/['"]/g, '').trim());
@@ -617,7 +618,7 @@ function buildRunXml(text: string, state: RunStyleState): string {
     }
   }
   const rPrXml = rPr.length ? `<w:rPr>${rPr.join('')}</w:rPr>` : '';
-  return `<w:r>${rPrXml}<w:t xml:space="preserve">${escapeXml(text)}</w:t></w:r>`;
+  return `<w:r>${rPrXml}<w:t xml:space="preserve">${escapeXml(cleanedText)}</w:t></w:r>`;
 }
 
 function collectInlineRunsXml(node: Node, inherited: RunStyleState): string {

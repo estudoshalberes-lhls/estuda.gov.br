@@ -65,6 +65,17 @@ import { FilePreview } from '../components/ui/FilePreview';
 import { LawReadingAnalyticsPanel } from '../components/laws/LawReadingAnalyticsPanel';
 import { LawVoicePlayerBar, useLawVoiceReader } from '../components/ui/LawVoicePlayer';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
+import { RichDocumentEditor } from '../components/summaries/RichDocumentEditor';
+import { htmlToPlainText, markdownToInitialHtml, sanitizeDocHtml } from '../lib/richDocUtils';
+
+function normalizeLawNoteToHtml(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return '';
+  if (/<(?:p|div|h[1-6]|ul|ol|li|blockquote|table|strong|em|u|span|mark|br|hr)\b/i.test(trimmed)) {
+    return sanitizeDocHtml(trimmed);
+  }
+  return markdownToInitialHtml(trimmed);
+}
 
 export const LawsPage: React.FC = () => {
   const {
@@ -292,8 +303,10 @@ export const LawsPage: React.FC = () => {
     setVisibleArticleLimit(80);
   }, [activeFolder]);
 
-  const savedLawNote = activeFolder ? db.lawNotes?.[activeFolder] || '' : '';
+  const rawSavedLawNote = activeFolder ? db.lawNotes?.[activeFolder] || '' : '';
+  const savedLawNote = useMemo(() => normalizeLawNoteToHtml(rawSavedLawNote), [rawSavedLawNote]);
   const [lawNoteDraft, setLawNoteDraft] = useState<string>(savedLawNote);
+  const [lawNoteResetKey, setLawNoteResetKey] = useState<number>(1);
   const activeFolderNoteRef = useRef<string>(activeFolder);
   const lawNoteDraftRef = useRef<string>(savedLawNote);
   const savedLawNoteRef = useRef<string>(savedLawNote);
@@ -307,7 +320,7 @@ export const LawsPage: React.FC = () => {
     const prevFolder = activeFolderNoteRef.current;
     const folderChanged = prevFolder !== activeFolder;
     if (prevFolder && folderChanged) {
-      const prevSaved = lawNotesMapRef.current?.[prevFolder] || '';
+      const prevSaved = normalizeLawNoteToHtml(lawNotesMapRef.current?.[prevFolder] || '');
       if (lawNoteDraftRef.current !== prevSaved) {
         saveLawNote(prevFolder, lawNoteDraftRef.current, true);
       }
@@ -316,6 +329,7 @@ export const LawsPage: React.FC = () => {
     if (folderChanged) {
       lastSyncedSavedNoteRef.current = savedLawNote;
       setLawNoteDraft(savedLawNote);
+      setLawNoteResetKey((k) => k + 1);
       return;
     }
     if (savedLawNote !== lastSyncedSavedNoteRef.current) {
@@ -323,6 +337,7 @@ export const LawsPage: React.FC = () => {
       lastSyncedSavedNoteRef.current = savedLawNote;
       if (!hadUnsavedLocalEdits) {
         setLawNoteDraft(savedLawNote);
+        setLawNoteResetKey((k) => k + 1);
       }
     }
   }, [activeFolder, savedLawNote, saveLawNote]);
@@ -332,7 +347,7 @@ export const LawsPage: React.FC = () => {
     if (lawNoteDraft === savedLawNote) return;
     const t = window.setTimeout(() => {
       saveLawNote(activeFolder, lawNoteDraft, true);
-    }, 500);
+    }, 650);
     return () => window.clearTimeout(t);
   }, [activeFolder, lawNoteDraft, savedLawNote, saveLawNote]);
 
@@ -354,6 +369,86 @@ export const LawsPage: React.FC = () => {
       flushLawNoteDraft();
     };
   }, [saveLawNote]);
+
+  const lawNoteHasText = useMemo(() => Boolean(htmlToPlainText(lawNoteDraft).trim()), [lawNoteDraft]);
+
+  const handleLawNoteHtmlChange = (nextHtml: string) => {
+    const cleaned = htmlToPlainText(nextHtml).trim() ? nextHtml : '';
+    setLawNoteDraft(cleaned);
+  };
+
+  const renderQuadroObservacoes = () => (
+    <div className="mt-4 pt-4 border-t border-[var(--line)]">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5">
+        <div className="flex flex-wrap items-center gap-2 min-w-0">
+          <span className="inline-flex items-center gap-1.5 text-[13.5px] font-bold text-[var(--text)]">
+            <StickyNote className="w-4 h-4 text-[var(--accent)] shrink-0" />
+            Quadro de Observações · {visibleName(activeFolder)}
+          </span>
+          <span className="text-[11px] font-semibold text-[var(--muted)]">
+            {lawNoteDraft !== savedLawNote
+              ? 'Salvando alterações…'
+              : htmlToPlainText(savedLawNote).trim()
+                ? 'Salvo automaticamente nesta lei'
+                : 'Associado exclusivamente a esta lei'}
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          {lawNoteHasText && (
+            <button
+              type="button"
+              onClick={() => {
+                setLawNoteDraft('');
+                setLawNoteResetKey((k) => k + 1);
+                saveLawNote(activeFolder, '', false);
+              }}
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)] cursor-pointer"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Limpar
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => saveLawNote(activeFolder, lawNoteDraft, false)}
+            className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer"
+          >
+            <Save className="w-3.5 h-3.5" />
+            Salvar observações
+          </button>
+        </div>
+      </div>
+
+      <RichDocumentEditor
+        valueHtml={lawNoteDraft}
+        resetKey={lawNoteResetKey}
+        title={`Observações - ${visibleName(activeFolder)}`}
+        subjectLabel={visibleName(activeFolder)}
+        subtopic="Quadro de Observações · Lei Seca"
+        onChangeHtml={handleLawNoteHtmlChange}
+        onNotify={toast}
+        onBlurEditor={() => {
+          if (activeFolder && lawNoteDraftRef.current !== savedLawNoteRef.current) {
+            saveLawNote(activeFolder, lawNoteDraftRef.current, true);
+          }
+        }}
+        documentBadge="Observações da Lei · .docx"
+        downloadPrefix="observacoes"
+        minEditorHeightClass="min-h-[340px]"
+        defaultLayout="fluid"
+        placeholder={`Digite aqui pontos importantes, prazos, exceções, súmulas, tabelas comparativas ou pegadinhas de banca sobre ${visibleName(activeFolder)}...`}
+        autoSaveIndicator={
+          <span>
+            {lawNoteDraft !== savedLawNote
+              ? 'Salvando automaticamente…'
+              : htmlToPlainText(savedLawNote).trim()
+                ? 'Salvo automaticamente nesta lei'
+                : `Vinculado à lei ${visibleName(activeFolder)}`}
+          </span>
+        }
+      />
+    </div>
+  );
 
   const handleJumpToArticle = (articleKey: string) => {
     const canonicalKey = resolveCanonicalArticleKeyFromQuery(articleKey);
@@ -2717,59 +2812,7 @@ export const LawsPage: React.FC = () => {
                 <EmptyState message="Nenhum dispositivo encontrado nesta pasta ou com o filtro aplicado." />
               )}
 
-              <div className="mt-4 pt-4 border-t border-[var(--line)]">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <div className="flex flex-wrap items-center gap-2 min-w-0">
-                    <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[var(--text)]">
-                      <StickyNote className="w-4 h-4 text-[var(--accent)] shrink-0" />
-                      Quadro de Observações · {visibleName(activeFolder)}
-                    </span>
-                    <span className="text-[11px] font-semibold text-[var(--muted)]">
-                      {lawNoteDraft !== savedLawNote
-                        ? 'Salvando alterações…'
-                        : savedLawNote.trim()
-                          ? 'Salvo automaticamente nesta lei'
-                          : 'Associado exclusivamente a esta lei'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {lawNoteDraft.trim() && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setLawNoteDraft('');
-                          saveLawNote(activeFolder, '', false);
-                        }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        Limpar
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => saveLawNote(activeFolder, lawNoteDraft, false)}
-                      className="inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)]"
-                    >
-                      <Save className="w-3 h-3" />
-                      Salvar observações
-                    </button>
-                  </div>
-                </div>
-                <textarea
-                  aria-label={`Observações importantes de ${visibleName(activeFolder)}`}
-                  value={lawNoteDraft}
-                  onChange={(e) => setLawNoteDraft(e.target.value)}
-                  onBlur={() => {
-                    if (activeFolder && lawNoteDraft !== savedLawNote) {
-                      saveLawNote(activeFolder, lawNoteDraft, true);
-                    }
-                  }}
-                  rows={4}
-                  placeholder={`Digite aqui pontos importantes, prazos, exceções, súmulas ou pegadinhas de banca sobre ${visibleName(activeFolder)}...`}
-                  className="ce-textarea w-full min-h-[105px] text-[13px] leading-relaxed"
-                />
-              </div>
+              {renderQuadroObservacoes()}
             </Panel>
           ) : (
             <Panel
@@ -3337,59 +3380,7 @@ export const LawsPage: React.FC = () => {
               );
               })()}
 
-              <div className="mt-4 pt-4 border-t border-[var(--line)]">
-                <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                  <div className="flex flex-wrap items-center gap-2 min-w-0">
-                    <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[var(--text)]">
-                      <StickyNote className="w-4 h-4 text-[var(--accent)] shrink-0" />
-                      Quadro de Observações · {visibleName(activeFolder)}
-                    </span>
-                    <span className="text-[11px] font-semibold text-[var(--muted)]">
-                      {lawNoteDraft !== savedLawNote
-                        ? 'Salvando alterações…'
-                        : savedLawNote.trim()
-                          ? 'Salvo automaticamente nesta lei'
-                          : 'Associado exclusivamente a esta lei'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    {lawNoteDraft.trim() && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setLawNoteDraft('');
-                          saveLawNote(activeFolder, '', false);
-                        }}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
-                      >
-                        <Trash2 className="w-3 h-3" />
-                        Limpar
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => saveLawNote(activeFolder, lawNoteDraft, false)}
-                      className="inline-flex items-center gap-1 px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)]"
-                    >
-                      <Save className="w-3 h-3" />
-                      Salvar observações
-                    </button>
-                  </div>
-                </div>
-                <textarea
-                  aria-label={`Observações importantes de ${visibleName(activeFolder)}`}
-                  value={lawNoteDraft}
-                  onChange={(e) => setLawNoteDraft(e.target.value)}
-                  onBlur={() => {
-                    if (activeFolder && lawNoteDraft !== savedLawNote) {
-                      saveLawNote(activeFolder, lawNoteDraft, true);
-                    }
-                  }}
-                  rows={4}
-                  placeholder={`Digite aqui pontos importantes, prazos, exceções, súmulas ou pegadinhas de banca sobre ${visibleName(activeFolder)}...`}
-                  className="ce-textarea w-full min-h-[105px] text-[13px] leading-relaxed"
-                />
-              </div>
+              {renderQuadroObservacoes()}
             </Panel>
           )}
         </>

@@ -1,4 +1,4 @@
-import React, { Suspense, lazy, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import { StudyProvider, useStudy } from './context/StudyContext';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { Sidebar } from './components/layout/Sidebar';
@@ -237,33 +237,84 @@ interface AppShellProps {
   onExitToLogin: () => void;
 }
 
+const STUDY_FOCUS_STORAGE_KEY = 'estuda_study_focus_mode';
+
 const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
   const { db, activePage, setActivePage, mobileOpen, setMobileOpen, examFocusMode } = useStudy();
   const prefs = db.preferences;
+  const [studyFocusMode, setStudyFocusMode] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return false;
+    try {
+      return sessionStorage.getItem(STUDY_FOCUS_STORAGE_KEY) === '1';
+    } catch {
+      return false;
+    }
+  });
+
+  const toggleStudyFocusMode = useCallback(() => {
+    setStudyFocusMode((prev) => {
+      const next = !prev;
+      try {
+        sessionStorage.setItem(STUDY_FOCUS_STORAGE_KEY, next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    if (studyFocusMode && mobileOpen) {
+      setMobileOpen(false);
+    }
+  }, [studyFocusMode, mobileOpen, setMobileOpen]);
+
+  useEffect(() => {
+    if (examFocusMode) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault();
+        toggleStudyFocusMode();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [examFocusMode, toggleStudyFocusMode]);
+
+  const hideNonEssentialChrome = examFocusMode || studyFocusMode;
 
   const shellClasses = [
     'app-shell',
     prefs.modules_top ? 'modules-on-top' : '',
     prefs.sidebar_hidden ? 'sidebar-collapsed' : 'sidebar-hover',
-    mobileOpen ? 'mobile-open' : '',
+    mobileOpen && !hideNonEssentialChrome ? 'mobile-open' : '',
     examFocusMode ? 'exam-focus-mode' : '',
+    studyFocusMode && !examFocusMode ? 'study-focus-mode' : '',
   ]
     .filter(Boolean)
     .join(' ');
 
   return (
     <div className={shellClasses}>
-      {!examFocusMode && <Sidebar onExitToLogin={onExitToLogin} />}
+      {!hideNonEssentialChrome && <Sidebar onExitToLogin={onExitToLogin} />}
 
       <main className="main-shell">
-        {!examFocusMode && <GovFederalBar insideApp />}
-        {!examFocusMode && <Topbar onExitToLogin={onExitToLogin} />}
-        {!examFocusMode && <TopModuleNav />}
+        {!hideNonEssentialChrome && <GovFederalBar insideApp />}
+        {!examFocusMode && (
+          <Topbar
+            onExitToLogin={onExitToLogin}
+            studyFocusMode={studyFocusMode}
+            onToggleStudyFocus={toggleStudyFocusMode}
+          />
+        )}
+        {!hideNonEssentialChrome && <TopModuleNav />}
 
         <section
           className={`flex-1 w-full mx-auto ${
             examFocusMode
               ? 'max-w-[1600px] px-3 sm:px-6 py-3 sm:py-4'
+              : studyFocusMode
+              ? 'max-w-[1440px] px-4 sm:px-8 py-4 sm:py-6'
               : 'max-w-[1440px] px-4 sm:px-7 py-5 sm:py-6'
           }`}
           id="page-content"
@@ -277,7 +328,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
           </AppErrorBoundary>
         </section>
 
-        {!examFocusMode && (
+        {!hideNonEssentialChrome && (
           <footer className="px-4 sm:px-7 py-5 border-t border-[var(--line)] bg-[var(--panel)] text-[11.5px] text-[var(--muted)]">
             <div className="max-w-[1440px] mx-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-3">
               <div>
@@ -315,7 +366,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         )}
       </main>
 
-      {!examFocusMode && mobileOpen && (
+      {!hideNonEssentialChrome && mobileOpen && (
         <div
           className="fixed inset-0 z-[25] bg-black/55 min-[721px]:hidden"
           onClick={() => setMobileOpen(false)}
@@ -323,7 +374,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         />
       )}
 
-      <MobileTimerFloat />
+      {!studyFocusMode && <MobileTimerFloat />}
       <BackToTopButton />
       <CareerAchievementWatcher />
       <DailyGoalPushWatcher />

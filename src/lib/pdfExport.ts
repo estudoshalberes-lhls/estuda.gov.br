@@ -22,6 +22,7 @@ import {
 } from './parsers';
 import { LegalBlockKind, normalizePdfLegalText, segmentLegalText } from './legalTextFormatter';
 import type { CapturedD3Chart } from './d3SvgCapture';
+import { htmlToPlainText } from './richDocUtils';
 
 export const HIGHLIGHT_COLOR_RGB: Record<
   HighlightColorKey,
@@ -1163,7 +1164,10 @@ export function exportLawWithHighlightsPdf(
   }
 
   // Include per-law Quadro de Observações when present
-  const cleanNote = String(lawNote || '').trim();
+  const rawNote = String(lawNote || '').trim();
+  const cleanNote = /<[a-z][\s\S]*>/i.test(rawNote)
+    ? htmlToPlainText(rawNote).trim()
+    : rawNote;
   if (cleanNote) {
     ctx.ensureSpace(26);
     ctx.y += 6;

@@ -294,11 +294,13 @@ html[data-theme="reading-comfort"] .brand-mark {
   margin-left: 0;
 }
 
-.app-shell.exam-focus-mode .sidebar {
+.app-shell.exam-focus-mode .sidebar,
+.app-shell.study-focus-mode .sidebar {
   display: none;
 }
 
-.app-shell.exam-focus-mode .main-shell {
+.app-shell.exam-focus-mode .main-shell,
+.app-shell.study-focus-mode .main-shell {
   width: 100% !important;
   margin-left: 0 !important;
 }

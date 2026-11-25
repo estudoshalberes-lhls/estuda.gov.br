@@ -5,9 +5,11 @@ import {
   Check,
   CloudOff,
   CloudUpload,
+  Focus,
   Home,
   Link2,
   Menu,
+  Minimize2,
   RefreshCw,
   RotateCcw,
   SlidersHorizontal,
@@ -28,6 +30,8 @@ import { DailyGoalPushModal } from '../study/DailyGoalPushModal';
 
 interface TopbarProps {
   onExitToLogin?: () => void;
+  studyFocusMode?: boolean;
+  onToggleStudyFocus?: () => void;
 }
 
 const DEFAULT_QUICK_MODULES: [ModuleName, ModuleName, ModuleName] = [
@@ -139,7 +143,36 @@ const TopbarSaveTimerButton: React.FC<{ onClick: () => void }> = React.memo(({ o
   );
 });
 
-export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
+const FocusCompactTimer: React.FC<{ onToggleTimer: () => void }> = React.memo(({ onToggleTimer }) => {
+  const { timerSeconds, timerRunning, pomodoroMode, pomodoroRemainingSeconds } = useStudyTimer();
+  const displayClock =
+    pomodoroMode === 'continuous'
+      ? formatClock(timerSeconds)
+      : formatClock(pomodoroRemainingSeconds);
+
+  return (
+    <div className="inline-flex items-center gap-1.5 h-7 px-2 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] shrink-0">
+      <Timer className={`w-3.5 h-3.5 shrink-0 ${timerRunning ? 'text-[var(--accent)]' : 'text-[var(--muted)]'}`} />
+      <span className="font-mono-num tabular-nums text-[12px] font-bold text-[var(--text)]">
+        {displayClock}
+      </span>
+      <button
+        type="button"
+        onClick={onToggleTimer}
+        className={`h-5 px-2 rounded text-[10.5px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+          timerRunning
+            ? 'bg-[var(--accent)] text-white'
+            : 'bg-[var(--panel-raised)] text-[var(--text)] border border-[var(--line-strong)] hover:border-[var(--accent)]'
+        }`}
+      >
+        {timerRunning ? 'Pausar' : 'Iniciar'}
+      </button>
+    </div>
+  );
+});
+
+export const Topbar: React.FC<TopbarProps> = React.memo(
+  ({ onExitToLogin, studyFocusMode = false, onToggleStudyFocus }) => {
   const {
     db,
     activePage,
@@ -273,6 +306,39 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
       setLinkMenuOpen(true);
     }
   };
+
+  if (studyFocusMode) {
+    return (
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-3 px-4 sm:px-7 h-11 border-b border-[var(--line)] bg-[var(--panel)]/95 backdrop-blur-xs w-full">
+        <div className="flex items-center gap-2 min-w-0">
+          <Focus className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+          <span className="text-[12.5px] font-bold text-[var(--text)] truncate">
+            {getGovModuleLabel(activePage)}
+          </span>
+          <span className="hidden sm:inline text-[11px] text-[var(--muted)] whitespace-nowrap">
+            · Modo Foco
+          </span>
+        </div>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <FocusCompactTimer onToggleTimer={toggleTimer} />
+
+          {onToggleStudyFocus && (
+            <button
+              type="button"
+              onClick={onToggleStudyFocus}
+              aria-pressed="true"
+              title="Sair do Modo Foco (Alt+Shift+F)"
+              className="inline-flex items-center justify-center gap-1.5 h-7 px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              <Minimize2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Sair do Modo Foco</span>
+            </button>
+          )}
+        </div>
+      </header>
+    );
+  }
 
   return (
     <header className="sticky top-0 z-30 flex items-center justify-between flex-wrap xl:flex-nowrap gap-2 sm:gap-2.5 px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
@@ -733,8 +799,22 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
         )}
       </div>
 
-      {/* Ícones Minimalistas: Instalar PWA, Status Drive, Google e Tela Inicial */}
+      {/* Ícones Minimalistas: Modo Foco, Instalar PWA, Status Drive, Google e Tela Inicial */}
       <div className="flex items-center gap-1 sm:gap-1.5 h-9 sm:h-10 shrink-0">
+        {onToggleStudyFocus && (
+          <button
+            type="button"
+            onClick={onToggleStudyFocus}
+            aria-pressed="false"
+            aria-label="Ativar Modo Foco"
+            title="Ativar Modo Foco (Alt+Shift+F) — oculta barra lateral, barra Gov e rodapé"
+            className="inline-flex items-center justify-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Focus className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden sm:inline">Modo Foco</span>
+          </button>
+        )}
+
         <PWAInstallButton variant="topbar" />
 
         {driveConnected && drivePermissionNeedsPicker ? (
@@ -907,5 +987,6 @@ export const Topbar: React.FC<TopbarProps> = React.memo(({ onExitToLogin }) => {
       <DailyGoalPushModal open={pushModalOpen} onClose={() => setPushModalOpen(false)} />
     </header>
   );
-});
+  },
+);
 
