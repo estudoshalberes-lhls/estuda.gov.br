@@ -63,6 +63,7 @@ import { MindMapBuilder } from '../components/summaries/MindMapBuilder';
 import { PdfAttachmentPanel } from '../components/summaries/PdfAttachmentPanel';
 import { RichDocumentEditor } from '../components/summaries/RichDocumentEditor';
 import { SummaryAiStudioModal } from '../components/summaries/SummaryAiStudioModal';
+import { SummaryGoogleDocsPanel } from '../components/workspace/SummaryGoogleDocsPanel';
 import {
   PinToggleButton,
   ReadingQueueButton,
@@ -225,6 +226,12 @@ export const SummariesPage: React.FC = () => {
   const [editorResetKey, setEditorResetKey] = useState(0);
   const [savingNote, setSavingNote] = useState(false);
   const [noteEditorExpanded, setNoteEditorExpanded] = useState(true);
+  const [composerMode, setComposerMode] = useState<'local' | 'gdocs'>('local');
+  const [activeGoogleDoc, setActiveGoogleDoc] = useState<{
+    id: string;
+    name: string;
+    webViewLink?: string;
+  } | null>(null);
   const [readingExpanded, setReadingExpanded] = useState(false);
   const [readingComfortableWidth, setReadingComfortableWidth] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<{
@@ -757,6 +764,7 @@ export const SummariesPage: React.FC = () => {
         removeSummaryDraft(getSummaryDraftKey(clearLocalDraftForFolder, undefined));
       }
       setEditingNoteId(undefined);
+      setActiveGoogleDoc(null);
       setNoteTitle('');
       setNoteSubtopic('');
       setNoteTagsInput('');
@@ -835,6 +843,17 @@ export const SummariesPage: React.FC = () => {
       useRecoveredDraft && savedDraft ? sanitizeDocHtml(savedDraft.contentHtml) : baseHtml;
 
     setEditingNoteId(item.id);
+    if (item.googleDocId) {
+      setActiveGoogleDoc({
+        id: item.googleDocId,
+        name: nextTitle,
+        webViewLink: item.googleDocUrl,
+      });
+      setComposerMode('gdocs');
+    } else {
+      setActiveGoogleDoc(null);
+      setComposerMode('local');
+    }
     setNoteTitle(nextTitle);
     setNoteSubtopic(nextSubtopic);
     setNoteTagsInput(nextTags);
@@ -1459,7 +1478,31 @@ export const SummariesPage: React.FC = () => {
                       : `Nova anotação de resumo (.docx) · ${visibleName(targetWriteFolder)}`
                   }
                   action={
-                    <div className="flex items-center gap-2.5">
+                    <div className="flex flex-wrap items-center gap-2.5">
+                      <div className="inline-flex items-center gap-0.5 p-0.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)]">
+                        <button
+                          type="button"
+                          onClick={() => setComposerMode('local')}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                            composerMode === 'local'
+                              ? 'bg-[var(--accent)] text-white'
+                              : 'text-[var(--muted)] hover:text-[var(--text)]'
+                          }`}
+                        >
+                          Editor (.docx)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setComposerMode('gdocs')}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                            composerMode === 'gdocs'
+                              ? 'bg-[var(--accent)] text-white'
+                              : 'text-[var(--muted)] hover:text-[var(--text)]'
+                          }`}
+                        >
+                          Google Docs
+                        </button>
+                      </div>
                       <button
                         type="button"
                         onClick={() => setReadingExpanded((v) => !v)}
@@ -1494,7 +1537,96 @@ export const SummariesPage: React.FC = () => {
                     </div>
                   }
                 >
-                  {noteEditorExpanded && (
+                  {noteEditorExpanded && composerMode === 'gdocs' && (
+                    <div className="flex flex-col gap-3">
+                      <div
+                        className={`grid grid-cols-1 gap-2.5 ${
+                          activeFolder === '__ALL__' ? 'sm:grid-cols-3' : 'sm:grid-cols-2'
+                        }`}
+                      >
+                        {activeFolder === '__ALL__' && (
+                          <div>
+                            <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                              Matéria de destino *
+                            </label>
+                            <select
+                              value={targetWriteFolder}
+                              onChange={(e) => setSelectedFolder(e.target.value)}
+                              className="ce-input"
+                            >
+                              {folderNames.map((f) => (
+                                <option key={f} value={f}>
+                                  {visibleName(f)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        )}
+                        <div>
+                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                            Assunto / Subtópico (2º nível)
+                          </label>
+                          <input
+                            type="text"
+                            list="summary-subtopics-datalist"
+                            value={noteSubtopic}
+                            onChange={(e) => setNoteSubtopic(e.target.value)}
+                            placeholder="Ex.: Atos Administrativos"
+                            className="ce-input"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-bold text-[var(--muted)] mb-1">
+                            Etiquetas (separadas por vírgula)
+                          </label>
+                          <input
+                            type="text"
+                            value={noteTagsInput}
+                            onChange={(e) => setNoteTagsInput(e.target.value)}
+                            placeholder="Ex.: Art. 78 CTN, Decoreba, FGV"
+                            className="ce-input"
+                          />
+                        </div>
+                      </div>
+
+                      <SummaryGoogleDocsPanel
+                        subjectLabel={visibleName(targetWriteFolder)}
+                        title={noteTitle}
+                        onChangeTitle={setNoteTitle}
+                        initialLocalHtml={noteContentHtml}
+                        activeDoc={activeGoogleDoc}
+                        onSelectDoc={setActiveGoogleDoc}
+                        onSyncDocToSummary={async ({
+                          googleDocId,
+                          googleDocUrl,
+                          title: syncedTitle,
+                          html,
+                          plainText,
+                        }) => {
+                          if (!targetWriteFolder) return;
+                          const parsedTags = noteTagsInput
+                            .split(/[,;]+/)
+                            .map((t) => t.trim())
+                            .filter(Boolean);
+                          const saved = await saveSummaryNote(targetWriteFolder, {
+                            id: editingNoteId,
+                            title: syncedTitle,
+                            content: plainText,
+                            contentHtml: html,
+                            tags: parsedTags,
+                            subtopic: noteSubtopic.trim(),
+                            googleDocId,
+                            googleDocUrl,
+                            silent: true,
+                          });
+                          setEditingNoteId(saved.id);
+                          setNoteContentHtml(html);
+                        }}
+                      />
+                    </div>
+                  )}
+
+                  {noteEditorExpanded && composerMode === 'local' && (
                     <form onSubmit={handleSaveNote} className="flex flex-col gap-3">
                       <div
                         className={`grid grid-cols-1 gap-2.5 ${

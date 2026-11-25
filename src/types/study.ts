@@ -441,6 +441,8 @@ export interface SummaryFile {
   studyStatus?: ContentStudyStatus;
   lastOpenedAt?: string;
   mindMap?: MindMapNode;
+  googleDocId?: string;
+  googleDocUrl?: string;
 }
 
 export interface ProofCorrection {

@@ -7,6 +7,7 @@ import {
   FileUp,
   Folder,
   FolderPlus,
+  HardDrive,
   Highlighter,
   LayoutGrid,
   List,
@@ -39,6 +40,7 @@ import {
   STUDY_STATUS_META,
   StudyStatusSelect,
 } from '../components/ui/ContentReadingSurface';
+import { GoogleDriveExplorer } from '../components/workspace/GoogleDriveExplorer';
 
 export const PersonalPdfsPage: React.FC = () => {
   const {
@@ -92,6 +94,7 @@ export const PersonalPdfsPage: React.FC = () => {
       .sort((a, b) => a.localeCompare(b, 'pt-BR'));
   }, [activeDriveFolderName, db.pdfFolders]);
 
+  const [libraryMode, setLibraryMode] = useState<'gdrive' | 'local'>('gdrive');
   const [selectedFolder, setSelectedFolder] = useState<string>(folderNames[0] || '');
   const activeFolder = folderNames.includes(selectedFolder)
     ? selectedFolder
@@ -302,9 +305,9 @@ export const PersonalPdfsPage: React.FC = () => {
         </div>
       ) : (
         <PageHeader
-          eyebrow="ACERVO PRIVADO · PDFS PESSOAIS"
-          title="Biblioteca pessoal de apostilas e materiais"
-          description="Organize apostilas em pastas temáticas, arraste arquivos diretamente para qualquer setor, visualize inline e atualize versões."
+          eyebrow="ACERVO DE APOSTILAS · GOOGLE DRIVE & LOCAL"
+          title="Acervo de apostilas e Google Drive"
+          description="Navegue pelas suas pastas do Google Drive em uma interface dedicada, abra PDFs com marca-texto, edite Google Docs embutidos ou use o acervo offline."
           actions={
             <div className="flex flex-wrap items-center gap-2">
               <ReadingQueueButton
@@ -370,6 +373,46 @@ export const PersonalPdfsPage: React.FC = () => {
         />
       )}
 
+      {!examFocusMode && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+          <div className="inline-flex items-center gap-1 p-1 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)]">
+            <button
+              type="button"
+              onClick={() => setLibraryMode('gdrive')}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                libraryMode === 'gdrive'
+                  ? 'bg-[var(--accent)] text-white shadow-xs'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              <HardDrive className="w-3.5 h-3.5" />
+              Google Drive
+            </button>
+            <button
+              type="button"
+              onClick={() => setLibraryMode('local')}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                libraryMode === 'local'
+                  ? 'bg-[var(--accent)] text-white shadow-xs'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              <Folder className="w-3.5 h-3.5" />
+              Acervo Local ({folderNames.reduce((acc, f) => acc + (db.pdfFolders[f]?.length || 0), 0)})
+            </button>
+          </div>
+          <span className="text-[12px] text-[var(--muted)]">
+            {libraryMode === 'gdrive'
+              ? 'Pastas, uploads, PDFs e Google Docs conectados direto ao seu Google Drive'
+              : 'Pastas salvas localmente neste navegador com sincronização opcional'}
+          </span>
+        </div>
+      )}
+
+      {libraryMode === 'gdrive' ? (
+        <GoogleDriveExplorer />
+      ) : (
+        <>
       {!examFocusMode && lastOpenedEntry && (!activePreviewEntry || activePreviewEntry.file.id !== lastOpenedEntry.file.id) && (
         <div className="mb-4 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0 text-[12.5px]">
@@ -958,6 +1001,8 @@ export const PersonalPdfsPage: React.FC = () => {
         </Panel>
       ) : (
         <EmptyState message="Crie uma pasta acima para armazenar seus PDFs pessoais." />
+      )}
+        </>
       )}
     </div>
   );

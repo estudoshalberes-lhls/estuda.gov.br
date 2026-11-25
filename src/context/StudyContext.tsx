@@ -1159,6 +1159,8 @@ interface StudyContextValue {
       pinned?: boolean;
       silent?: boolean;
       skipDriveUpload?: boolean;
+      googleDocId?: string;
+      googleDocUrl?: string;
     },
   ) => Promise<SummaryFile>;
   saveSummaryMindMap: (
@@ -16427,6 +16429,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         pinned?: boolean;
         silent?: boolean;
         skipDriveUpload?: boolean;
+        googleDocId?: string;
+        googleDocUrl?: string;
       },
     ): Promise<SummaryFile> => {
       if (!folder) throw new Error('Selecione ou crie uma matéria.');
@@ -16504,6 +16508,12 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         ...(resolvedPinned ? { pinned: true } : {}),
         ...(resolvedStatus ? { studyStatus: resolvedStatus } : {}),
         ...(existing?.lastOpenedAt ? { lastOpenedAt: existing.lastOpenedAt } : {}),
+        ...(payload.googleDocId || existing?.googleDocId
+          ? { googleDocId: payload.googleDocId || existing?.googleDocId }
+          : {}),
+        ...(payload.googleDocUrl || existing?.googleDocUrl
+          ? { googleDocUrl: payload.googleDocUrl || existing?.googleDocUrl }
+          : {}),
         createdAt: existing?.createdAt || localDateIso(),
         updatedAt: nowIso,
       };
