@@ -44,6 +44,10 @@ import {
   sanitizeDocHtml,
 } from '../lib/richDocUtils';
 import {
+  parseLawTextToItemsAsync,
+  parseUploadedQuestionsAsync,
+} from '../lib/workerParser';
+import {
   CLOUD_SYNC_FILENAME,
   DEFAULT_STUDY_FOLDER_ID,
   DRIVE_FOLDER_NAME,
@@ -517,45 +521,91 @@ function scheduleSecondaryBackupWrite(scope: string, serialized: string): void {
   pendingBackupWriteTimers.set(scope, timerId);
 }
 
+const pendingPrimaryLsWrites = new Map<string, { timerId: number; serialized: string; scope: string }>();
+
+function flushPendingPrimaryLocalStorageWrites(): void {
+  for (const [scope, entry] of pendingPrimaryLsWrites.entries()) {
+    window.clearTimeout(entry.timerId);
+    pendingPrimaryLsWrites.delete(scope);
+    try {
+      localStorage.setItem(getDbStorageKey(scope), entry.serialized);
+    } catch {
+      // IndexedDB remains authoritative when quota is exceeded
+    }
+  }
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('pagehide', flushPendingPrimaryLocalStorageWrites);
+  window.addEventListener('beforeunload', flushPendingPrimaryLocalStorageWrites);
+}
+
 function persistLocalDatabaseForScope(
   scope: string,
   serialized: string,
   ts: string,
   extraMeta?: Partial<ScopeSyncMeta>,
 ): void {
-  let lsSaved = false;
-  const primaryKey = getDbStorageKey(scope);
-  const backupKey = getDbBackupStorageKey(scope);
-  try {
-    localStorage.setItem(primaryKey, serialized);
-    lsSaved = true;
-    // Keep a secondary redundant recovery copy in localStorage when payload fits comfortably (<1.8 MB),
-    // deferred to idle time so edits never block the main thread with two synchronous multi-MB writes.
-    if (serialized.length < 1_800_000) {
-      scheduleSecondaryBackupWrite(scope, serialized);
-    }
-  } catch {
-    // IndexedDB remains primary persistence when localStorage hits ~5 MB quota;
-    // remove the stale smaller localStorage DB immediately so syncMeta never loses quota
-    try {
-      localStorage.removeItem(backupKey);
-      localStorage.removeItem(primaryKey);
-      localStorage.removeItem(DB_STORAGE_KEY_LEGACY);
-    } catch {
-      // ignore
-    }
-  }
-
-  saveSyncMeta(scope, {
-    idbAuthoritative: !lsSaved,
-    lastSavedByteLength: serialized.length,
-    ...extraMeta,
-  });
-
+  // Always persist asynchronously to IndexedDB first (non-blocking, large quota)
   pendingIdbDbWrites += 1;
   void saveScopedDatabaseJson(scope, serialized, ts).finally(() => {
     pendingIdbDbWrites = Math.max(0, pendingIdbDbWrites - 1);
   });
+
+  const primaryKey = getDbStorageKey(scope);
+  const backupKey = getDbBackupStorageKey(scope);
+
+  const commitPrimaryLs = () => {
+    let lsSaved = false;
+    try {
+      localStorage.setItem(primaryKey, serialized);
+      lsSaved = true;
+      if (serialized.length < 1_800_000) {
+        scheduleSecondaryBackupWrite(scope, serialized);
+      }
+    } catch {
+      try {
+        localStorage.removeItem(backupKey);
+        localStorage.removeItem(primaryKey);
+        localStorage.removeItem(DB_STORAGE_KEY_LEGACY);
+      } catch {
+        // ignore
+      }
+    }
+    saveSyncMeta(scope, {
+      idbAuthoritative: !lsSaved,
+      lastSavedByteLength: serialized.length,
+      ...extraMeta,
+    });
+  };
+
+  // For larger databases (> 320 KB), defer the synchronous localStorage mirror to idle time
+  // so typing, marking articles, and answering questions stay 100% smooth on the main thread.
+  if (serialized.length > 320_000) {
+    const existing = pendingPrimaryLsWrites.get(scope);
+    if (existing) {
+      window.clearTimeout(existing.timerId);
+    }
+    saveSyncMeta(scope, {
+      idbAuthoritative: true,
+      lastSavedByteLength: serialized.length,
+      ...extraMeta,
+    });
+    const timerId = window.setTimeout(() => {
+      pendingPrimaryLsWrites.delete(scope);
+      const ric = (window as Window & { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number })
+        .requestIdleCallback;
+      if (typeof ric === 'function') {
+        ric(commitPrimaryLs, { timeout: 1800 });
+      } else {
+        commitPrimaryLs();
+      }
+    }, 350);
+    pendingPrimaryLsWrites.set(scope, { timerId, serialized, scope });
+    return;
+  }
+
+  commitPrimaryLs();
 }
 
 function shouldPreferIdbSnapshot(
@@ -14817,7 +14867,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           `O arquivo "${file.name}" pertence a Cronograma, Datas e Locais ou Edital e deve ser importado no módulo correspondente, não em Lei Seca.`,
         );
       }
-      const parsedItems = parseLawTextToItems(file.name, extractedText);
+      const parsedItems = await parseLawTextToItemsAsync(file.name, extractedText);
       if (parsedItems.length === 0) {
         throw new Error(`Não foi possível extrair artigos ou texto legível de "${file.name}".`);
       }
@@ -17389,7 +17439,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           `O arquivo "${file.name}" pertence a Cronograma, Datas e Locais ou Edital e não deve ser importado como questões/simulado.`,
         );
       }
-      const parsed = parseUploadedQuestions(text, subject);
+      const parsed = await parseUploadedQuestionsAsync(text, subject);
       if (!parsed.length) {
         throw new Error(
           "Não encontrei questões reconhecidas. Use linhas 'enunciado | gabarito | comentário' ou questões numeradas com gabarito.",
@@ -17949,33 +17999,52 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [],
   );
 
-  return (
-    <StudyContext.Provider
-      value={{
-        db,
-        activePage,
-        setActivePage: (p) => {
-          setActivePage(p);
-          setMobileOpen(false);
-        },
-        lawDeepLink,
-        openLawAt: (folder, search, options) => {
-          setLawDeepLink({
-            folder,
-            search,
-            tab: options?.tab,
-            onlyMatches: options?.onlyMatches,
-            nonce: Date.now(),
-          });
-          setActivePage('Lei Seca');
-          setMobileOpen(false);
-        },
-        clearLawDeepLink: () => setLawDeepLink(null),
-        selectedEditalContestId,
-        setSelectedEditalContestId,
-        openContestEdital,
-        mobileOpen,
-        setMobileOpen,
+  const handleSetActivePage = useCallback((p: ModuleName) => {
+    setActivePage(p);
+    setMobileOpen(false);
+  }, []);
+
+  const handleOpenLawAt = useCallback(
+    (
+      folder: string,
+      search?: string,
+      options?: { tab?: 'continuous' | 'devices'; onlyMatches?: boolean },
+    ) => {
+      setLawDeepLink({
+        folder,
+        search,
+        tab: options?.tab,
+        onlyMatches: options?.onlyMatches,
+        nonce: Date.now(),
+      });
+      setActivePage('Lei Seca');
+      setMobileOpen(false);
+    },
+    [],
+  );
+
+  const handleClearLawDeepLink = useCallback(() => {
+    setLawDeepLink(null);
+  }, []);
+
+  const totalPendingSyncCount =
+    Math.max(hasPendingCloudChanges ? 1 : 0, pendingLocalChangesCount) +
+    gasOperationQueue.length +
+    driveUploadOutboxItems.length;
+
+  const contextValue = useMemo<StudyContextValue>(
+    () => ({
+      db,
+      activePage,
+      setActivePage: handleSetActivePage,
+      lawDeepLink,
+      openLawAt: handleOpenLawAt,
+      clearLawDeepLink: handleClearLawDeepLink,
+      selectedEditalContestId,
+      setSelectedEditalContestId,
+      openContestEdital,
+      mobileOpen,
+      setMobileOpen,
         toasts,
         toast,
         dismissToast,
@@ -18163,10 +18232,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         isSyncingDrive,
         hasPendingCloudChanges,
         pendingLocalChangesCount,
-        totalPendingSyncCount:
-          Math.max(hasPendingCloudChanges ? 1 : 0, pendingLocalChangesCount) +
-          gasOperationQueue.length +
-          driveUploadOutboxItems.length,
+        totalPendingSyncCount,
         drivePermissionNeedsPicker,
         authorizeDriveFolderViaPicker,
         restoreProgress,
@@ -18240,11 +18306,279 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         deleteLocalRestorePointById,
         examFocusMode,
         setExamFocusMode,
-      }}
-    >
-      {children}
-    </StudyContext.Provider>
+      }),
+    [
+      db,
+      activePage,
+      handleSetActivePage,
+      lawDeepLink,
+      handleOpenLawAt,
+      handleClearLawDeepLink,
+      selectedEditalContestId,
+      openContestEdital,
+      mobileOpen,
+      toasts,
+      toast,
+      dismissToast,
+      confirmDialog,
+      requestConfirm,
+      focusQuote,
+      changeFocusQuote,
+      nowTick,
+      timerSeconds,
+      getCurrentTimerSeconds,
+      timerRunning,
+      toggleTimer,
+      resetTimer,
+      ensureTimerRunning,
+      pomodoroMode,
+      pomodoroPhase,
+      pomodoroRemainingSeconds,
+      setPomodoroMode,
+      activeTimerTopic,
+      linkTimerToScheduleTopic,
+      clearTimerLink,
+      commitTimerToSchedule,
+      logQuickStudyMinutes,
+      deleteStudyTimeRecord,
+      updateStudyCycle,
+      completeStudyCycleBlock,
+      rateFlashcardSrs,
+      disciplines,
+      fixedSubjects,
+      addFixedSubject,
+      renameFixedSubject,
+      removeFixedSubject,
+      questionsByDiscipline,
+      allQuestions,
+      allErrorEntries,
+      moduleVisibility,
+      quiz,
+      submitQuizAnswer,
+      changeQuizAnswer,
+      advanceQuizQuestion,
+      previousQuizQuestion,
+      goToQuizQuestion,
+      finishQuizSession,
+      cancelQuizSession,
+      retryRecordStudyTime,
+      retryArchiveSimulation,
+      deleteSubmittedSimulation,
+      updateQuestion,
+      deleteQuestion,
+      addAnnotation,
+      updateAnnotation,
+      updateErrorEntrySubject,
+      bulkUpdateErrorEntriesSubject,
+      deleteAnnotation,
+      markAnnotationCorrected,
+      reopenAnnotation,
+      toggleAnnotationCorrected,
+      advanceErrorReview,
+      startErrorNotebookQuiz,
+      saveCaseLaw,
+      updateCaseLawMeta,
+      deleteCaseLaw,
+      addContest,
+      updateContest,
+      toggleContestPayment,
+      deleteContest,
+      saveContestEditalPoints,
+      importContestEditalFile,
+      toggleContestEditalPoint,
+      setContestEditalPointsStudied,
+      updateContestEditalPoint,
+      deleteContestEditalPoint,
+      linkEditalPointToLaw,
+      unlinkEditalPointFromLaw,
+      clearContestEdital,
+      syncContestsAndEditaisTxtToFolder,
+      importContestsOrEditalTxtFile,
+      saveScheduleDay,
+      setScheduleDayDate,
+      applyScheduleWeekDates,
+      saveScheduleWeekToTxtFolder,
+      loadSavedScheduleWeek,
+      deleteSavedScheduleWeek,
+      addTopicToDay,
+      deleteScheduleTopic,
+      moveScheduleTopicToDay,
+      completeScheduleTopic,
+      archiveTopicAsIncomplete,
+      archiveFullWeek,
+      executeGuidedWeeklyClose,
+      importScheduleTxt,
+      deleteCompletedGoal,
+      updateCompletedGoal,
+      reopenCompletedGoal,
+      syncUncountedCompletedGoals,
+      saveWeeklyGoalNote,
+      completeIncompleteGoal,
+      restoreIncompleteGoalToSchedule,
+      deleteIncompleteGoal,
+      advanceTopicReview,
+      scheduleTopicReviewToDay,
+      deleteTopicReview,
+      setWeeklySubjectHourGoal,
+      createLawFolder,
+      uploadLawFile,
+      reprocessLawFolder,
+      deleteLawFolder,
+      deleteLawPdf,
+      addManualLawItem,
+      updateLawItem,
+      deleteLawItem,
+      toggleLawItemRead,
+      markLawItemsRead,
+      addLawReadDate,
+      removeLawReadDate,
+      addLawItemReadDate,
+      removeLawItemReadDate,
+      setLawLastPosition,
+      saveIncidenceFilter,
+      deleteIncidenceFilter,
+      addLawHighlight,
+      cycleLawHighlightColor,
+      removeLawHighlightText,
+      removeLastLawHighlight,
+      saveLawNote,
+      createPdfFolder,
+      renamePdfFolder,
+      uploadPersonalPdfs,
+      replacePersonalPdf,
+      savePdfAnnotations,
+      commitAnnotatedPersonalPdf,
+      deletePersonalPdf,
+      deletePdfFolder,
+      updatePersonalPdfMeta,
+      createSummaryFolder,
+      renameSummaryFolder,
+      deleteSummaryFolder,
+      uploadSummaryFile,
+      uploadSummaryFiles,
+      saveSummaryNote,
+      saveSummaryMindMap,
+      updateSummaryItemMeta,
+      deleteSummaryFile,
+      moveSummaryFileToFolder,
+      addToReadingQueue,
+      removeFromReadingQueue,
+      toggleReadingQueueDone,
+      clearReadingQueue,
+      createProofBank,
+      uploadProofOnly,
+      uploadProofWithAnswer,
+      replaceProofPdf,
+      deleteProofFile,
+      updateProofObservations,
+      addOrUpdateProofCorrection,
+      deleteProofCorrection,
+      submitEssay,
+      updateEssayCorrection,
+      deleteEssay,
+      addCriticalPoint,
+      deleteCriticalPoint,
+      importQuestionsTxt,
+      importParsedQuestions,
+      addManualQuestion,
+      convertLawPdf,
+      convertExamPdf,
+      convertExamToStructuredTxt,
+      exportBackupJson,
+      importBackupJson,
+      resetDemoData,
+      testLocalIntegrity,
+      updatePreferences,
+      updateModuleVisibility,
+      lastLocalWriteMs,
+      googleUser,
+      driveConnected,
+      driveTokenReady,
+      isRenewingDriveToken,
+      driveFolderUrl,
+      activeDriveFolderId,
+      activeDriveFolderName,
+      lastCloudSyncAt,
+      lastCacheVerifiedAt,
+      isSyncingDrive,
+      hasPendingCloudChanges,
+      pendingLocalChangesCount,
+      totalPendingSyncCount,
+      drivePermissionNeedsPicker,
+      authorizeDriveFolderViaPicker,
+      restoreProgress,
+      cancelDriveRestore,
+      authError,
+      connectGoogleDrive,
+      disconnectGoogleDrive,
+      clearDriveBrowserCache,
+      selectDriveStudyFolder,
+      syncAllLocalFilesToDrive,
+      restoreAllFromGoogleDrive,
+      pickDriveFolderOrFiles,
+      inspectDriveFolders,
+      importDriveFolderFiles,
+      recoverFileFromDrive,
+      saveCloudBackup,
+      listCloudBackups,
+      restoreCloudBackup,
+      deleteCloudBackup,
+      pruneOldCloudBackups,
+      syncActivityLogs,
+      clearSyncActivityLogs,
+      gasSession,
+      gasConnected,
+      gasApiUrl,
+      gasConnectionHealth,
+      checkGasConnectionNow,
+      forceReconnectAppsScript,
+      setGasApiUrl,
+      connectAppsScript,
+      disconnectAppsScript,
+      testAppsScriptConnection,
+      setAppsScriptStudyFolder,
+      setupAppsScriptDailyBackup,
+      gasOperationQueue,
+      gasQueueProcessing,
+      localGasAuditLogs,
+      processGasQueueNow,
+      removeGasQueueItem,
+      clearFailedGasQueueItems,
+      fetchGasAuditLogs,
+      activeSyncState,
+      verifyActiveSyncChecksumNow,
+      triggerActiveSyncPushNow,
+      conflictHistory,
+      latestVersionComparison,
+      isCheckingDivergence,
+      resolvingConflictAction,
+      checkLocalVsDriveDivergence,
+      resolveVersionDivergenceKeepLocal,
+      resolveVersionDivergenceKeepDrive,
+      dismissConflictHistoryEntry,
+      clearResolvedConflictHistory,
+      driveSyncConflicts,
+      driveConflictErrors,
+      resolvingDriveConflictId,
+      resolveDriveConflictRemoveCloud,
+      authorizeAndRemoveDriveConflict,
+      ignoreDriveConflict,
+      resolveDriveConflictRestoreLocal,
+      resolveAllDriveConflictsRemoveCloud,
+      resolveAllDriveConflictsRestoreLocal,
+      dismissDriveSyncConflicts,
+      checkDriveTimestampConflictsNow,
+      driveUploadOutboxItems,
+      flushDriveUploadOutboxNow,
+      localRestorePoints,
+      createManualRestorePoint,
+      restoreFromLocalRestorePoint,
+      deleteLocalRestorePointById,
+      examFocusMode,
+    ],
   );
+
+  return <StudyContext.Provider value={contextValue}>{children}</StudyContext.Provider>;
 };
 
 export function useStudy(): StudyContextValue {

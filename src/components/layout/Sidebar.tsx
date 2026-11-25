@@ -6,6 +6,7 @@ import { formatClock } from '../../lib/parsers';
 import { ModuleName } from '../../types/study';
 import { ModuleIcon } from '../ui/ModuleIcon';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
+import { prefetchModulePage } from '../../lib/routePrefetch';
 
 interface NavGroup {
   label: string;
@@ -195,6 +196,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                   <button
                     key={mod.name}
                     type="button"
+                    onMouseEnter={() => prefetchModulePage(mod.name)}
+                    onFocus={() => prefetchModulePage(mod.name)}
                     onClick={() => {
                       setActivePage(mod.name);
                       setMobileOpen(false);
@@ -225,6 +228,8 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
       <div className="shrink-0 pt-2 mt-1 border-t border-[var(--line)]">
         <button
           type="button"
+          onMouseEnter={() => prefetchModulePage('Configurações')}
+          onFocus={() => prefetchModulePage('Configurações')}
           onClick={() => {
             setActivePage('Configurações');
             setMobileOpen(false);

@@ -610,6 +610,7 @@ export interface AppPreferences {
   default_drive_folder?: DefaultDriveFolderPreference;
   career_meta?: CareerMeta;
   daily_hours_goal?: number;
+  weekly_hours_goal?: number;
   daily_questions_goal?: number;
   weekly_subject_hours?: Record<string, number>;
   final_review_margin_days?: number;

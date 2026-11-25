@@ -1,5 +1,5 @@
-import { jsPDF } from 'jspdf';
-import { PDFDocument } from 'pdf-lib';
+import type { jsPDF as JsPdfInstance } from 'jspdf';
+import type { PDFDocument as PdfLibDocument } from 'pdf-lib';
 import { MindMapCustomTag, MindMapNode, SummaryFile, SummaryItemKind } from '../types/study';
 import { getFileBlob, triggerBlobDownload } from './fileStorage';
 import { normalizePdfLegalText, segmentLegalText } from './legalTextFormatter';
@@ -59,7 +59,7 @@ export function flattenMindMapToOutline(
   return lines;
 }
 
-function drawGovHeader(doc: jsPDF, title: string, subtitle: string): number {
+function drawGovHeader(doc: JsPdfInstance, title: string, subtitle: string): number {
   const pageWidth = doc.internal.pageSize.getWidth();
   const margin = 15;
 
@@ -87,7 +87,7 @@ function drawGovHeader(doc: jsPDF, title: string, subtitle: string): number {
   return 31;
 }
 
-function addFooters(doc: jsPDF, footerLabel: string): void {
+function addFooters(doc: JsPdfInstance, footerLabel: string): void {
   const pageCount = doc.getNumberOfPages();
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -108,7 +108,7 @@ function addFooters(doc: jsPDF, footerLabel: string): void {
 }
 
 function renderStructuredBodyToPdf(
-  doc: jsPDF,
+  doc: JsPdfInstance,
   text: string,
   startY: number,
   margin: number,
@@ -154,11 +154,11 @@ function renderStructuredBodyToPdf(
   return y;
 }
 
-function buildNotesPdfBytes(
+async function buildNotesPdfBytes(
   subjectTitle: string,
   items: SummaryFile[],
   options?: { isAllSubjectsNotice?: string },
-): Uint8Array | null {
+): Promise<Uint8Array | null> {
   const textItems = items.filter((it) => {
     const kind = getSummaryItemKind(it);
     return kind === 'note' || kind === 'mindmap';
@@ -170,6 +170,7 @@ function buildNotesPdfBytes(
     return null;
   }
 
+  const { jsPDF } = await import('jspdf');
   const doc = new jsPDF({ unit: 'mm', format: 'a4' });
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
@@ -251,7 +252,7 @@ function buildNotesPdfBytes(
 }
 
 async function appendBinarySummaryItemToMergedPdf(
-  mergedPdf: PDFDocument,
+  mergedPdf: PdfLibDocument,
   subjectLabel: string,
   item: SummaryFile,
 ): Promise<{ appendedPages: number; warning?: string }> {
@@ -264,6 +265,7 @@ async function appendBinarySummaryItemToMergedPdf(
   const bytes = new Uint8Array(await blob.arrayBuffer());
 
   if (kind === 'pdf') {
+    const { PDFDocument } = await import('pdf-lib');
     try {
       const sourceDoc = await PDFDocument.load(bytes, { ignoreEncryption: true });
       const indices = sourceDoc.getPageIndices();
@@ -272,6 +274,7 @@ async function appendBinarySummaryItemToMergedPdf(
       return { appendedPages: copiedPages.length };
     } catch {
       // Fallback separator page when a PDF is strictly encrypted/corrupted
+      const { jsPDF } = await import('jspdf');
       const fallbackDoc = new jsPDF({ unit: 'mm', format: 'a4' });
       const y = drawGovHeader(
         fallbackDoc,
@@ -331,12 +334,13 @@ async function appendBinarySummaryItemToMergedPdf(
 }
 
 async function appendVisualMindMapPageToMergedPdf(
-  mergedPdf: PDFDocument,
+  mergedPdf: PdfLibDocument,
   subjectLabel: string,
   item: SummaryFile,
 ): Promise<{ appendedPages: number; warning?: string }> {
   if (!item.mindMap) return { appendedPages: 0 };
   try {
+    const [{ jsPDF }, { PDFDocument }] = await Promise.all([import('jspdf'), import('pdf-lib')]);
     const title = getSummaryDisplayTitle(item);
     const rendered = await renderExpandedMindMapPngBytes(item.mindMap, title, {
       themeId: item.mindMap.themeId,
@@ -424,7 +428,7 @@ export async function exportSingleNotePdf(subjectKey: string, item: SummaryFile)
     return;
   }
 
-  const bytes = buildNotesPdfBytes(`${subjectLabel} — ${getSummaryDisplayTitle(item)}`, [item]);
+  const bytes = await buildNotesPdfBytes(`${subjectLabel} — ${getSummaryDisplayTitle(item)}`, [item]);
   if (!bytes) {
     throw new Error('Este item não possui conteúdo textual para exportação.');
   }
@@ -442,13 +446,14 @@ export async function exportSubjectSummariesPdf(
     throw new Error('Esta matéria ainda não possui anotações ou PDFs para exportar.');
   }
 
+  const { PDFDocument } = await import('pdf-lib');
   const includeAttached = options?.includeAttachedPdfs !== false;
   const subjectLabel = visibleName(subjectKey);
   const mergedPdf = await PDFDocument.create();
   const warnings: string[] = [];
 
   // 1. Add formatted notes + full expanded mind map text outlines
-  const notesBytes = buildNotesPdfBytes(subjectLabel, items);
+  const notesBytes = await buildNotesPdfBytes(subjectLabel, items);
   if (notesBytes) {
     const notesDoc = await PDFDocument.load(notesBytes);
     const copied = await mergedPdf.copyPages(notesDoc, notesDoc.getPageIndices());
@@ -500,6 +505,7 @@ export async function exportAllSubjectsSummariesPdf(
     throw new Error('Nenhuma matéria possui anotações ou PDFs para exportar.');
   }
 
+  const [{ jsPDF }, { PDFDocument }] = await Promise.all([import('jspdf'), import('pdf-lib')]);
   const includeAttached = options?.includeAttachedPdfs !== false;
   const mergedPdf = await PDFDocument.create();
   const warnings: string[] = [];
@@ -595,7 +601,7 @@ export async function exportAllSubjectsSummariesPdf(
       });
 
     if (hasText) {
-      const subjectBytes = buildNotesPdfBytes(subjectLabel, list);
+      const subjectBytes = await buildNotesPdfBytes(subjectLabel, list);
       if (subjectBytes) {
         const subDoc = await PDFDocument.load(subjectBytes);
         const copied = await mergedPdf.copyPages(subDoc, subDoc.getPageIndices());
@@ -603,7 +609,7 @@ export async function exportAllSubjectsSummariesPdf(
       }
     } else if (hasBinary) {
       // Insert a clean subject divider header page before merging only-PDF subjects
-      const divBytes = buildNotesPdfBytes(subjectLabel, list, {
+      const divBytes = await buildNotesPdfBytes(subjectLabel, list, {
         isAllSubjectsNotice:
           'Esta matéria contém apenas arquivos PDF/imagens anexados, incluídos nas páginas seguintes.',
       });

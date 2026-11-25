@@ -1,4 +1,3 @@
-import JSZip from 'jszip';
 import { SummaryFile } from '../types/study';
 import { triggerBlobDownload } from './fileStorage';
 import { cleanSafeName, localDateIso, visibleName } from './parsers';
@@ -924,6 +923,7 @@ export async function buildDocxBlobFromHtml(params: {
   <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
 </Relationships>`;
 
+  const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
   zip.file('[Content_Types].xml', contentTypesXml);
   zip.file('_rels/.rels', relsXml);
@@ -979,6 +979,7 @@ export async function importDocxFileToHtml(
     throw new Error('O arquivo .docx excede o limite máximo de 15 MB.');
   }
   const arrayBuffer = await file.arrayBuffer();
+  const { default: JSZip } = await import('jszip');
   const zip = await JSZip.loadAsync(arrayBuffer);
   const docEntry = zip.file('word/document.xml');
   if (!docEntry) {

@@ -1,25 +1,26 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  AlertCircle,
+  AlertTriangle,
   CheckCircle2,
+  ChevronDown,
   ClipboardList,
   Clock,
   Cloud,
   CloudDownload,
   CloudUpload,
-  Database,
   Download,
-  FileJson,
+  ExternalLink,
   Folder,
   FolderSearch,
   FolderSync,
   Lock,
   RefreshCcw,
+  Settings2,
   Share2,
   ShieldCheck,
-  Smartphone,
   Trash2,
   Upload,
+  Wrench,
   X,
 } from 'lucide-react';
 import { useStudy } from '../context/StudyContext';
@@ -34,6 +35,8 @@ import { ActiveSyncPanel } from '../components/backup/ActiveSyncPanel';
 import { ConflictHistoryPanel } from '../components/backup/ConflictHistoryPanel';
 import { SyncAuditPanel } from '../components/backup/SyncAuditPanel';
 
+type DrawerKey = 'cloud' | 'audit' | 'maintenance';
+
 export const BackupPage: React.FC = () => {
   const {
     db,
@@ -44,6 +47,8 @@ export const BackupPage: React.FC = () => {
     testLocalIntegrity,
     toast,
     googleUser,
+    gasConnected,
+    gasSession,
     driveConnected,
     driveTokenReady,
     isRenewingDriveToken,
@@ -79,16 +84,21 @@ export const BackupPage: React.FC = () => {
     restoreFromLocalRestorePoint,
     deleteLocalRestorePointById,
     gasOperationQueue,
+    driveSyncConflicts,
+    conflictHistory,
   } = useStudy();
 
-  const [activeBackupTab, setActiveBackupTab] = useState<'overview' | 'audit'>('overview');
   const fileRef = useRef<HTMLInputElement | null>(null);
   const mobileQuickFilesInputRef = useRef<HTMLInputElement | null>(null);
+
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
   const [sharingMobileBackup, setSharingMobileBackup] = useState(false);
+  const [showExportEncryption, setShowExportEncryption] = useState(false);
+  const [showImportEncryption, setShowImportEncryption] = useState(false);
   const [exportPassphrase, setExportPassphrase] = useState('');
   const [importPassphrase, setImportPassphrase] = useState('');
+
   const [cloudBackups, setCloudBackups] = useState<DriveFileInfo[]>([]);
   const [driveFolders, setDriveFolders] = useState<DriveFolderSummary[]>([]);
   const [loadingCloudList, setLoadingCloudList] = useState(false);
@@ -96,15 +106,29 @@ export const BackupPage: React.FC = () => {
   const [selectedRestoreFolderId, setSelectedRestoreFolderId] = useState<string>(
     () => activeDriveFolderId || 'all',
   );
-  const [folderImportTarget, setFolderImportTarget] = useState<'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries'>('auto');
+  const [folderImportTarget, setFolderImportTarget] = useState<
+    'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries'
+  >('auto');
   const [showFolderLinkInput, setShowFolderLinkInput] = useState(false);
   const [customFolderInput, setCustomFolderInput] = useState('');
   const [savingCustomFolder, setSavingCustomFolder] = useState(false);
-  const [needsPickerFileConfirmationFolderId, setNeedsPickerFileConfirmationFolderId] = useState<string | null>(null);
+  const [needsPickerFileConfirmationFolderId, setNeedsPickerFileConfirmationFolderId] = useState<
+    string | null
+  >(null);
   const [integrityReport, setIntegrityReport] = useState<{
     status: string;
     totalRecords: number;
   } | null>(null);
+
+  const [openDrawers, setOpenDrawers] = useState<Record<DrawerKey, boolean>>({
+    cloud: false,
+    audit: false,
+    maintenance: false,
+  });
+
+  const toggleDrawer = (key: DrawerKey) => {
+    setOpenDrawers((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
 
   const refreshCloudList = useCallback(async () => {
     if (!driveConnected || !driveTokenReady) {
@@ -131,14 +155,25 @@ export const BackupPage: React.FC = () => {
 
   useEffect(() => {
     if (activeDriveFolderId) {
-      setSelectedRestoreFolderId((prev) => (prev === activeDriveFolderId ? prev : activeDriveFolderId));
+      setSelectedRestoreFolderId((prev) =>
+        prev === activeDriveFolderId ? prev : activeDriveFolderId,
+      );
     }
   }, [activeDriveFolderId]);
 
   const selectedFolderObj = driveFolders.find((f) => f.id === selectedRestoreFolderId);
 
+  const isCloudReady = gasConnected || (driveConnected && driveTokenReady);
+  const pendingAttentionCount =
+    gasOperationQueue.length + driveUploadOutboxCount + driveSyncConflicts.length;
+
+  const accountLabel =
+    googleUser?.email ||
+    googleUser?.displayName ||
+    gasSession?.username ||
+    'Conta vinculada';
+
   const handleRestoreLatestFromDrive = async () => {
-    // Acquire OAuth token synchronously inside the user gesture before opening the confirm modal (prevents mobile popup blocker)
     if (!driveConnected || !driveTokenReady) {
       const connected = await connectGoogleDrive();
       if (!connected) return;
@@ -160,6 +195,7 @@ export const BackupPage: React.FC = () => {
     });
     if ((res.permissionBlockedCount || 0) > 0) {
       setNeedsPickerFileConfirmationFolderId(selectedRestoreFolderId);
+      setOpenDrawers((prev) => ({ ...prev, cloud: true }));
     }
     await refreshCloudList();
   };
@@ -194,7 +230,7 @@ export const BackupPage: React.FC = () => {
         app: 'Central de Estudos',
         exportedAt: now.toISOString(),
         updatedAt: now.toISOString(),
-        userEmail: googleUser?.email || undefined,
+        userEmail: googleUser?.email || gasSession?.username || undefined,
         data: db,
       };
       const rawJson = JSON.stringify(payload, null, 2);
@@ -215,8 +251,8 @@ export const BackupPage: React.FC = () => {
         return;
       }
       await exportBackupJson(pass ? { passphrase: pass } : undefined);
-    } catch (err: any) {
-      if (err?.name === 'AbortError') return;
+    } catch (err: unknown) {
+      if ((err as { name?: string })?.name === 'AbortError') return;
       try {
         await exportBackupJson(pass ? { passphrase: pass } : undefined);
       } catch (exportErr) {
@@ -366,81 +402,33 @@ export const BackupPage: React.FC = () => {
     }
   };
 
+  const handleQuickExportJson = () => {
+    const pass = exportPassphrase.trim();
+    void exportBackupJson(pass ? { passphrase: pass } : undefined).catch((err) =>
+      toast((err as Error).message, true),
+    );
+  };
+
+  const handlePruneOldCloudBackups = async () => {
+    const ok = await requestConfirm({
+      title: 'Remover backups antigos manualmente',
+      description:
+        'Deseja excluir os backups datados excedentes do Google Drive mantendo apenas os 20 mais recentes? Esta ação é manual e irreversível.',
+      confirmLabel: 'Limpar excedentes (manter 20)',
+      danger: true,
+    });
+    if (!ok) return;
+    await pruneOldCloudBackups(20);
+    await refreshCloudList();
+  };
+
   return (
-    <div>
+    <div className="space-y-4">
       <PageHeader
         eyebrow="GUARDA PERMANENTE · BACKUP"
-        title="Sincronização em nuvem e cópias de segurança"
-        description="Gerencie sua conexão 100% Google Apps Script (Google Drive + Planilha oculta), resolva conflitos e emita snapshots de segurança em JSON."
+        title="Backup e Sincronização"
+        description="Tudo em um só lugar: nuvem, cópias locais em JSON, pontos de restauração e auditoria."
       />
-
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5 mb-4">
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Questões</div>
-          <div className="font-mono-num text-[24px] font-extrabold text-[var(--text)] mt-1">
-            {db.questions.length}
-          </div>
-        </article>
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Simulados realizados</div>
-          <div className="font-mono-num text-[24px] font-extrabold text-[var(--text)] mt-1">
-            {db.completedSimulations.length}
-          </div>
-        </article>
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Anotações de erros</div>
-          <div className="font-mono-num text-[24px] font-extrabold text-[var(--text)] mt-1">
-            {db.annotations.length}
-          </div>
-        </article>
-        <article className="ce-panel p-4">
-          <div className="text-[11px] font-semibold text-[var(--muted)]">Pastas de Lei Seca</div>
-          <div className="font-mono-num text-[24px] font-extrabold text-[var(--text)] mt-1">
-            {Object.keys(db.laws).length}
-          </div>
-        </article>
-      </div>
-
-      {/* Abas da página de Backup */}
-      <div
-        role="tablist"
-        aria-label="Seções de Backup e Auditoria"
-        className="flex flex-wrap items-center gap-1 p-1 mb-4 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] w-fit max-w-full"
-      >
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeBackupTab === 'overview'}
-          onClick={() => setActiveBackupTab('overview')}
-          className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-            activeBackupTab === 'overview'
-              ? 'bg-[var(--panel-raised)] text-[var(--text)] shadow-xs border border-[var(--line-strong)]'
-              : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
-          }`}
-        >
-          <Database className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-          <span>Backups e Nuvem</span>
-        </button>
-        <button
-          type="button"
-          role="tab"
-          aria-selected={activeBackupTab === 'audit'}
-          onClick={() => setActiveBackupTab('audit')}
-          className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[12.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-            activeBackupTab === 'audit'
-              ? 'bg-[var(--panel-raised)] text-[var(--text)] shadow-xs border border-[var(--line-strong)]'
-              : 'text-[var(--muted)] hover:text-[var(--text)] border border-transparent'
-          }`}
-        >
-          <ClipboardList className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
-          <span>Auditoria de Sincronização</span>
-          {gasOperationQueue.length > 0 && (
-            <span className="font-mono-num text-[11px] font-extrabold text-[var(--warning)] ml-1">
-              ({gasOperationQueue.length})
-            </span>
-          )}
-        </button>
-      </div>
 
       <input
         ref={mobileQuickFilesInputRef}
@@ -451,948 +439,1021 @@ export const BackupPage: React.FC = () => {
         className="hidden"
       />
 
-      {activeBackupTab === 'audit' ? (
-        <SyncAuditPanel />
-      ) : (
-        <>
-          <GasConnectionMonitorPanel />
-
-          <ActiveSyncPanel />
-
-          <AppsScriptSetupPanel />
-
-          <ConflictHistoryPanel />
-
-
-      <Panel
-        title="Modo Smartphone & Compartilhamento Rápido (App Google Drive / WhatsApp / Arquivos)"
-        subtitle="Alternativa direta para celulares Android e iPhone: envie ou importe backups e PDFs usando o aplicativo nativo do Google Drive ou Arquivos do seu aparelho, sem depender de janelas pop-up do navegador."
-        className="mb-4"
-      >
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-[var(--accent)]/35 bg-[var(--accent-soft)]/45">
-          <div className="flex items-start sm:items-center gap-3 min-w-0">
-            <span className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--accent)]/40 bg-[var(--panel)] text-[var(--accent)] shrink-0">
-              <Smartphone className="w-5 h-5" aria-hidden="true" />
-            </span>
+      {/* 1. PAINEL PRINCIPAL UNIFICADO: STATUS + RESUMO DA BASE + AÇÕES RÁPIDAS */}
+      <section className="ce-panel overflow-hidden">
+        <div className="p-4 sm:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          {/* Status da Nuvem */}
+          <div className="flex items-start gap-3 min-w-0">
+            <span
+              className={`mt-1 w-2.5 h-2.5 rounded-full shrink-0 ${
+                isCloudReady
+                  ? 'bg-[var(--good)]'
+                  : isRenewingDriveToken
+                  ? 'bg-[var(--warning)]'
+                  : 'bg-[var(--muted)]/50'
+              }`}
+              aria-hidden="true"
+            />
             <div className="min-w-0">
-              <strong className="block text-[13px] font-bold text-[var(--text)]">
-                Sincronização Direta com o Aplicativo do Celular
-              </strong>
-              <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed mt-0.5">
-                No smartphone, você pode compartilhar o arquivo de backup direto para o app <strong>Google Drive</strong>, <strong>WhatsApp</strong> ou <strong>Arquivos</strong>, ou importar arquivos salvos no celular com um toque.
-              </span>
-            </div>
-          </div>
-
-          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={() => void handleShareBackupOnMobile()}
-              disabled={sharingMobileBackup}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-            >
-              <Share2 className="w-3.5 h-3.5 shrink-0" />
-              <span>{sharingMobileBackup ? 'Preparando arquivo…' : 'Enviar p/ App do Drive ou WhatsApp'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => mobileQuickFilesInputRef.current?.click()}
-              disabled={importing}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-            >
-              <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <span>{importing ? 'Importando…' : 'Importar Backup (.json) do Celular'}</span>
-            </button>
-          </div>
-        </div>
-      </Panel>
-
-
-
-      <Panel
-        title="Integração com Google Drive e Sincronização em Nuvem"
-        subtitle="Vincule sua conta e pasta no Google Drive para sincronizar automaticamente seus dados de estudo, backups periódicos e arquivos PDF entre computadores e celulares."
-        className="mb-4"
-      >
-        <div className="flex flex-col gap-3.5">
-          <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-3 p-3.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)]">
-            <div className="flex items-start sm:items-center gap-3 min-w-0">
-              <span className="grid place-items-center w-10 h-10 rounded-xl border border-[var(--line)] bg-[var(--panel-raised)] shrink-0">
-                <svg className="w-5 h-5" viewBox="0 0 48 48" aria-hidden="true">
-                  <path fill="#EA4335" d="M24 9.5c3.54 0 6.71 1.22 9.21 3.6l6.85-6.85C35.9 2.38 30.47 0 24 0 14.62 0 6.51 5.38 2.56 13.22l7.98 6.19C12.43 13.72 17.74 9.5 24 9.5z"/>
-                  <path fill="#4285F4" d="M46.98 24.55c0-1.57-.15-3.09-.38-4.55H24v9.02h12.94c-.58 2.96-2.26 5.48-4.78 7.18l7.73 6c4.51-4.18 7.09-10.36 7.09-17.65z"/>
-                  <path fill="#FBBC05" d="M10.53 28.59c-.48-1.45-.76-2.99-.76-4.59s.27-3.14.76-4.59l-7.98-6.19C.92 16.46 0 20.12 0 24c0 3.88.92 7.54 2.56 10.78l7.97-6.19z"/>
-                  <path fill="#34A853" d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"/>
-                </svg>
-              </span>
-              <div className="min-w-0 flex-1">
-                <strong className="block text-[13px] font-bold text-[var(--text)] break-words sm:truncate">
-                  {driveConnected
-                    ? `Conta vinculada: ${googleUser?.email || googleUser?.displayName || 'Google Drive'}`
-                    : 'Conta Google Drive desconectada'}
-                </strong>
-                <span className="block text-[11.5px] text-[var(--muted)] leading-relaxed">
-                  {driveConnected
-                    ? isRenewingDriveToken
-                      ? `Conta permanente (${googleUser?.email || 'Google'}) · Renovando permissão do Google Drive automaticamente…`
-                      : driveTokenReady
-                      ? lastCloudSyncAt
-                        ? `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Última sincronização: ${new Date(lastCloudSyncAt).toLocaleString('pt-BR')}`
-                        : `Pasta padrão da conta (salvamentos e leituras): "${activeDriveFolderName}" · Renovação automática ativada`
-                      : `Sessão desconectada — faça login no painel do Google Apps Script acima para ativar a nuvem`
-                    : 'Faça login no painel do Google Apps Script acima para ativar backups automáticos no Google Drive'}
-                </span>
-              </div>
-            </div>
-
-            <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
-              {(!driveConnected || (!driveTokenReady && !isRenewingDriveToken)) && (
-                <button
-                  type="button"
-                  onClick={() => void connectGoogleDrive()}
-                  disabled={isSyncingDrive}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs cursor-pointer"
-                >
-                  <Cloud className="w-3.5 h-3.5 shrink-0" />
-                  <span>{driveConnected ? 'Reconectar conta Google' : 'Conectar conta Google'}</span>
-                </button>
-              )}
-              {driveConnected && driveTokenReady && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => void handleCreateFreshWritableFolder()}
-                    disabled={isSyncingDrive || savingCustomFolder}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--good)] bg-[var(--good)]/12 text-[12px] font-bold text-[var(--good)] hover:bg-[var(--good)] hover:text-white disabled:opacity-60 transition-colors text-center whitespace-normal sm:whitespace-nowrap"
-                  >
-                    <FolderSync className="w-3.5 h-3.5 shrink-0" />
-                    <span>{savingCustomFolder ? 'Ativando pasta…' : 'Ativar Pasta Automática (Celular/Direto)'}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleOpenGooglePicker('folders-only', undefined, false)}
-                    disabled={isSyncingDrive}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--accent)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:bg-[var(--accent-soft)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap"
-                  >
-                    <FolderSearch className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                    <span>Escolher pasta no Drive</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowFolderLinkInput((v) => !v)}
-                    className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] text-center whitespace-normal sm:whitespace-nowrap"
-                  >
-                    <Folder className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                    <span>Nome / Link da pasta</span>
-                  </button>
-                </>
-              )}
-              {driveFolderUrl && (
-                <a
-                  href={driveFolderUrl}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] text-center whitespace-normal sm:whitespace-nowrap"
-                >
-                  Abrir pasta no Drive ↗
-                </a>
-              )}
-              {driveConnected && (
-                <button
-                  type="button"
-                  onClick={() => disconnectGoogleDrive()}
-                  className="w-full sm:w-auto px-3 py-2 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 transition-colors text-center whitespace-normal sm:whitespace-nowrap"
-                >
-                  Desconectar
-                </button>
-              )}
-            </div>
-          </div>
-
-          {driveConnected && driveTokenReady && drivePermissionNeedsPicker && (
-            <div className="rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/10 p-3.5 flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-3">
-              <div className="min-w-0 flex-1">
-                <strong className="block text-[12.5px] font-bold text-[var(--text)]">
-                  Autorização necessária para acessar a pasta &ldquo;{drivePermissionNeedsPicker.folderName}&rdquo;
-                </strong>
-                <span className="block text-[11.5px] text-[var(--muted)] mt-0.5 leading-relaxed">
-                  No celular, toque em <strong>Ativar Pasta Sincronizada Automática</strong> para criar/vincular imediatamente uma pasta 100% liberada no seu Google Drive sem precisar do seletor em janela.
-                </span>
-              </div>
-              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => void handleCreateFreshWritableFolder()}
-                  disabled={isSyncingDrive || savingCustomFolder}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12px] font-bold hover:opacity-95 disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-                >
-                  <FolderSync className="w-3.5 h-3.5 shrink-0" />
-                  <span>Ativar Pasta Sincronizada Automática</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void authorizeDriveFolderViaPicker()}
-                  disabled={isSyncingDrive}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-                >
-                  <FolderSearch className="w-3.5 h-3.5 shrink-0" />
-                  <span>Autorizar via Seletor do Drive</span>
-                </button>
-              </div>
-            </div>
-          )}
-
-          {showFolderLinkInput && driveConnected && driveTokenReady && (
-            <form
-              onSubmit={handleApplyCustomFolder}
-              className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2 p-3 rounded-xl border border-[var(--accent)]/40 bg-[var(--panel-soft)]"
-            >
-              <input
-                type="text"
-                value={customFolderInput}
-                onChange={(e) => setCustomFolderInput(e.target.value)}
-                placeholder="Nome da pasta no Drive (ex.: Meus Estudos) ou cole o link/ID da pasta..."
-                className="ce-input flex-1 min-w-0 w-full sm:w-auto sm:min-w-[240px]"
-              />
-              <button
-                type="submit"
-                disabled={savingCustomFolder}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 h-[38px] px-3.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap"
-              >
-                {savingCustomFolder ? 'Aplicando…' : 'Associar pasta'}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowFolderLinkInput(false);
-                  setCustomFolderInput('');
-                }}
-                className="w-full sm:w-auto h-[38px] px-3 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] text-[12px] font-semibold text-[var(--muted)] hover:text-[var(--text)]"
-              >
-                Cancelar
-              </button>
-            </form>
-          )}
-
-          {driveConnected && driveTokenReady && (
-            <div className="flex flex-col gap-2.5 p-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] min-w-0">
-              <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_240px] gap-2.5 min-w-0">
-                <div className="flex flex-col gap-1 min-w-0">
-                  <label
-                    htmlFor="restore-folder-select"
-                    className="text-[11.5px] font-bold text-[var(--text)] flex items-center gap-1.5"
-                  >
-                    <FolderSearch className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                    <span>Pasta padrão da conta (usada para todos os salvamentos e leituras):</span>
-                  </label>
-                  <select
-                    id="restore-folder-select"
-                    value={selectedRestoreFolderId}
-                    onChange={(e) => {
-                      const nextId = e.target.value;
-                      setSelectedRestoreFolderId(nextId);
-                      setNeedsPickerFileConfirmationFolderId(null);
-                      if (nextId && nextId !== 'all' && nextId !== 'root') {
-                        const found = driveFolders.find((f) => f.id === nextId);
-                        void selectDriveStudyFolder({
-                          id: nextId,
-                          name: found?.name || activeDriveFolderName,
-                        }).then((ok) => {
-                          if (ok) void refreshCloudList();
-                        });
-                      }
-                    }}
-                    className="ce-input w-full max-w-full min-w-0 h-[36px] py-0 px-2.5 text-[12px] font-semibold truncate"
-                  >
-                    {activeDriveFolderId && !driveFolders.some((f) => f.id === activeDriveFolderId) && (
-                      <option value={activeDriveFolderId}>
-                        ★ {activeDriveFolderName} (Pasta padrão associada à conta)
-                      </option>
-                    )}
-                    {driveFolders.map((folder) => (
-                      <option key={folder.id} value={folder.id}>
-                        {folder.id === activeDriveFolderId ? '★ ' : ''}
-                        {folder.fullPath} ({folder.studyFileCount} compatível / {folder.fileCount} arquivo(s))
-                        {folder.id === activeDriveFolderId ? ' — Padrão da conta' : ''}
-                      </option>
-                    ))}
-                    <option value="all">
-                      Todas as pastas associadas da conta (Busca global)
-                    </option>
-                  </select>
-                </div>
-
-                <div className="flex flex-col gap-1 min-w-0">
-                  <label
-                    htmlFor="restore-module-select"
-                    className="text-[11.5px] font-bold text-[var(--text)]"
-                  >
-                    Módulo de destino dos arquivos:
-                  </label>
-                  <select
-                    id="restore-module-select"
-                    value={folderImportTarget}
-                    onChange={(e) => setFolderImportTarget(e.target.value as any)}
-                    className="ce-input w-full max-w-full min-w-0 h-[36px] py-0 px-2.5 text-[12px] font-semibold"
-                  >
-                    <option value="auto">Detectar automaticamente</option>
-                    <option value="pdfs">PDFs Pessoais</option>
-                    <option value="laws">Lei Seca</option>
-                    <option value="proofs">Provas</option>
-                    <option value="summaries">Resumos & Mapas</option>
-                  </select>
-                </div>
-              </div>
-
-              <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2 pt-2 border-t border-[var(--line)]/60">
-                <span className="text-[11px] text-[var(--muted)]">
-                  Navegue pelas suas pastas e arquivos do Meu Drive pelo seletor oficial ou use a lista de pastas acima no celular:
-                </span>
-                <button
-                  type="button"
-                  onClick={() => void handleOpenGooglePicker('folders-and-files')}
-                  disabled={isSyncingDrive}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:bg-[var(--accent-soft)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap"
-                >
-                  <FolderSearch className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                  <span>Escolher pasta ou arquivos no Google Drive</span>
-                </button>
-              </div>
-
-              {needsPickerFileConfirmationFolderId && (
-                <div className="flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2 p-2.5 rounded-lg border border-[var(--warning)]/50 bg-[var(--warning)]/10">
-                  <span className="text-[11.5px] text-[var(--text)]">
-                    Alguns arquivos dessa pasta foram enviados fora do aplicativo. Selecione-os no Google Drive ou importe-os diretamente do celular:
+              <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-0.5">
+                <h2 className="m-0 text-[15px] font-bold text-[var(--text)]">
+                  {isCloudReady
+                    ? `Nuvem ativa · ${accountLabel}`
+                    : isRenewingDriveToken
+                    ? 'Renovando sessão na nuvem…'
+                    : 'Armazenamento local ativo'}
+                </h2>
+                {lastCloudSyncAt && (
+                  <span className="text-[11.5px] text-[var(--muted)] font-mono-num tabular-nums">
+                    Última sync: {new Date(lastCloudSyncAt).toLocaleString('pt-BR')}
                   </span>
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        void handleOpenGooglePicker('files-only', needsPickerFileConfirmationFolderId)
-                      }
-                      disabled={isSyncingDrive}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] text-center whitespace-normal sm:whitespace-nowrap"
-                    >
-                      <CloudDownload className="w-3.5 h-3.5 shrink-0" />
-                      <span>Selecionar arquivos no Drive</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => mobileQuickFilesInputRef.current?.click()}
-                      className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--text)] text-[11.5px] font-bold hover:border-[var(--accent)] text-center whitespace-normal sm:whitespace-nowrap"
-                    >
-                      <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                      <span>Importar do aparelho</span>
-                    </button>
-                  </div>
-                </div>
-              )}
+                )}
+              </div>
+              <p className="m-0 mt-1 text-[12px] text-[var(--muted)] leading-relaxed">
+                {isCloudReady
+                  ? `Pasta ativa: "${activeDriveFolderName}"${
+                      pendingAttentionCount > 0
+                        ? ` · ${pendingAttentionCount} pendência(s) na auditoria`
+                        : ' · Dados sincronizados'
+                    }`
+                  : 'Suas alterações ficam salvas automaticamente neste navegador. Conecte o Google Drive ou Apps Script abaixo para sincronizar entre dispositivos.'}
+              </p>
             </div>
-          )}
+          </div>
 
-          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2.5">
+          {/* Resumo numérico compacto (substitui os 4 cartões grandes) */}
+          <dl className="m-0 grid grid-cols-4 divide-x divide-[var(--line)] rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] shrink-0">
+            {[
+              { label: 'Questões', value: db.questions.length },
+              { label: 'Simulados', value: db.completedSimulations.length },
+              { label: 'Erros', value: db.annotations.length },
+              { label: 'Leis', value: Object.keys(db.laws).length },
+            ].map((item) => (
+              <div key={item.label} className="px-3 py-2 text-center min-w-[68px]">
+                <dt className="text-[10.5px] font-semibold text-[var(--muted)] truncate">
+                  {item.label}
+                </dt>
+                <dd className="m-0 mt-0.5 font-mono-num tabular-nums text-[16px] font-extrabold text-[var(--text)]">
+                  {item.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+
+        {/* Barra de ações rápidas essenciais */}
+        <div className="px-4 sm:px-5 py-3 border-t border-[var(--line)] bg-[var(--panel-soft)]/60 flex flex-wrap items-center gap-2">
+          {!isCloudReady && !isRenewingDriveToken ? (
             <button
               type="button"
-              onClick={() => void handleRestoreLatestFromDrive()}
+              onClick={() => void connectGoogleDrive()}
               disabled={isSyncingDrive}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 sm:py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
             >
-              <CloudDownload className="w-4 h-4 shrink-0" />
-              <span>
-                {isSyncingDrive
-                  ? 'Sincronizando com o Drive…'
-                  : selectedRestoreFolderId !== 'all' && selectedFolderObj
-                  ? `Restaurar da pasta "${selectedFolderObj.name}"`
-                  : 'Restaurar dados e arquivos do Google Drive'}
-              </span>
+              <Cloud className="w-3.5 h-3.5 shrink-0" />
+              <span>{driveConnected ? 'Reconectar nuvem' : 'Conectar nuvem'}</span>
             </button>
-
+          ) : (
             <button
               type="button"
               onClick={() => void handleSaveCloudNow()}
               disabled={isSyncingDrive}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2.5 sm:py-2 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12.5px] font-bold hover:opacity-90 disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[12px] font-bold hover:opacity-90 disabled:opacity-60 whitespace-nowrap cursor-pointer"
             >
-              <CloudUpload className="w-4 h-4 shrink-0" />
-              <span>Salvar backup incremental na nuvem agora</span>
+              <CloudUpload className="w-3.5 h-3.5 shrink-0" />
+              <span>{isSyncingDrive ? 'Sincronizando…' : 'Salvar na nuvem'}</span>
             </button>
+          )}
 
-            <button
-              type="button"
-              onClick={() => void syncAllLocalFilesToDrive()}
-              disabled={isSyncingDrive}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2.5 sm:py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap shadow-xs"
-            >
-              <FolderSync className="w-3.5 h-3.5 text-[var(--good)] shrink-0" />
-              <span>{isSyncingDrive ? 'Sincronizando acervo…' : 'Sincronizar acervo local agora'}</span>
-            </button>
+          <button
+            type="button"
+            onClick={() => void handleRestoreLatestFromDrive()}
+            disabled={isSyncingDrive}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+          >
+            <CloudDownload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+            <span>Restaurar da nuvem</span>
+          </button>
 
-            <button
-              type="button"
-              onClick={() => void refreshCloudList()}
-              disabled={loadingCloudList || !driveConnected || !driveTokenReady}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-2.5 sm:py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-50 text-center whitespace-normal sm:whitespace-nowrap"
-            >
-              <RefreshCcw className={`w-3.5 h-3.5 shrink-0 ${loadingCloudList ? 'animate-spin' : ''}`} />
-              <span>Verificar pastas e backups do Drive</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={handleQuickExportJson}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+            <span>Exportar JSON</span>
+          </button>
 
-          <div className="ce-notice ce-notice-accent text-[11.5px] leading-relaxed flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2.5">
-            <div className="min-w-0 flex-1">
-              <strong className="text-[var(--text)]">Cache local do navegador e restauração inteligente:</strong>{' '}
-              Ao fazer login com sua conta Google ({googleUser?.email || 'ambiente offline/local'}), o sistema compara as assinaturas da pasta ativa (&ldquo;{activeDriveFolderName}&rdquo;) com o cache do navegador. Quando não há alterações no Drive, a restauração completa é dispensada automaticamente.{' '}
-              <span className="font-semibold text-[var(--text)]">
-                {lastCacheVerifiedAt
-                  ? `Cache verificado em ${new Date(lastCacheVerifiedAt).toLocaleString('pt-BR')}.`
-                  : 'Sem verificação em cache ainda.'}
-              </span>
+          <button
+            type="button"
+            onClick={() => mobileQuickFilesInputRef.current?.click()}
+            disabled={importing}
+            className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+            <span>{importing ? 'Importando…' : 'Importar JSON'}</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleShareBackupOnMobile()}
+            disabled={sharingMobileBackup}
+            className="inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line)] bg-transparent text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--line-strong)] text-[12px] font-semibold disabled:opacity-60 whitespace-nowrap cursor-pointer sm:ml-auto"
+          >
+            <Share2 className="w-3.5 h-3.5 shrink-0" />
+            <span>{sharingMobileBackup ? 'Preparando…' : 'Compartilhar no celular'}</span>
+          </button>
+        </div>
+
+        {/* Alertas condicionais: só aparecem quando realmente há ação necessária */}
+        {restoreProgress && (
+          <div className="px-4 sm:px-5 py-3 border-t border-[var(--accent)]/30 bg-[var(--accent-soft)]/50">
+            <div className="flex items-center justify-between gap-2 text-[12px] font-bold text-[var(--text)] mb-1.5">
+              <span className="truncate">{restoreProgress.label}</span>
+              <div className="flex items-center gap-2 shrink-0">
+                <span className="font-mono-num tabular-nums text-[var(--accent)]">
+                  {restoreProgress.current}/{restoreProgress.total}
+                </span>
+                <button
+                  type="button"
+                  onClick={cancelDriveRestore}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--bad)]/40 bg-[var(--panel)] text-[11px] font-bold text-[var(--bad)] hover:border-[var(--bad)] cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                  <span>Cancelar</span>
+                </button>
+              </div>
             </div>
-            {driveConnected && (
+            <div className="h-1.5 rounded-full bg-[var(--panel)] overflow-hidden">
+              <div
+                className="h-full bg-[var(--accent)] transition-all duration-200"
+                style={{
+                  width: `${Math.round((restoreProgress.current / Math.max(1, restoreProgress.total)) * 100)}%`,
+                }}
+              />
+            </div>
+          </div>
+        )}
+
+        {driveConnected && driveTokenReady && drivePermissionNeedsPicker && (
+          <div className="px-4 sm:px-5 py-3 border-t border-[var(--warning)]/40 bg-[var(--warning)]/10 flex flex-col sm:flex-row sm:items-center justify-between gap-2.5">
+            <div className="flex items-start gap-2 min-w-0">
+              <AlertTriangle className="w-4 h-4 text-[var(--warning)] shrink-0 mt-0.5" />
+              <div className="text-[12px] text-[var(--text)] min-w-0">
+                <strong>Autorização pendente na pasta &ldquo;{drivePermissionNeedsPicker.folderName}&rdquo;.</strong>{' '}
+                <span className="text-[var(--muted)]">
+                  Ative a pasta automática ou autorize via seletor do Drive.
+                </span>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
                 type="button"
-                onClick={() => void clearDriveBrowserCache()}
+                onClick={() => void handleCreateFreshWritableFolder()}
+                disabled={isSyncingDrive || savingCustomFolder}
+                className="px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 disabled:opacity-60 whitespace-nowrap cursor-pointer"
+              >
+                Ativar pasta automática
+              </button>
+              <button
+                type="button"
+                onClick={() => void authorizeDriveFolderViaPicker()}
                 disabled={isSyncingDrive}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-50 whitespace-nowrap"
+                className="px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
               >
-                <RefreshCcw className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                <span>Limpar cache local</span>
+                Autorizar via Seletor
               </button>
-            )}
+            </div>
           </div>
+        )}
 
-          {hasPendingCloudChanges && (!driveConnected || (!driveTokenReady && !isRenewingDriveToken) || drivePermissionNeedsPicker) && (
-            <div className="ce-notice ce-notice-warning text-[11.5px] leading-relaxed flex flex-col sm:flex-row sm:flex-wrap items-stretch sm:items-center justify-between gap-2">
-              <span className="min-w-0 flex-1">
-                <strong className="text-[var(--text)]">Alterações locais aguardando envio para a nuvem:</strong>{' '}
-                {drivePermissionNeedsPicker
-                  ? 'seus dados já estão salvos neste navegador. Ative a pasta sincronizada do Google Drive para enviar suas alterações.'
-                  : driveConnected && !driveTokenReady
-                  ? 'seus dados já estão salvos neste navegador, mas a sessão do Google Drive precisa ser confirmada. Toque em Reconectar para enviar os arquivos.'
-                  : 'suas edições estão salvas localmente neste navegador e serão enviadas automaticamente assim que você conectar sua conta.'}
+        {hasPendingCloudChanges &&
+          (!driveConnected ||
+            (!driveTokenReady && !isRenewingDriveToken) ||
+            drivePermissionNeedsPicker) && (
+            <div className="px-4 sm:px-5 py-2.5 border-t border-[var(--warning)]/35 bg-[var(--warning)]/8 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-[12px]">
+              <span className="text-[var(--text)]">
+                <strong>Alterações locais aguardando envio:</strong> salvas neste navegador até reconectar a nuvem.
               </span>
-              {drivePermissionNeedsPicker ? (
-                <button
-                  type="button"
-                  onClick={() => void handleCreateFreshWritableFolder()}
-                  disabled={isSyncingDrive || savingCustomFolder}
-                  className="w-full sm:w-auto px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap"
-                >
-                  Ativar pasta no Drive
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => void connectGoogleDrive()}
-                  disabled={isSyncingDrive}
-                  className="w-full sm:w-auto px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 text-center whitespace-normal sm:whitespace-nowrap"
-                >
-                  {driveConnected ? 'Reconectar agora' : 'Conectar Google Drive'}
-                </button>
-              )}
-            </div>
-          )}
-
-          {restoreProgress && (
-            <div className="rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] p-3">
-              <div className="flex items-center justify-between gap-2 text-[11.5px] font-bold text-[var(--text)] mb-1.5">
-                <span className="truncate">{restoreProgress.label}</span>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="font-mono-num text-[var(--accent)]">
-                    {restoreProgress.current} de {restoreProgress.total} arquivos
-                  </span>
-                  <button
-                    type="button"
-                    onClick={cancelDriveRestore}
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--bad)]/40 bg-[var(--panel)] text-[10.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] transition-colors cursor-pointer"
-                    title="Interromper restauração em andamento"
-                  >
-                    <X className="w-3 h-3" />
-                    <span>Cancelar</span>
-                  </button>
-                </div>
-              </div>
-              <div className="h-2 rounded-full bg-[var(--panel)] border border-[var(--line)] overflow-hidden">
-                <div
-                  className="h-full bg-[var(--accent)] transition-all duration-200"
-                  style={{ width: `${Math.round((restoreProgress.current / Math.max(1, restoreProgress.total)) * 100)}%` }}
-                />
-              </div>
-            </div>
-          )}
-
-          {driveConnected && driveTokenReady && (
-            <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3 min-w-0">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
-                <div className="min-w-0 flex-1">
-                  <strong className="text-[12px] font-bold text-[var(--text)]">
-                    Backups disponíveis no Google Drive ({cloudBackups.length})
-                  </strong>
-                  <span className="block text-[11px] text-[var(--muted)]">
-                    Pasta: {activeDriveFolderName} / Backups · Apenas alterações geram novos backups incrementais (cópias existentes nunca são substituídas ou removidas automaticamente)
-                  </span>
-                </div>
-                {cloudBackups.filter((b) => b.name !== CLOUD_SYNC_FILENAME).length > 20 && (
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      const ok = await requestConfirm({
-                        title: 'Remover backups antigos manualmente',
-                        description:
-                          'Deseja excluir os backups datados excedentes do Google Drive mantendo apenas os 20 mais recentes? Esta ação é manual e irreversível.',
-                        confirmLabel: 'Limpar excedentes (manter 20)',
-                        danger: true,
-                      });
-                      if (!ok) return;
-                      await pruneOldCloudBackups(20);
-                      await refreshCloudList();
-                    }}
-                    disabled={isSyncingDrive}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11px] font-bold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-50 whitespace-nowrap"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                    Limpar antigos (manter 20)
-                  </button>
-                )}
-              </div>
-
-              {loadingCloudList ? (
-                <p className="m-0 text-[12px] text-[var(--muted)] py-2">
-                  Carregando backups do Google Drive…
-                </p>
-              ) : cloudBackups.length === 0 ? (
-                <p className="m-0 text-[12px] text-[var(--muted)] py-2">
-                  Nenhum arquivo de backup JSON encontrado ainda no Drive. Toque em &ldquo;Salvar backup incremental na nuvem agora&rdquo; para criar seu primeiro snapshot.
-                </p>
-              ) : (
-                <div className="flex flex-col gap-2 max-h-[240px] overflow-y-auto">
-                  {cloudBackups.map((item) => {
-                    const isCanonical = item.name === CLOUD_SYNC_FILENAME;
-                    const isIncremental = item.name.startsWith('backup_incremental_central_estudos_');
-                    const isInActive = item.isInActiveFolder !== false;
-                    const dateStr = item.modifiedTime || item.createdTime;
-                    const formattedDate = dateStr
-                      ? new Date(dateStr).toLocaleString('pt-BR')
-                      : 'Data indisponível';
-                    return (
-                      <div
-                        key={item.id}
-                        className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 rounded-lg border border-[var(--line)] bg-[var(--panel-raised)] px-3 py-2 min-w-0"
-                      >
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <strong className="text-[12.5px] font-bold text-[var(--text)] break-all sm:truncate">
-                              {isCanonical ? 'Sincronização Automática (Mais recente)' : item.name}
-                            </strong>
-                            {isCanonical ? (
-                              <span className="px-1.5 py-0.5 rounded bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-extrabold uppercase">
-                                Principal
-                              </span>
-                            ) : isIncremental ? (
-                              <span className="px-1.5 py-0.5 rounded bg-[var(--good)]/15 text-[var(--good)] text-[10px] font-extrabold uppercase">
-                                Incremental
-                              </span>
-                            ) : (
-                              <span className="px-1.5 py-0.5 rounded bg-[var(--panel-soft)] border border-[var(--line)] text-[var(--muted)] text-[10px] font-extrabold uppercase">
-                                Base
-                              </span>
-                            )}
-                            <span
-                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                isInActive
-                                  ? 'bg-[var(--good)]/15 text-[var(--good)]'
-                                  : 'bg-[var(--warning)]/15 text-[var(--warning)]'
-                              }`}
-                            >
-                              {isInActive ? 'Pasta ativa' : 'Outra pasta'}
-                            </span>
-                            {item.syncOrigin === 'internal' ? (
-                              <span
-                                className="px-1.5 py-0.5 rounded border border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] text-[10px] font-bold"
-                                title="Arquivo criado ou atualizado internamente pelo app (etiqueta de sincronização)"
-                              >
-                                Etiqueta: App
-                              </span>
-                            ) : item.syncOrigin === 'external-modified' ? (
-                              <span
-                                className="px-1.5 py-0.5 rounded border border-[var(--warning)]/35 bg-[var(--warning)]/15 text-[var(--warning)] text-[10px] font-bold"
-                                title="Modificado externamente no Google Drive após o último envio do app"
-                              >
-                                Alterado fora do app
-                              </span>
-                            ) : (
-                              <span
-                                className="px-1.5 py-0.5 rounded border border-[var(--accent)]/30 bg-[var(--accent-soft)] text-[var(--accent)] text-[10px] font-bold"
-                                title="Arquivo enviado externamente ao Google Drive ou sem etiqueta interna"
-                              >
-                                Externo
-                              </span>
-                            )}
-                          </div>
-                          <span className="block text-[11px] text-[var(--muted)] break-words">
-                            {item.folderPath ? `${item.folderPath} · ` : ''}Atualizado em {formattedDate}
-                            {item.size ? ` · ${formatUploadSize(Number(item.size))}` : ''}
-                          </span>
-                        </div>
-                        <div className="flex items-center gap-1.5 shrink-0">
-                          <button
-                            type="button"
-                            onClick={() => void handleRestoreSpecificCloud(item)}
-                            disabled={isSyncingDrive || restoringId === item.id}
-                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)] text-[11.5px] font-bold hover:bg-[var(--accent)] hover:text-white disabled:opacity-50 transition-colors whitespace-nowrap"
-                          >
-                            <CloudDownload className="w-3.5 h-3.5" />
-                            {restoringId === item.id ? 'Restaurando…' : 'Restaurar'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteSpecificCloud(item)}
-                            disabled={isSyncingDrive}
-                            aria-label={`Excluir ${item.name}`}
-                            className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 text-[11.5px] font-bold transition-colors"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </Panel>
-
-      <SyncActivityLogPanel />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-4">
-        <Panel
-          title={`Histórico de Versões (Pontos de Restauração Locais · ${localRestorePoints.length}/5)`}
-          subtitle="Snapshots automáticos e manuais salvos no IndexedDB deste navegador para reversão instantânea em 1 clique."
-          action={
-            <button
-              type="button"
-              onClick={() => void createManualRestorePoint('Snapshot manual criado pelo usuário')}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] transition-colors whitespace-nowrap"
-            >
-              <Clock className="w-3.5 h-3.5" />
-              Criar ponto agora
-            </button>
-          }
-        >
-          {localRestorePoints.length === 0 ? (
-            <p className="m-0 text-[12px] text-[var(--muted)]">
-              Nenhum ponto de restauração local gravado ainda. Clique em &ldquo;Criar ponto agora&rdquo; ou realize uma sincronização em nuvem para gerar um snapshot de segurança.
-            </p>
-          ) : (
-            <div className="space-y-2">
-              {localRestorePoints.map((pt) => (
-                <div
-                  key={pt.id}
-                  className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] px-3 py-2.5"
-                >
-                  <div className="min-w-0">
-                    <strong className="block text-[12px] font-bold text-[var(--text)] truncate">
-                      {pt.label || pt.reason}
-                    </strong>
-                    <span className="block text-[11px] text-[var(--muted)] font-mono-num">
-                      {new Date(pt.createdAt).toLocaleString('pt-BR')} · {formatUploadSize(pt.byteLength)} ·{' '}
-                      {pt.stats?.laws ?? 0} lei(s) · {pt.stats?.questions ?? 0} questão(ões)
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const ok = await requestConfirm({
-                          title: 'Restaurar ponto de versão local',
-                          description: `Deseja reverter o banco de dados para o ponto "${pt.label || pt.reason}" de ${new Date(pt.createdAt).toLocaleString('pt-BR')}? Um snapshot automático do estado atual será salvo antes da reversão.`,
-                          confirmLabel: 'Reverter versão',
-                        });
-                        if (ok) {
-                          await restoreFromLocalRestorePoint(pt.id);
-                        }
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold hover:bg-[var(--accent)] hover:text-white transition-colors"
-                    >
-                      Restaurar
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => void deleteLocalRestorePointById(pt.id)}
-                      aria-label="Excluir ponto de restauração"
-                      className="inline-flex items-center justify-center w-7 h-7 rounded-lg border border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </Panel>
-
-        <Panel
-          title={`Fila Persistente de Uploads (Outbox · ${driveUploadOutboxCount}) & Deduplicação SHA-256`}
-          subtitle="Arquivos aguardando reconexão OAuth/rede no IndexedDB e motor de deduplicação criptográfica de PDFs."
-          action={
-            driveUploadOutboxCount > 0 ? (
               <button
                 type="button"
-                onClick={() => void flushDriveUploadOutboxNow()}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 transition-opacity whitespace-nowrap"
+                onClick={() =>
+                  void (drivePermissionNeedsPicker
+                    ? handleCreateFreshWritableFolder()
+                    : connectGoogleDrive())
+                }
+                disabled={isSyncingDrive || savingCustomFolder}
+                className="self-start sm:self-auto px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
               >
-                <CloudUpload className="w-3.5 h-3.5" />
-                Reenviar fila ({driveUploadOutboxCount})
+                {drivePermissionNeedsPicker
+                  ? 'Ativar pasta no Drive'
+                  : driveConnected
+                  ? 'Reconectar agora'
+                  : 'Conectar Google Drive'}
               </button>
-            ) : undefined
-          }
-        >
-          <div className="space-y-2.5">
-            <div className="rounded-xl border border-[var(--good)]/35 bg-[var(--good)]/10 px-3 py-2 text-[11.5px] text-[var(--text)] flex items-center gap-2">
-              <ShieldCheck className="w-4 h-4 text-[var(--good)] shrink-0" />
-              <span>
-                <strong>Deduplicação SHA-256 ativa:</strong> arquivos PDF ou TXT idênticos reutilizam o mesmo blob binário no armazenamento local e evitam uploads duplicados.
-              </span>
             </div>
+          )}
+      </section>
 
-            {driveUploadOutboxItems.length === 0 ? (
-              <p className="m-0 text-[12px] text-[var(--muted)]">
-                Fila Outbox vazia: todos os arquivos locais enviados já foram sincronizados ou não há pendências de upload para o Google Drive.
-              </p>
-            ) : (
-              <div className="space-y-1.5 max-h-[180px] overflow-y-auto pr-1">
-                {driveUploadOutboxItems.map((item) => (
-                  <div
-                    key={item.id}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--warning)]/40 bg-[var(--warning)]/10 px-3 py-2 text-[11.5px]"
-                  >
-                    <div className="min-w-0">
-                      <strong className="block font-bold text-[var(--text)] truncate">
-                        {item.filename}
-                      </strong>
-                      <span className="block text-[10.5px] text-[var(--muted)] truncate">
-                        {item.moduleTag || 'Geral'} · {item.lastError || 'Aguardando sessão OAuth'}
-                      </span>
-                    </div>
-                    <span className="px-2 py-0.5 rounded bg-[var(--warning)]/20 text-[var(--warning)] text-[10px] font-bold shrink-0">
-                      Na fila
-                    </span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </Panel>
-      </div>
-
+      {/* 2. CÓPIAS DE SEGURANÇA: ARQUIVO JSON (EXPORTAR / RESTAURAR) */}
       <Panel
-        title="O que é feito em cada tipo de backup"
-        subtitle="Entenda exatamente quais dados e arquivos são salvos ou restaurados em cada rotina automática e manual."
-        className="mb-4"
+        title="Backup em arquivo (.json)"
+        subtitle="Baixe uma cópia completa para o computador/celular ou restaure um arquivo existente, com opção de criptografia AES-256."
       >
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <RefreshCcw className="w-4 h-4 text-[var(--accent)] shrink-0" />
-              Sincronização contínua (incremental)
+        <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-[var(--line)] -mx-4 sm:-mx-5">
+          {/* Exportar */}
+          <div className="px-4 sm:px-5 pb-4 lg:pb-0 flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-2">
+              <strong className="text-[13px] font-bold text-[var(--text)]">
+                Exportar ou enviar cópia
+              </strong>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowExportEncryption((v) => !v);
+                  if (showExportEncryption) setExportPassphrase('');
+                }}
+                className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--accent)] cursor-pointer"
+              >
+                <Lock className="w-3 h-3" />
+                <span>{showExportEncryption ? 'Remover senha' : 'Proteger com senha'}</span>
+              </button>
             </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Quando há alteração real nos dados (validada por hash de conteúdo), aplica apenas as mudanças sobre o espelho{' '}
-              <strong className="text-[var(--text)] break-all">central_estudos_sync_latest.json</strong> na pasta{' '}
-              <strong className="text-[var(--text)]">Backups</strong>. Sem alterações, nada é reenviado.
-            </p>
-          </article>
 
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <Clock className="w-4 h-4 text-[var(--accent)] shrink-0" />
-              Backup incremental automático no Drive (30 min)
+            {showExportEncryption && (
+              <input
+                id="export-backup-pass"
+                type="password"
+                autoComplete="new-password"
+                value={exportPassphrase}
+                onChange={(e) => setExportPassphrase(e.target.value)}
+                placeholder="Senha AES-256-GCM (mínimo 4 caracteres)"
+                className="ce-input"
+              />
+            )}
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={handleQuickExportJson}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
+              >
+                <Download className="w-3.5 h-3.5 shrink-0" />
+                <span>
+                  {exportPassphrase.trim() ? 'Baixar JSON protegido' : 'Baixar backup (.json)'}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleShareBackupOnMobile()}
+                disabled={sharingMobileBackup}
+                className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+              >
+                <Share2 className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
+                <span>App do Drive / WhatsApp</span>
+              </button>
             </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Quando conectado ao Google Drive, a cada 30 minutos verifica mudanças desde a última cópia na nuvem e cria um novo arquivo datado (
-              <strong className="text-[var(--text)] break-all">backup_incremental_central_estudos_…json</strong>) contendo{' '}
-              <strong className="text-[var(--text)]">apenas os itens alterados ou novos</strong>, sem substituir nem apagar backups existentes.
-            </p>
-          </article>
-
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <CloudUpload className="w-4 h-4 text-[var(--good)] shrink-0" />
-              Salvar backup incremental na nuvem agora
-            </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Calcula imediatamente o delta dos itens modificados desde a última cópia e grava um novo snapshot incremental no Drive. Se nada mudou, preserva os arquivos existentes sem duplicação.
-            </p>
-          </article>
-
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <FolderSync className="w-4 h-4 text-[var(--good)] shrink-0" />
-              Sincronizar acervo local agora (PDFs)
-            </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Os arquivos PDF/binários não ficam dentro do JSON. Este botão verifica PDFs Pessoais, Lei Seca, Provas, Resumos e Discursivas salvos localmente e envia apenas os faltantes, sem substituir os já existentes.
-            </p>
-          </article>
-
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <CloudDownload className="w-4 h-4 text-[var(--accent)] shrink-0" />
-              Restaurar dados e arquivos do Drive
-            </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Baixa o backup base mais recente e aplica em ordem cronológica todos os backups incrementais posteriores, recuperando também os PDFs e materiais compatíveis do Google Drive.
-            </p>
-          </article>
-
-          <article className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-1.5">
-            <div className="flex items-center gap-2 text-[12.5px] font-bold text-[var(--text)]">
-              <FileJson className="w-4 h-4 text-[var(--accent)] shrink-0" />
-              Exportar / Restaurar JSON local
-            </div>
-            <p className="m-0 text-[11.5px] text-[var(--muted)] leading-relaxed">
-              Gera uma cópia offline em <strong className="text-[var(--text)]">.json</strong> ou importa tanto snapshots completos quanto arquivos incrementais baixados do Drive (mesclando apenas o que foi alterado).
-            </p>
-          </article>
-        </div>
-
-        <div className="mt-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3 text-[11.5px] text-[var(--muted)] leading-relaxed flex items-start gap-2.5">
-          <Database className="w-4 h-4 text-[var(--accent)] shrink-0 mt-0.5" />
-          <div className="min-w-0">
-            <strong className="text-[var(--text)]">Escopo coberto pelo diff incremental (Nuvem · 30 min):</strong>{' '}
-            questões, simulados enviados e realizados, histórico de acertos/erros, tempo de estudo, Caderno de Erros (com revisões), Súmulas e Jurisprudência, Pontos Críticos, Concursos (Datas &amp; Locais),{' '}
-            <strong className="text-[var(--text)]">Editais e pontos marcados</strong>, Cronograma semanal, Metas concluídas e não concluídas, pastas de Lei Seca e Matriz de Incidência (dispositivos, graus, dicas, grifos e{' '}
-            <strong className="text-[var(--text)]">datas de leitura por lei e por artigo</strong>), metadados/correções de documentos (PDFs, Resumos, Provas, Discursivas), frases motivacionais e preferências. Apenas seções e itens efetivamente alterados são gravados em cada backup incremental.
           </div>
-        </div>
-      </Panel>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-        <Panel
-          title="Exportar cópia de segurança (.json)"
-          subtitle="Baixa para este dispositivo um arquivo JSON com todas as questões, histórico, leis, datas de leitura, editais, metas, súmulas e preferências."
-        >
-          <div className="mb-3">
-            <label
-              htmlFor="export-backup-pass"
-              className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--muted)] mb-1"
-            >
-              <Lock className="w-3 h-3 text-[var(--accent)]" />
-              Senha opcional para criptografia AES-256-GCM (deixe vazio para JSON comum)
-            </label>
-            <input
-              id="export-backup-pass"
-              type="password"
-              autoComplete="new-password"
-              value={exportPassphrase}
-              onChange={(e) => setExportPassphrase(e.target.value)}
-              placeholder="Mínimo 4 caracteres (opcional)"
-              className="ce-input"
-            />
-          </div>
-          <div className="flex flex-col sm:flex-row flex-wrap items-stretch sm:items-center gap-2">
-            <button
-              type="button"
-              onClick={() => {
-                const pass = exportPassphrase.trim();
-                void exportBackupJson(pass ? { passphrase: pass } : undefined).catch((err) =>
-                  toast((err as Error).message, true),
-                );
-              }}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap shadow-xs"
-            >
-              <Download className="w-3.5 h-3.5 shrink-0" />
-              <span>{exportPassphrase.trim() ? 'Exportar JSON criptografado' : 'Exportar backup JSON'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleShareBackupOnMobile()}
-              disabled={sharingMobileBackup}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap"
-            >
-              <Share2 className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-              <span>Compartilhar no Celular</span>
-            </button>
-          </div>
-        </Panel>
+          {/* Importar */}
+          <form
+            onSubmit={handleRestoreJson}
+            className="px-4 sm:px-5 pt-4 lg:pt-0 flex flex-col gap-3"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <strong className="text-[13px] font-bold text-[var(--text)]">
+                Restaurar de arquivo (.json)
+              </strong>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowImportEncryption((v) => !v);
+                  if (showImportEncryption) setImportPassphrase('');
+                }}
+                className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--accent)] cursor-pointer"
+              >
+                <Lock className="w-3 h-3" />
+                <span>{showImportEncryption ? 'Ocultar senha' : 'Arquivo com senha?'}</span>
+              </button>
+            </div>
 
-        <Panel
-          title="Restaurar a partir de JSON local"
-          subtitle="Carrega um snapshot .json exportado anteriormente do computador ou celular (incluindo arquivos criptografados com AES-256-GCM)."
-        >
-          <form onSubmit={handleRestoreJson} className="space-y-2.5">
-            <div className="flex flex-col sm:flex-row flex-wrap gap-2 items-stretch sm:items-center">
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
               <input
                 ref={fileRef}
                 type="file"
                 accept=".json,application/json"
                 onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-                className="ce-input flex-1 min-w-0 w-full sm:w-auto sm:min-w-[180px]"
+                className="ce-input flex-1 min-w-0"
               />
               <button
                 type="submit"
                 disabled={importing}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 h-[38px] px-4 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap shadow-xs"
+                className="inline-flex items-center justify-center gap-1.5 h-[38px] px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
               >
                 <Upload className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" />
-                <span>{importing ? 'Restaurando…' : 'Restaurar arquivo'}</span>
+                <span>{importing ? 'Restaurando…' : 'Restaurar'}</span>
               </button>
             </div>
-            <div>
+
+            {showImportEncryption && (
               <input
                 type="password"
                 autoComplete="off"
                 aria-label="Senha do backup criptografado"
                 value={importPassphrase}
                 onChange={(e) => setImportPassphrase(e.target.value)}
-                placeholder="Senha do backup (somente se o arquivo estiver criptografado)"
+                placeholder="Digite a senha do arquivo criptografado"
                 className="ce-input"
               />
-            </div>
+            )}
           </form>
-        </Panel>
+        </div>
+      </Panel>
 
-        <Panel
-          title="Verificar integridade local"
-          subtitle="Checa consistência estrutural dos registros armazenados no navegador."
-        >
-          <div className="flex flex-wrap items-center gap-3">
+      {/* 3. PONTOS DE RESTAURAÇÃO (NUVEM + LOCAIS) EM UM ÚNICO PAINEL */}
+      <Panel
+        title="Pontos de restauração (Nuvem e Local)"
+        subtitle="Reverta rapidamente para uma versão anterior salva no navegador ou no seu Google Drive."
+        action={
+          <div className="flex items-center gap-2">
+            {driveConnected && driveTokenReady && (
+              <button
+                type="button"
+                onClick={() => void refreshCloudList()}
+                disabled={loadingCloudList}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+              >
+                <RefreshCcw className={`w-3.5 h-3.5 ${loadingCloudList ? 'animate-spin' : ''}`} />
+                <span>Atualizar nuvem</span>
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => setIntegrityReport(testLocalIntegrity())}
-              className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap shadow-xs"
+              onClick={() => void createManualRestorePoint('Snapshot manual criado pelo usuário')}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] whitespace-nowrap cursor-pointer"
             >
-              <ShieldCheck className="w-4 h-4 text-[var(--good)] shrink-0" />
-              <span>Executar verificação</span>
+              <Clock className="w-3.5 h-3.5" />
+              <span>Criar ponto local</span>
             </button>
-            {integrityReport && (
-              <span className="inline-flex items-center gap-1.5 text-[12.5px] font-bold text-[var(--good)] font-mono-num">
-                <CheckCircle2 className="w-4 h-4 shrink-0" />
-                {integrityReport.status} · {integrityReport.totalRecords} registros
-              </span>
+          </div>
+        }
+      >
+        <div className="grid grid-cols-1 lg:grid-cols-2 divide-y lg:divide-y-0 lg:divide-x divide-[var(--line)] -mx-4 sm:-mx-5">
+          {/* Coluna 1: Backups no Google Drive */}
+          <div className="px-4 sm:px-5 pb-4 lg:pb-0 min-w-0">
+            <div className="flex items-center justify-between gap-2 mb-2.5">
+              <strong className="text-[12.5px] font-bold text-[var(--text)]">
+                Cópias no Google Drive ({cloudBackups.length})
+              </strong>
+              {cloudBackups.filter((b) => b.name !== CLOUD_SYNC_FILENAME).length > 20 && (
+                <button
+                  type="button"
+                  onClick={() => void handlePruneOldCloudBackups()}
+                  disabled={isSyncingDrive}
+                  className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--bad)] disabled:opacity-50 cursor-pointer"
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Limpar antigos (manter 20)</span>
+                </button>
+              )}
+            </div>
+
+            {!driveConnected || !driveTokenReady ? (
+              <p className="m-0 text-[12px] text-[var(--muted)] leading-relaxed">
+                Conecte sua conta Google para visualizar e restaurar snapshots salvos no Drive.
+              </p>
+            ) : loadingCloudList ? (
+              <p className="m-0 text-[12px] text-[var(--muted)]">
+                Carregando backups do Google Drive…
+              </p>
+            ) : cloudBackups.length === 0 ? (
+              <p className="m-0 text-[12px] text-[var(--muted)]">
+                Nenhum backup encontrado ainda no Drive. Clique em &ldquo;Salvar na nuvem&rdquo; acima para criar o primeiro.
+              </p>
+            ) : (
+              <div className="divide-y divide-[var(--line)] max-h-[260px] overflow-y-auto pr-1">
+                {cloudBackups.map((item) => {
+                  const isCanonical = item.name === CLOUD_SYNC_FILENAME;
+                  const isIncremental = item.name.startsWith('backup_incremental_central_estudos_');
+                  const dateStr = item.modifiedTime || item.createdTime;
+                  const formattedDate = dateStr
+                    ? new Date(dateStr).toLocaleString('pt-BR')
+                    : 'Data indisponível';
+                  const typeLabel = isCanonical
+                    ? 'Principal'
+                    : isIncremental
+                    ? 'Incremental'
+                    : 'Base';
+                  const originLabel =
+                    item.syncOrigin === 'external-modified'
+                      ? 'Alterado fora do app'
+                      : item.syncOrigin === 'internal'
+                      ? 'App'
+                      : 'Externo';
+
+                  return (
+                    <div
+                      key={item.id}
+                      className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-2.5 min-w-0"
+                    >
+                      <div className="min-w-0 flex-1">
+                        <div className="text-[12.5px] font-semibold text-[var(--text)] truncate">
+                          {isCanonical ? 'Sincronização Automática (Mais recente)' : item.name}
+                        </div>
+                        <div className="text-[11px] text-[var(--muted)] font-mono-num truncate mt-0.5">
+                          <span
+                            className={
+                              isCanonical
+                                ? 'text-[var(--accent)] font-semibold'
+                                : isIncremental
+                                ? 'text-[var(--good)] font-semibold'
+                                : ''
+                            }
+                          >
+                            {typeLabel}
+                          </span>
+                          {' · '}
+                          {formattedDate}
+                          {item.size ? ` · ${formatUploadSize(Number(item.size))}` : ''}
+                          {' · '}
+                          {originLabel}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => void handleRestoreSpecificCloud(item)}
+                          disabled={isSyncingDrive || restoringId === item.id}
+                          className="px-2.5 py-1 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                        >
+                          {restoringId === item.id ? 'Restaurando…' : 'Restaurar'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeleteSpecificCloud(item)}
+                          disabled={isSyncingDrive}
+                          aria-label={`Excluir ${item.name}`}
+                          className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-[var(--line)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/50 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
             )}
           </div>
-        </Panel>
 
-        <Panel
-          title="Restaurar dados iniciais de demonstração"
-          subtitle="Reinicia a base com o conjunto padrão de exemplo e recria os PDFs demonstrativos."
-        >
+          {/* Coluna 2: Pontos Locais (IndexedDB) */}
+          <div className="px-4 sm:px-5 pt-4 lg:pt-0 min-w-0">
+            <div className="flex items-center justify-between gap-2 mb-2.5">
+              <strong className="text-[12.5px] font-bold text-[var(--text)]">
+                Snapshots locais no navegador ({localRestorePoints.length}/5)
+              </strong>
+            </div>
+
+            {localRestorePoints.length === 0 ? (
+              <p className="m-0 text-[12px] text-[var(--muted)] leading-relaxed">
+                Nenhum snapshot local gravado ainda. Clique em &ldquo;Criar ponto local&rdquo; para salvar um ponto de reversão instantânea neste navegador.
+              </p>
+            ) : (
+              <div className="divide-y divide-[var(--line)] max-h-[260px] overflow-y-auto pr-1">
+                {localRestorePoints.map((pt) => (
+                  <div
+                    key={pt.id}
+                    className="py-2.5 first:pt-0 last:pb-0 flex items-center justify-between gap-2.5 min-w-0"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[12.5px] font-semibold text-[var(--text)] truncate">
+                        {pt.label || pt.reason}
+                      </div>
+                      <div className="text-[11px] text-[var(--muted)] font-mono-num truncate mt-0.5">
+                        {new Date(pt.createdAt).toLocaleString('pt-BR')} ·{' '}
+                        {formatUploadSize(pt.byteLength)} · {pt.stats?.questions ?? 0} q ·{' '}
+                        {pt.stats?.laws ?? 0} lei(s)
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const ok = await requestConfirm({
+                            title: 'Restaurar ponto de versão local',
+                            description: `Deseja reverter o banco de dados para o ponto "${pt.label || pt.reason}" de ${new Date(pt.createdAt).toLocaleString('pt-BR')}? Um snapshot automático do estado atual será salvo antes da reversão.`,
+                            confirmLabel: 'Reverter versão',
+                          });
+                          if (ok) {
+                            await restoreFromLocalRestorePoint(pt.id);
+                          }
+                        }}
+                        className="px-2.5 py-1 rounded-md border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] whitespace-nowrap cursor-pointer"
+                      >
+                        Reverter
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void deleteLocalRestorePointById(pt.id)}
+                        aria-label="Excluir ponto de restauração"
+                        className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-[var(--line)] text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/50 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </Panel>
+
+      {/* 4. CONFIGURAÇÕES AVANÇADAS, AUDITORIA E MANUTENÇÃO (RECOLHIDAS POR PADRÃO EM 1 ÚNICO BLOCO) */}
+      <section className="ce-panel divide-y divide-[var(--line)] overflow-hidden">
+        {/* Gaveta A: Conexão, Pasta do Drive & Google Apps Script */}
+        <div>
           <button
             type="button"
-            onClick={() => void resetDemoData()}
-            className="w-full sm:w-auto inline-flex items-center justify-center gap-1.5 px-4 py-2 rounded-lg border border-[var(--bad)]/60 bg-[var(--bad)]/15 text-[12.5px] font-bold text-[var(--bad)] hover:bg-[var(--bad)] hover:text-white transition-colors whitespace-nowrap shadow-xs"
+            aria-expanded={openDrawers.cloud}
+            onClick={() => toggleDrawer('cloud')}
+            className="w-full px-4 sm:px-5 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-[var(--panel-soft)]/70 transition-colors cursor-pointer"
           >
-            <RefreshCcw className="w-3.5 h-3.5 shrink-0" />
-            <span>Restaurar dados de demonstração</span>
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Settings2 className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              <div className="min-w-0">
+                <strong className="block text-[13px] font-bold text-[var(--text)]">
+                  Configurar conta, pasta do Google Drive e Apps Script
+                </strong>
+                <span className="block text-[11.5px] text-[var(--muted)] truncate">
+                  Vincular conta, escolher pasta padrão, sincronizar PDFs locais, Apps Script e cache do navegador
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <span
+                className={`hidden sm:inline text-[11.5px] font-semibold ${
+                  isCloudReady ? 'text-[var(--good)]' : 'text-[var(--muted)]'
+                }`}
+              >
+                {isCloudReady ? activeDriveFolderName : 'Desconectado'}
+              </span>
+              <ChevronDown
+                className={`w-4 h-4 text-[var(--muted)] transition-transform ${
+                  openDrawers.cloud ? 'rotate-180' : ''
+                }`}
+              />
+            </div>
           </button>
-        </Panel>
-      </div>
-        </>
-      )}
+
+          {openDrawers.cloud && (
+            <div className="px-4 sm:px-5 pb-5 pt-3 border-t border-[var(--line)] bg-[var(--panel-soft)]/35 space-y-4">
+              {/* Controles de conta e pasta do Drive */}
+              <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-3.5">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <strong className="block text-[13px] font-bold text-[var(--text)]">
+                      {driveConnected
+                        ? `Google Drive: ${googleUser?.email || googleUser?.displayName || 'Conectado'}`
+                        : 'Google Drive desconectado'}
+                    </strong>
+                    <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                      {driveConnected && driveTokenReady
+                        ? `Pasta padrão: "${activeDriveFolderName}"${
+                            lastCacheVerifiedAt
+                              ? ` · Cache verificado em ${new Date(lastCacheVerifiedAt).toLocaleString('pt-BR')}`
+                              : ''
+                          }`
+                        : 'Conecte sua conta Google ou autentique-se pelo Google Apps Script abaixo.'}
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2 shrink-0">
+                    {(!driveConnected || (!driveTokenReady && !isRenewingDriveToken)) && (
+                      <button
+                        type="button"
+                        onClick={() => void connectGoogleDrive()}
+                        disabled={isSyncingDrive}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                      >
+                        <Cloud className="w-3.5 h-3.5" />
+                        <span>{driveConnected ? 'Reconectar Google' : 'Conectar Google'}</span>
+                      </button>
+                    )}
+                    {driveFolderUrl && (
+                      <a
+                        href={driveFolderUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                      >
+                        <span>Abrir no Drive</span>
+                        <ExternalLink className="w-3 h-3" />
+                      </a>
+                    )}
+                    {driveConnected && (
+                      <button
+                        type="button"
+                        onClick={() => disconnectGoogleDrive()}
+                        className="px-3 py-1.5 rounded-lg border border-[var(--line)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--bad)] hover:border-[var(--bad)]/40 whitespace-nowrap cursor-pointer"
+                      >
+                        Desconectar
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {driveConnected && driveTokenReady && (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-[minmax(0,1fr)_220px] gap-2.5 pt-3 border-t border-[var(--line)]">
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <label
+                          htmlFor="restore-folder-select"
+                          className="text-[11.5px] font-semibold text-[var(--muted)]"
+                        >
+                          Pasta padrão de salvamento e leitura
+                        </label>
+                        <select
+                          id="restore-folder-select"
+                          value={selectedRestoreFolderId}
+                          onChange={(e) => {
+                            const nextId = e.target.value;
+                            setSelectedRestoreFolderId(nextId);
+                            setNeedsPickerFileConfirmationFolderId(null);
+                            if (nextId && nextId !== 'all' && nextId !== 'root') {
+                              const found = driveFolders.find((f) => f.id === nextId);
+                              void selectDriveStudyFolder({
+                                id: nextId,
+                                name: found?.name || activeDriveFolderName,
+                              }).then((ok) => {
+                                if (ok) void refreshCloudList();
+                              });
+                            }
+                          }}
+                          className="ce-input w-full h-[36px] py-0 px-2.5 text-[12px] font-semibold truncate"
+                        >
+                          {activeDriveFolderId &&
+                            !driveFolders.some((f) => f.id === activeDriveFolderId) && (
+                              <option value={activeDriveFolderId}>
+                                ★ {activeDriveFolderName} (Pasta padrão)
+                              </option>
+                            )}
+                          {driveFolders.map((folder) => (
+                            <option key={folder.id} value={folder.id}>
+                              {folder.id === activeDriveFolderId ? '★ ' : ''}
+                              {folder.fullPath} ({folder.studyFileCount}/{folder.fileCount} arq.)
+                            </option>
+                          ))}
+                          <option value="all">Todas as pastas associadas (Busca global)</option>
+                        </select>
+                      </div>
+
+                      <div className="flex flex-col gap-1 min-w-0">
+                        <label
+                          htmlFor="restore-module-select"
+                          className="text-[11.5px] font-semibold text-[var(--muted)]"
+                        >
+                          Destino de importação
+                        </label>
+                        <select
+                          id="restore-module-select"
+                          value={folderImportTarget}
+                          onChange={(e) =>
+                            setFolderImportTarget(
+                              e.target.value as 'auto' | 'pdfs' | 'laws' | 'proofs' | 'summaries',
+                            )
+                          }
+                          className="ce-input w-full h-[36px] py-0 px-2.5 text-[12px] font-semibold"
+                        >
+                          <option value="auto">Detectar automaticamente</option>
+                          <option value="pdfs">PDFs Pessoais</option>
+                          <option value="laws">Lei Seca</option>
+                          <option value="proofs">Provas</option>
+                          <option value="summaries">Resumos &amp; Mapas</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => void handleCreateFreshWritableFolder()}
+                        disabled={isSyncingDrive || savingCustomFolder}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--good)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                      >
+                        <FolderSync className="w-3.5 h-3.5 text-[var(--good)]" />
+                        <span>{savingCustomFolder ? 'Ativando…' : 'Pasta automática'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleOpenGooglePicker('folders-and-files')}
+                        disabled={isSyncingDrive}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                      >
+                        <FolderSearch className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        <span>Escolher pasta/arquivos no Drive</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowFolderLinkInput((v) => !v)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                      >
+                        <Folder className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        <span>Nome / Link da pasta</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void syncAllLocalFilesToDrive()}
+                        disabled={isSyncingDrive}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-semibold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                      >
+                        <CloudUpload className="w-3.5 h-3.5 text-[var(--good)]" />
+                        <span>Enviar PDFs locais faltantes</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void clearDriveBrowserCache()}
+                        disabled={isSyncingDrive}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--line-strong)] disabled:opacity-50 whitespace-nowrap cursor-pointer"
+                      >
+                        <RefreshCcw className="w-3.5 h-3.5" />
+                        <span>Limpar cache local</span>
+                      </button>
+                    </div>
+
+                    {showFolderLinkInput && (
+                      <form
+                        onSubmit={handleApplyCustomFolder}
+                        className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 pt-2 border-t border-[var(--line)]"
+                      >
+                        <input
+                          type="text"
+                          value={customFolderInput}
+                          onChange={(e) => setCustomFolderInput(e.target.value)}
+                          placeholder="Nome da pasta no Drive ou cole o link/ID da pasta…"
+                          className="ce-input flex-1 min-w-0"
+                        />
+                        <button
+                          type="submit"
+                          disabled={savingCustomFolder}
+                          className="h-[38px] px-3.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-60 whitespace-nowrap cursor-pointer"
+                        >
+                          {savingCustomFolder ? 'Aplicando…' : 'Associar pasta'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setShowFolderLinkInput(false);
+                            setCustomFolderInput('');
+                          }}
+                          className="h-[38px] px-3 rounded-lg border border-[var(--line)] text-[12px] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                      </form>
+                    )}
+
+                    {needsPickerFileConfirmationFolderId && (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 p-2.5 rounded-lg border border-[var(--warning)]/50 bg-[var(--warning)]/10 text-[11.5px]">
+                        <span className="text-[var(--text)]">
+                          Alguns arquivos dessa pasta foram enviados fora do app. Selecione-os no Drive para liberar a leitura:
+                        </span>
+                        <div className="flex items-center gap-2 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void handleOpenGooglePicker(
+                                'files-only',
+                                needsPickerFileConfirmationFolderId,
+                              )
+                            }
+                            disabled={isSyncingDrive}
+                            className="px-3 py-1 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold whitespace-nowrap cursor-pointer"
+                          >
+                            Selecionar no Drive
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </>
+                )}
+              </div>
+
+              {/* Painéis especializados de Apps Script & Sync ativo */}
+              <GasConnectionMonitorPanel />
+              <ActiveSyncPanel />
+              <AppsScriptSetupPanel />
+            </div>
+          )}
+        </div>
+
+        {/* Gaveta B: Auditoria, Conflitos e Fila de Envio */}
+        <div>
+          <button
+            type="button"
+            aria-expanded={openDrawers.audit}
+            onClick={() => toggleDrawer('audit')}
+            className="w-full px-4 sm:px-5 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-[var(--panel-soft)]/70 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <ClipboardList className="w-4 h-4 text-[var(--accent)] shrink-0" />
+              <div className="min-w-0">
+                <strong className="block text-[13px] font-bold text-[var(--text)]">
+                  Auditoria, conflitos e fila de envio
+                </strong>
+                <span className="block text-[11.5px] text-[var(--muted)] truncate">
+                  Fila offline (Outbox), histórico de sincronizações, deduplicação SHA-256 e resolução de conflitos
+                </span>
+              </div>
+            </div>
+            <div className="flex items-center gap-2.5 shrink-0">
+              <span
+                className={`text-[11.5px] font-mono-num font-semibold ${
+                  pendingAttentionCount > 0 ? 'text-[var(--warning)]' : 'text-[var(--muted)]'
+                }`}
+              >
+                {pendingAttentionCount > 0
+                  ? `${pendingAttentionCount} pendência(s)`
+                  : conflictHistory.length > 0
+                  ? `${conflictHistory.length} histórico`
+                  : 'Em dia'}
+              </span>
+              <ChevronDown
+                className={`w-4 h-4 text-[var(--muted)] transition-transform ${
+                  openDrawers.audit ? 'rotate-180' : ''
+                }`}
+              />
+            </div>
+          </button>
+
+          {openDrawers.audit && (
+            <div className="px-4 sm:px-5 pb-5 pt-3 border-t border-[var(--line)] bg-[var(--panel-soft)]/35 space-y-4">
+              {/* Fila Outbox + SHA-256 */}
+              <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <strong className="block text-[13px] font-bold text-[var(--text)]">
+                      Fila de uploads pendentes ({driveUploadOutboxCount}) &amp; Deduplicação SHA-256
+                    </strong>
+                    <span className="block text-[11.5px] text-[var(--muted)]">
+                      Arquivos PDF/TXT idênticos reutilizam o mesmo hash SHA-256 evitando uploads duplicados.
+                    </span>
+                  </div>
+                  {driveUploadOutboxCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void flushDriveUploadOutboxNow()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--good)] bg-[var(--good)] text-white text-[11.5px] font-bold hover:opacity-90 whitespace-nowrap cursor-pointer"
+                    >
+                      <CloudUpload className="w-3.5 h-3.5" />
+                      <span>Reenviar fila ({driveUploadOutboxCount})</span>
+                    </button>
+                  )}
+                </div>
+
+                {driveUploadOutboxItems.length === 0 ? (
+                  <p className="m-0 text-[12px] text-[var(--muted)]">
+                    Fila vazia — todos os arquivos locais já foram sincronizados ou não há pendências.
+                  </p>
+                ) : (
+                  <div className="divide-y divide-[var(--line)] max-h-[180px] overflow-y-auto">
+                    {driveUploadOutboxItems.map((item) => (
+                      <div
+                        key={item.id}
+                        className="py-2 flex items-center justify-between gap-2 text-[12px]"
+                      >
+                        <div className="min-w-0">
+                          <strong className="block font-semibold text-[var(--text)] truncate">
+                            {item.filename}
+                          </strong>
+                          <span className="block text-[11px] text-[var(--muted)] truncate">
+                            {item.moduleTag || 'Geral'} · {item.lastError || 'Aguardando conexão'}
+                          </span>
+                        </div>
+                        <span className="text-[11px] font-semibold text-[var(--warning)] shrink-0">
+                          Na fila
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <SyncAuditPanel />
+              <ConflictHistoryPanel />
+              <SyncActivityLogPanel />
+            </div>
+          )}
+        </div>
+
+        {/* Gaveta C: Manutenção, Integridade & Como Funciona */}
+        <div>
+          <button
+            type="button"
+            aria-expanded={openDrawers.maintenance}
+            onClick={() => toggleDrawer('maintenance')}
+            className="w-full px-4 sm:px-5 py-3.5 flex items-center justify-between gap-3 text-left hover:bg-[var(--panel-soft)]/70 transition-colors cursor-pointer"
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <Wrench className="w-4 h-4 text-[var(--muted)] shrink-0" />
+              <div className="min-w-0">
+                <strong className="block text-[13px] font-bold text-[var(--text)]">
+                  Manutenção, integridade e detalhes do backup
+                </strong>
+                <span className="block text-[11.5px] text-[var(--muted)] truncate">
+                  Testar integridade local, restaurar base de demonstração e consultar o que cada rotina salva
+                </span>
+              </div>
+            </div>
+            <ChevronDown
+              className={`w-4 h-4 text-[var(--muted)] shrink-0 transition-transform ${
+                openDrawers.maintenance ? 'rotate-180' : ''
+              }`}
+            />
+          </button>
+
+          {openDrawers.maintenance && (
+            <div className="px-4 sm:px-5 pb-5 pt-3 border-t border-[var(--line)] bg-[var(--panel-soft)]/35 space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 flex flex-col justify-between gap-3">
+                  <div>
+                    <strong className="block text-[13px] font-bold text-[var(--text)]">
+                      Verificar integridade local
+                    </strong>
+                    <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                      Checa consistência estrutural dos registros armazenados no navegador.
+                    </span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <button
+                      type="button"
+                      onClick={() => setIntegrityReport(testLocalIntegrity())}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5 text-[var(--good)]" />
+                      <span>Executar verificação</span>
+                    </button>
+                    {integrityReport && (
+                      <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[var(--good)] font-mono-num">
+                        <CheckCircle2 className="w-4 h-4 shrink-0" />
+                        {integrityReport.status} · {integrityReport.totalRecords} registros
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4 flex flex-col justify-between gap-3">
+                  <div>
+                    <strong className="block text-[13px] font-bold text-[var(--text)]">
+                      Restaurar dados de demonstração
+                    </strong>
+                    <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                      Reinicia a base com o conjunto padrão de exemplo e recria os PDFs demonstrativos.
+                    </span>
+                  </div>
+                  <div>
+                    <button
+                      type="button"
+                      onClick={() => void resetDemoData()}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--bad)]/50 bg-[var(--bad)]/10 text-[12px] font-bold text-[var(--bad)] hover:bg-[var(--bad)] hover:text-white transition-colors whitespace-nowrap cursor-pointer"
+                    >
+                      <RefreshCcw className="w-3.5 h-3.5" />
+                      <span>Restaurar demonstração</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Resumo enxuto de como cada backup funciona */}
+              <div className="rounded-xl border border-[var(--line)] bg-[var(--panel)] p-4">
+                <strong className="block text-[12.5px] font-bold text-[var(--text)] mb-2">
+                  Como funcionam os backups
+                </strong>
+                <dl className="m-0 divide-y divide-[var(--line)] text-[11.5px] leading-relaxed">
+                  <div className="py-2 first:pt-0 grid grid-cols-1 sm:grid-cols-[200px_1fr] gap-1">
+                    <dt className="font-semibold text-[var(--text)]">Sync contínua &amp; 30 min</dt>
+                    <dd className="m-0 text-[var(--muted)]">
+                      Grava apenas alterações reais (diff incremental) em{' '}
+                      <span className="font-mono-num text-[var(--text)]">central_estudos_sync_latest.json</span>{' '}
+                      e snapshots datados na pasta Backups, sem sobrescrever históricos anteriores.
+                    </dd>
+                  </div>
+                  <div className="py-2 grid grid-cols-1 sm:grid-cols-[200px_1fr] gap-1">
+                    <dt className="font-semibold text-[var(--text)]">Escopo salvo</dt>
+                    <dd className="m-0 text-[var(--muted)]">
+                      Questões, simulados, histórico, tempo de estudo, Caderno de Erros, Súmulas, Concursos, Editais, Cronograma, Metas, Lei Seca (incluindo datas de leitura por artigo e grifos), resumos, frases e preferências.
+                    </dd>
+                  </div>
+                  <div className="py-2 last:pb-0 grid grid-cols-1 sm:grid-cols-[200px_1fr] gap-1">
+                    <dt className="font-semibold text-[var(--text)]">PDFs e arquivos binários</dt>
+                    <dd className="m-0 text-[var(--muted)]">
+                      Ficam armazenados separadamente do JSON (com deduplicação SHA-256). Use &ldquo;Enviar PDFs locais faltantes&rdquo; na seção de nuvem quando quiser garantir que todos os anexos locais estejam no Drive.
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
     </div>
   );
 };

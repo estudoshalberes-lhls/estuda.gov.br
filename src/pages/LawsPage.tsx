@@ -243,6 +243,7 @@ export const LawsPage: React.FC = () => {
 
   const handleSelectLawFolder = (folderName: string) => {
     setSelectedFolder(folderName);
+    setChecklistRenderLimit(100);
     setPreviewPdf(null);
     setFocusSearchTerm('');
     setLawQuery('');
@@ -255,6 +256,7 @@ export const LawsPage: React.FC = () => {
   const [editalFilterContestId, setEditalFilterContestId] = useState<string>('all');
   const [readerTab, setReaderTab] = useState<'continuous' | 'devices' | 'history'>('continuous');
   const [checklistFilter, setChecklistFilter] = useState<'all' | 'unread' | 'read'>('all');
+  const [checklistRenderLimit, setChecklistRenderLimit] = useState<number>(100);
   const [previewPdf, setPreviewPdf] = useState<{ blobKey: string; name: string } | null>(null);
   const [readDateInput, setReadDateInput] = useState<string>(() => localDateIso());
   const [readDateNote, setReadDateNote] = useState('');
@@ -2258,7 +2260,7 @@ export const LawsPage: React.FC = () => {
                                 : undefined
                             }
                             onClick={() => setLawLastPosition(activeFolder, group.key)}
-                            className={`rounded-lg border p-3.5 transition-colors ${
+                            className={`ce-cv-card rounded-lg border p-3.5 transition-colors ${
                               allGroupRead
                                 ? 'border-[var(--good)]/35 bg-[var(--good)]/[0.03]'
                                 : 'border-[var(--line)]/80 bg-[var(--panel)]/60'
@@ -2838,13 +2840,14 @@ export const LawsPage: React.FC = () => {
                   return true;
                 });
                 const seenChecklistArticleAnchors = new Set<string>();
+                const visibleChecklistItems = checklistItems.slice(0, checklistRenderLimit);
                 return checklistItems.length ? (
                 <div
                   className={`flex flex-col gap-2 max-h-[600px] overflow-y-auto pr-1 ${
                     readingPrefs.comfortableWidth ? 'max-w-[82ch] mx-auto' : ''
                   }`}
                 >
-                  {checklistItems.map((item) => {
+                  {visibleChecklistItems.map((item) => {
                     const todayIso = localDateIso();
                     const isRead = readSet.has(item.id);
                     const isMatched = matchedIds.has(item.id);
@@ -2877,7 +2880,7 @@ export const LawsPage: React.FC = () => {
                         id={assignAnchor ? anchorCandidate : undefined}
                         data-voice-item-id={item.id}
                         onClick={() => setLawLastPosition(activeFolder, articleTarget)}
-                        className={`rounded-xl border p-3 transition-colors ${
+                        className={`ce-cv-card rounded-xl border p-3 transition-colors ${
                           isSpeakingThis
                             ? 'border-[var(--accent)] bg-[var(--accent)]/12 ring-2 ring-[var(--accent)]'
                             : isMatched
@@ -3278,6 +3281,29 @@ export const LawsPage: React.FC = () => {
                       </div>
                     );
                   })}
+                  {checklistItems.length > visibleChecklistItems.length && (
+                    <div className="pt-2 pb-1 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--line)]">
+                      <span className="text-[11.5px] font-mono-num text-[var(--muted)]">
+                        Exibindo {visibleChecklistItems.length} de {checklistItems.length} dispositivos
+                      </span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setChecklistRenderLimit((prev) => prev + 100)}
+                          className="px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer"
+                        >
+                          Carregar mais (+{Math.min(100, checklistItems.length - visibleChecklistItems.length)})
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setChecklistRenderLimit(checklistItems.length)}
+                          className="px-3 py-1.5 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[11.5px] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                        >
+                          Exibir todos
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               ) : folderData && folderData.items.length === 0 && folderData.pdfs.length > 0 ? (
                 <div className="rounded-xl border border-dashed border-[var(--line-strong)] bg-[var(--panel-soft)] p-6 text-center">

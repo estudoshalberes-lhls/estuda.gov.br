@@ -1,4 +1,3 @@
-import { LineCapStyle, PDFDocument, StandardFonts, degrees, rgb } from 'pdf-lib';
 import {
   PdfAnnotationColor,
   PdfFileAnnotations,
@@ -102,7 +101,7 @@ function toPdfCoords(
 
 export async function readPdfBakedTimestamp(blob: Blob): Promise<string | null> {
   try {
-    const buf = await blob.arrayBuffer();
+    const [{ PDFDocument }, buf] = await Promise.all([import('pdf-lib'), blob.arrayBuffer()]);
     const pdfDoc = await PDFDocument.load(buf, {
       ignoreEncryption: true,
       updateMetadata: false,
@@ -130,7 +129,10 @@ export async function bakeAnnotationsIntoPdf(
     bakedAtIso?: string;
   },
 ): Promise<Blob> {
-  const bytes = await baseBlob.arrayBuffer();
+  const [{ LineCapStyle, PDFDocument, StandardFonts, degrees, rgb }, bytes] = await Promise.all([
+    import('pdf-lib'),
+    baseBlob.arrayBuffer(),
+  ]);
   const pdfDoc = await PDFDocument.load(bytes, {
     ignoreEncryption: true,
     updateMetadata: false,

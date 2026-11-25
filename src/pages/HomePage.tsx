@@ -38,6 +38,7 @@ import { ModuleName } from '../types/study';
 import { ModuleIcon } from '../components/ui/ModuleIcon';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { DailyGoalPacePanel } from '../components/home/DailyGoalPacePanel';
+import { SmartReviewQueuePanel } from '../components/home/SmartReviewQueuePanel';
 import { TodayFocusPanel } from '../components/home/TodayFocusPanel';
 import { PreExamChecklistPanel } from '../components/home/PreExamChecklistPanel';
 import { FlashcardsReviewModal } from '../components/study/FlashcardsReviewModal';
@@ -397,6 +398,9 @@ export const HomePage: React.FC = () => {
 
       {/* Meta Diária de Horas/Questões + Alerta de Ritmo até a Prova */}
       <DailyGoalPacePanel />
+
+      {/* Fila Inteligente: O que revisar hoje (Lei Seca >7d, Erros e Metas de Hoje) */}
+      <SmartReviewQueuePanel />
 
       {/* Central de Ferramentas Ativas de Estudo */}
       <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">

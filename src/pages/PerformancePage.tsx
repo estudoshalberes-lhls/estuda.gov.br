@@ -55,6 +55,7 @@ import {
   SubjectAccuracyEvolutionD3Chart,
   WeeklyStudyHoursD3Chart,
 } from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
+import { WeeklyGoalProgressD3Dashboard } from '../components/charts/WeeklyGoalProgressD3Dashboard';
 import {
   ExamBlockPacingPoint,
   ExamErrorTypeBreakdownRow,
@@ -2056,6 +2057,23 @@ export const PerformancePage: React.FC = () => {
           </>
         ) : (
           <>
+            <div
+              data-d3-chart-card=""
+              data-d3-chart-title="Progresso Semanal · Horas Líquidas × Meta Estabelecida"
+              data-d3-chart-subtitle="Comparativo semanal em D3 das horas líquidas estudadas frente à meta semanal configurada e ritmo diário da semana atual."
+            >
+              <WeeklyGoalProgressD3Dashboard
+                db={db}
+                fixedSubjects={fixedSubjects}
+                subjectFilter={subjectFilter}
+                onSaveWeeklyGoal={(hours) => {
+                  updatePreferences({ weekly_hours_goal: hours });
+                  toast(`Meta semanal de estudo atualizada para ${hours.toLocaleString('pt-BR')}h.`);
+                }}
+                onNavigate={(page) => setActivePage(page)}
+              />
+            </div>
+
             <div
               data-d3-chart-card=""
               data-d3-chart-title="Evolução Temporal & Tendência de Acerto"

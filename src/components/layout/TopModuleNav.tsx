@@ -2,6 +2,7 @@ import React from 'react';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { useStudy } from '../../context/StudyContext';
 import { ModuleIcon } from '../ui/ModuleIcon';
+import { prefetchModulePage } from '../../lib/routePrefetch';
 
 export const TopModuleNav: React.FC = () => {
   const { db, activePage, setActivePage } = useStudy();
@@ -23,6 +24,8 @@ export const TopModuleNav: React.FC = () => {
             <button
               key={mod.name}
               type="button"
+              onMouseEnter={() => prefetchModulePage(mod.name)}
+              onFocus={() => prefetchModulePage(mod.name)}
               onClick={() => setActivePage(mod.name)}
               className={`flex items-center gap-2 min-h-[34px] px-2.5 py-1.5 rounded-[6px] border text-left text-[12.5px] transition-colors cursor-pointer ${
                 isActive

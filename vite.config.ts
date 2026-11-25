@@ -149,7 +149,35 @@ export default defineConfig(() => {
       format: 'es' as const,
     },
     optimizeDeps: {
-      exclude: ['@mintplex-labs/piper-tts-web', 'onnxruntime-web'],
+      exclude: ['onnxruntime-web'],
+    },
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks(id) {
+            if (!id.includes('node_modules')) return undefined;
+            if (id.includes('react-dom') || id.includes('/react/') || id.includes('scheduler')) {
+              return 'vendor-react';
+            }
+            if (id.includes('/d3') || id.includes('internmap') || id.includes('delaunator') || id.includes('robust-predicates')) {
+              return 'vendor-d3';
+            }
+            if (id.includes('pdfjs-dist')) {
+              return 'vendor-pdfjs';
+            }
+            if (id.includes('jspdf') || id.includes('pdf-lib') || id.includes('html2canvas') || id.includes('canvg')) {
+              return 'vendor-pdf-export';
+            }
+            if (id.includes('jszip')) {
+              return 'vendor-docx';
+            }
+            if (id.includes('lucide-react')) {
+              return 'vendor-icons';
+            }
+            return undefined;
+          },
+        },
+      },
     },
     resolve: {
       alias: {

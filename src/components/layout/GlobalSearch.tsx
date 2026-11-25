@@ -22,7 +22,16 @@ import { formatSequentialDeviceLabel, isReservedBackupFolderName, normalizeSearc
 import { ModuleName } from '../../types/study';
 import { ModuleIcon } from '../ui/ModuleIcon';
 
-type SearchCategory = 'Tudo' | 'Módulos' | 'Leis' | 'Artigos' | 'Funções' | 'Conteúdo';
+type SearchCategory =
+  | 'Tudo'
+  | 'Módulos'
+  | 'Leis'
+  | 'Artigos'
+  | 'Resumos'
+  | 'Erros'
+  | 'Questões'
+  | 'Funções'
+  | 'Conteúdo';
 
 interface SearchResultItem {
   id: string;
@@ -67,6 +76,7 @@ const MODULE_DESCRIPTIONS: Record<ModuleName, { desc: string; keywords: string }
 export const GlobalSearch: React.FC = () => {
   const {
     db,
+    allErrorEntries,
     activeDriveFolderName,
     setActivePage,
     openLawAt,
@@ -411,12 +421,59 @@ export const GlobalSearch: React.FC = () => {
       });
     }
 
+    // 5. Resumos & Mapas Mentais (Dossiê de Resumos)
+    for (const [folderKey, summaryItems] of Object.entries(db.summaryFolders || {})) {
+      const subjectLabel = visibleName(folderKey);
+      for (const sItem of summaryItems || []) {
+        const title = sItem.title?.trim() || visibleName(sItem.name);
+        const rawSnippet = (sItem.content || '').replace(/\s+/g, ' ').trim();
+        const tagsStr = (sItem.tags || []).join(' ');
+        items.push({
+          id: `sum-${folderKey}-${sItem.id}`,
+          category: 'Resumos',
+          title,
+          subtitle: `${subjectLabel}${sItem.subtopic ? ` · ${sItem.subtopic}` : ''}${rawSnippet ? ` — ${rawSnippet.slice(0, 90)}${rawSnippet.length > 90 ? '…' : ''}` : ''}`,
+          meta: sItem.mindMap ? 'Mapa Mental' : 'Resumo',
+          keywords: `${title} ${subjectLabel} ${sItem.subtopic || ''} ${tagsStr} ${rawSnippet.slice(0, 260)}`,
+          icon: <FileText className="w-4 h-4" />,
+          onSelect: () => {
+            setActivePage('Resumos & Mapas');
+            closeSearch();
+          },
+        });
+      }
+    }
+
+    // 6. Caderno de Erros
+    for (const err of allErrorEntries) {
+      const subj = visibleName(err.materia || 'Geral');
+      const snippet = (err.questao?.enunciado || err.texto || err.questao?.comentario || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      const sourceLabel = err.simulado_titulo || err.origem || err.banca || '';
+      items.push({
+        id: `err-${err.id}`,
+        category: 'Erros',
+        title: `${subj}${sourceLabel ? ` · ${sourceLabel}` : ''}`,
+        subtitle: snippet ? `${snippet.slice(0, 105)}${snippet.length > 105 ? '…' : ''}` : 'Registro no Caderno de Erros',
+        meta: err.corrigido ? 'Revisado' : 'Pendente',
+        keywords: `${subj} ${sourceLabel} ${err.tipo || ''} ${err.texto || ''} ${err.questao?.enunciado || ''} ${err.questao?.comentario || ''}`,
+        icon: <BookOpen className="w-4 h-4" />,
+        onSelect: () => {
+          setActivePage('Caderno de Erros');
+          closeSearch();
+        },
+      });
+    }
+
     return items;
   }, [
     db.laws,
     db.caseLaw,
     db.criticalPoints,
     db.pdfFolders,
+    db.summaryFolders,
+    allErrorEntries,
     activeDriveFolderName,
     db.proofFiles,
     db.contests,
@@ -475,12 +532,43 @@ export const GlobalSearch: React.FC = () => {
       }
     }
 
-    const combined = [...matchesBase, ...articleMatches];
+    // Search questions across db.questions (when query >= 2 chars or 'Questões' tab selected)
+    const questionMatches: SearchResultItem[] = [];
+    const shouldScanQuestions = term.length >= 2 || category === 'Questões';
+    if (shouldScanQuestions) {
+      for (const q of db.questions || []) {
+        const subj = visibleName(q.materia || 'Geral');
+        const searchable = normalizeSearch(
+          `${subj} ${q.enunciado} ${q.comentario || ''} ${q.numero ? `questao ${q.numero}` : ''}`,
+        );
+        if (!term || searchable.includes(term)) {
+          questionMatches.push({
+            id: `q-${q.id}`,
+            category: 'Questões',
+            title: `${subj}${q.numero ? ` · Q.${q.numero}` : ''}`,
+            subtitle: `${(q.enunciado || '').replace(/\s+/g, ' ').slice(0, 112)}${(q.enunciado || '').length > 112 ? '…' : ''}`,
+            meta: q.tipo === 'CE' ? 'Certo/Errado' : 'Múltipla Escolha',
+            keywords: searchable,
+            icon: <ListChecks className="w-4 h-4" />,
+            onSelect: () => {
+              setActivePage('Treino Diário');
+              closeSearch();
+            },
+          });
+          if (questionMatches.length >= 25) break;
+        }
+      }
+    }
+
+    const combined = [...matchesBase, ...articleMatches, ...questionMatches];
     const nextCounts: Record<SearchCategory, number> = {
       Tudo: combined.length,
       Módulos: matchesBase.filter((i) => i.category === 'Módulos').length,
       Leis: matchesBase.filter((i) => i.category === 'Leis').length,
       Artigos: articleMatches.length,
+      Resumos: matchesBase.filter((i) => i.category === 'Resumos').length,
+      Erros: matchesBase.filter((i) => i.category === 'Erros').length,
+      Questões: questionMatches.length,
       Funções: matchesBase.filter((i) => i.category === 'Funções').length,
       Conteúdo: matchesBase.filter((i) => i.category === 'Conteúdo').length,
     };
@@ -488,16 +576,17 @@ export const GlobalSearch: React.FC = () => {
     const filtered =
       category === 'Tudo'
         ? term
-          ? combined.slice(0, 40)
+          ? combined.slice(0, 45)
           : [
               ...matchesBase.filter((i) => i.category === 'Funções').slice(0, 5),
               ...matchesBase.filter((i) => i.category === 'Leis').slice(0, 4),
+              ...matchesBase.filter((i) => i.category === 'Resumos').slice(0, 3),
               ...matchesBase.filter((i) => i.category === 'Módulos').slice(0, 6),
             ]
-        : combined.filter((i) => i.category === category).slice(0, 40);
+        : combined.filter((i) => i.category === category).slice(0, 45);
 
     return { results: filtered, counts: nextCounts };
-  }, [baseItems, db.laws, query, category, openLawAt]);
+  }, [baseItems, db.laws, db.questions, query, category, openLawAt, setActivePage]);
 
   useEffect(() => {
     setActiveIdx(0);
@@ -583,7 +672,9 @@ export const GlobalSearch: React.FC = () => {
 
             {/* Category Filter Tabs */}
             <div className="flex flex-wrap items-center gap-1 px-3 py-2 border-b border-[var(--line)]/70 bg-[var(--panel)]">
-              {(['Tudo', 'Módulos', 'Leis', 'Artigos', 'Funções', 'Conteúdo'] as SearchCategory[]).map((cat) => {
+              {(
+                ['Tudo', 'Módulos', 'Leis', 'Artigos', 'Resumos', 'Erros', 'Questões', 'Funções', 'Conteúdo'] as SearchCategory[]
+              ).map((cat) => {
                 const active = category === cat;
                 return (
                   <button

@@ -14,6 +14,7 @@ import { OfflineIndicator } from './components/ui/OfflineIndicator';
 import { CareerAchievementWatcher } from './components/performance/CareerAchievementWatcher';
 import { DailyGoalPushWatcher } from './components/study/DailyGoalPushWatcher';
 import { ModuleName } from './types/study';
+import { PAGE_LOADERS } from './lib/routePrefetch';
 
 const CHUNK_RELOAD_GUARD_KEY = 'estuda_chunk_reload_once';
 
@@ -145,43 +146,29 @@ class AppErrorBoundary extends React.Component<AppErrorBoundaryProps, AppErrorBo
   }
 }
 
-const HomePage = lazyWithRetry(() => import('./pages/HomePage').then((m) => ({ default: m.HomePage })));
-const TrainingPage = lazyWithRetry(() => import('./pages/TrainingPage').then((m) => ({ default: m.TrainingPage })));
-const SimulationPage = lazyWithRetry(() => import('./pages/SimulationPage').then((m) => ({ default: m.SimulationPage })));
-const CompletedSimulationsPage = lazyWithRetry(() =>
-  import('./pages/CompletedSimulationsPage').then((m) => ({ default: m.CompletedSimulationsPage })),
-);
-const PerformancePage = lazyWithRetry(() => import('./pages/PerformancePage').then((m) => ({ default: m.PerformancePage })));
-const CareerPage = lazyWithRetry(() => import('./pages/CareerPage').then((m) => ({ default: m.CareerPage })));
-const DiscursivePage = lazyWithRetry(() => import('./pages/DiscursivePage').then((m) => ({ default: m.DiscursivePage })));
-const ProofsPage = lazyWithRetry(() => import('./pages/ProofsPage').then((m) => ({ default: m.ProofsPage })));
-const ErrorNotebookPage = lazyWithRetry(() =>
-  import('./pages/ErrorNotebookPage').then((m) => ({ default: m.ErrorNotebookPage })),
-);
-const CaseLawPage = lazyWithRetry(() => import('./pages/CaseLawPage').then((m) => ({ default: m.CaseLawPage })));
-const ContestsPage = lazyWithRetry(() => import('./pages/ContestsPage').then((m) => ({ default: m.ContestsPage })));
-const EditalPage = lazyWithRetry(() => import('./pages/EditalPage').then((m) => ({ default: m.EditalPage })));
-const SchedulePage = lazyWithRetry(() => import('./pages/SchedulePage').then((m) => ({ default: m.SchedulePage })));
-const CompletedGoalsPage = lazyWithRetry(() =>
-  import('./pages/CompletedGoalsPage').then((m) => ({ default: m.CompletedGoalsPage })),
-);
-const IncompleteGoalsPage = lazyWithRetry(() =>
-  import('./pages/IncompleteGoalsPage').then((m) => ({ default: m.IncompleteGoalsPage })),
-);
-const LawsPage = lazyWithRetry(() => import('./pages/LawsPage').then((m) => ({ default: m.LawsPage })));
-const IncidenceMatrixPage = lazyWithRetry(() =>
-  import('./pages/IncidenceMatrixPage').then((m) => ({ default: m.IncidenceMatrixPage })),
-);
-const PersonalPdfsPage = lazyWithRetry(() =>
-  import('./pages/PersonalPdfsPage').then((m) => ({ default: m.PersonalPdfsPage })),
-);
-const SummariesPage = lazyWithRetry(() => import('./pages/SummariesPage').then((m) => ({ default: m.SummariesPage })));
-const CriticalPointsPage = lazyWithRetry(() =>
-  import('./pages/CriticalPointsPage').then((m) => ({ default: m.CriticalPointsPage })),
-);
-const UtilitiesPage = lazyWithRetry(() => import('./pages/UtilitiesPage').then((m) => ({ default: m.UtilitiesPage })));
-const BackupPage = lazyWithRetry(() => import('./pages/BackupPage').then((m) => ({ default: m.BackupPage })));
-const SettingsPage = lazyWithRetry(() => import('./pages/SettingsPage').then((m) => ({ default: m.SettingsPage })));
+const HomePage = lazyWithRetry(PAGE_LOADERS['Início']);
+const TrainingPage = lazyWithRetry(PAGE_LOADERS['Treino Diário']);
+const SimulationPage = lazyWithRetry(PAGE_LOADERS['Simulado Fechado']);
+const CompletedSimulationsPage = lazyWithRetry(PAGE_LOADERS['Simulados Realizados']);
+const PerformancePage = lazyWithRetry(PAGE_LOADERS['Monitor de Desempenho']);
+const CareerPage = lazyWithRetry(PAGE_LOADERS['Carreira & Mérito']);
+const DiscursivePage = lazyWithRetry(PAGE_LOADERS['Discursiva']);
+const ProofsPage = lazyWithRetry(PAGE_LOADERS['Provas']);
+const ErrorNotebookPage = lazyWithRetry(PAGE_LOADERS['Caderno de Erros']);
+const CaseLawPage = lazyWithRetry(PAGE_LOADERS['Súmulas e Jurisprudência']);
+const ContestsPage = lazyWithRetry(PAGE_LOADERS['Datas & Locais']);
+const EditalPage = lazyWithRetry(PAGE_LOADERS['Editais']);
+const SchedulePage = lazyWithRetry(PAGE_LOADERS['Cronograma']);
+const CompletedGoalsPage = lazyWithRetry(PAGE_LOADERS['Metas Concluídas']);
+const IncompleteGoalsPage = lazyWithRetry(PAGE_LOADERS['Metas Não Concluídas']);
+const LawsPage = lazyWithRetry(PAGE_LOADERS['Lei Seca']);
+const IncidenceMatrixPage = lazyWithRetry(PAGE_LOADERS['Matriz de Incidência']);
+const PersonalPdfsPage = lazyWithRetry(PAGE_LOADERS['PDFs Pessoais']);
+const SummariesPage = lazyWithRetry(PAGE_LOADERS['Resumos & Mapas']);
+const CriticalPointsPage = lazyWithRetry(PAGE_LOADERS['Pontos Críticos']);
+const UtilitiesPage = lazyWithRetry(PAGE_LOADERS['Utilidades']);
+const BackupPage = lazyWithRetry(PAGE_LOADERS['Backup e Restauração']);
+const SettingsPage = lazyWithRetry(PAGE_LOADERS['Configurações']);
 
 const PageLoadingFallback: React.FC = () => (
   <div className="flex items-center justify-center min-h-[280px] rounded-xl border border-[var(--line)] bg-[var(--panel)] px-6 py-12">
