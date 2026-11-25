@@ -11,6 +11,7 @@ import {
   Maximize2,
   Minimize2,
   RotateCcw,
+  Scissors,
   XCircle,
 } from 'lucide-react';
 import { useStudy } from '../../context/StudyContext';
@@ -58,8 +59,15 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
   const [showReviewBoard, setShowReviewBoard] = useState(false);
   const [reviewFilter, setReviewFilter] = useState<'all' | 'answered' | 'blank'>('all');
   const [liveNowMs, setLiveNowMs] = useState<number>(() => Date.now());
+  const [eliminatedByQuestion, setEliminatedByQuestion] = useState<
+    Record<number, Record<string, boolean>>
+  >({});
 
   const isCompleted = Boolean(quiz && (quiz.completed || quiz.index >= quiz.questions.length));
+
+  useEffect(() => {
+    setEliminatedByQuestion({});
+  }, [quiz?.id]);
 
   useEffect(() => {
     if (!simulation || !quiz || isCompleted) return;
@@ -989,102 +997,304 @@ export const QuizRunner: React.FC<QuizRunnerProps> = ({
             />
           </div>
 
-          <div className="mt-3.5">
-            {isTrueFalse ? (
-              <div className="grid grid-cols-2 gap-2.5">
-                {[
-                  { key: 'C', label: 'Certo' },
-                  { key: 'E', label: 'Errado' },
-                ].map((opt) => {
-                  const chosen = answer?.resposta === opt.key;
-                  const isRight = answer && !simulation && answer.gabarito === opt.key;
-                  const isWrong = answer && !simulation && chosen && !answer.correta;
-                  let cls =
-                    'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
-                  if (simulation && chosen) {
-                    cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
-                  } else if (isRight) {
-                    cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
-                  } else if (isWrong) {
-                    cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
-                  }
+          {(() => {
+            const currentEliminated = eliminatedByQuestion[quiz.index] || {};
+            const eliminatedKeys = Object.keys(currentEliminated).filter((k) => currentEliminated[k]);
 
-                  return (
-                    <button
-                      key={opt.key}
-                      type="button"
-                      disabled={!allowSelection}
-                      onClick={() => submitQuizAnswer(opt.key)}
-                      className={`px-4 py-3 rounded-xl border text-[13.5px] font-bold transition-colors whitespace-nowrap disabled:cursor-default ${cls}`}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
-            ) : options.length > 0 ? (
-              <div className="flex flex-col gap-2">
-                {options.map((opt) => {
-                  const chosen = answer?.resposta === opt.key;
-                  const isRight = answer && !simulation && answer.gabarito === opt.key;
-                  const isWrong = answer && !simulation && chosen && !answer.correta;
-                  let cls =
-                    'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
-                  if (simulation && chosen) {
-                    cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
-                  } else if (isRight) {
-                    cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
-                  } else if (isWrong) {
-                    cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
-                  }
+            const toggleEliminateOption = (optKey: string) => {
+              if (!allowSelection) return;
+              const willEliminate = !currentEliminated[optKey];
+              setEliminatedByQuestion((prev) => {
+                const qMap = { ...(prev[quiz.index] || {}) };
+                if (willEliminate) {
+                  qMap[optKey] = true;
+                } else {
+                  delete qMap[optKey];
+                }
+                return { ...prev, [quiz.index]: qMap };
+              });
+              if (willEliminate && simulation && answer?.resposta === optKey) {
+                changeQuizAnswer(quiz.index, '');
+              }
+            };
 
-                  return (
-                    <button
-                      key={opt.key}
-                      type="button"
-                      disabled={!allowSelection}
-                      onClick={() => submitQuizAnswer(opt.key)}
-                      className={`flex items-start gap-2.5 w-full px-3.5 py-2.5 rounded-xl border text-left text-[13px] leading-snug transition-colors disabled:cursor-default ${cls}`}
-                    >
-                      <span className="font-mono-num font-extrabold text-[var(--accent)] shrink-0 mt-0.5">
-                        [{opt.key}]
+            const clearCurrentEliminations = () => {
+              setEliminatedByQuestion((prev) => {
+                if (!prev[quiz.index]) return prev;
+                const next = { ...prev };
+                delete next[quiz.index];
+                return next;
+              });
+            };
+
+            const handleSelectOption = (optKey: string) => {
+              if (!allowSelection) return;
+              if (currentEliminated[optKey]) {
+                setEliminatedByQuestion((prev) => {
+                  const qMap = { ...(prev[quiz.index] || {}) };
+                  delete qMap[optKey];
+                  return { ...prev, [quiz.index]: qMap };
+                });
+              }
+              submitQuizAnswer(optKey);
+            };
+
+            return (
+              <div className="mt-3.5">
+                {allowSelection && (
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-2 px-0.5 text-[11px] text-[var(--muted)]">
+                    <span className="inline-flex items-center gap-1.5">
+                      <Scissors className="w-3 h-3 text-[var(--muted)] shrink-0" aria-hidden="true" />
+                      <span>
+                        Use a tesoura ou clique com o botão direito para riscar alternativas incorretas
                       </span>
-                      <span className="flex-1 min-w-0 text-justify leading-relaxed">{opt.text}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="grid grid-cols-5 gap-2">
-                {['A', 'B', 'C', 'D', 'E'].map((letter) => {
-                  const chosen = answer?.resposta === letter;
-                  const isRight = answer && !simulation && answer.gabarito === letter;
-                  const isWrong = answer && !simulation && chosen && !answer.correta;
-                  let cls =
-                    'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
-                  if (simulation && chosen) {
-                    cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
-                  } else if (isRight) {
-                    cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
-                  } else if (isWrong) {
-                    cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
-                  }
+                    </span>
+                    {eliminatedKeys.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={clearCurrentEliminations}
+                        className="inline-flex items-center gap-1 text-[11px] font-bold text-[var(--accent)] hover:underline cursor-pointer whitespace-nowrap"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        Limpar riscos ({eliminatedKeys.length})
+                      </button>
+                    )}
+                  </div>
+                )}
 
-                  return (
-                    <button
-                      key={letter}
-                      type="button"
-                      disabled={!allowSelection}
-                      onClick={() => submitQuizAnswer(letter)}
-                      className={`py-2.5 rounded-xl border font-mono-num text-[13px] font-bold transition-colors disabled:cursor-default ${cls}`}
-                    >
-                      {letter}
-                    </button>
-                  );
-                })}
+                {isTrueFalse ? (
+                  <div className="grid grid-cols-2 gap-2.5">
+                    {[
+                      { key: 'C', label: 'Certo' },
+                      { key: 'E', label: 'Errado' },
+                    ].map((opt) => {
+                      const chosen = answer?.resposta === opt.key;
+                      const isRight = answer && !simulation && answer.gabarito === opt.key;
+                      const isWrong = answer && !simulation && chosen && !answer.correta;
+                      const isEliminated = Boolean(currentEliminated[opt.key]) && !chosen && !isRight && !isWrong;
+
+                      let cls =
+                        'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
+                      if (simulation && chosen) {
+                        cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
+                      } else if (isRight) {
+                        cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
+                      } else if (isWrong) {
+                        cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
+                      } else if (isEliminated) {
+                        cls = 'border-dashed border-[var(--line)] bg-[var(--panel-soft)]/70 text-[var(--muted)]';
+                      }
+
+                      return (
+                        <div
+                          key={opt.key}
+                          onContextMenu={(e) => {
+                            if (!allowSelection) return;
+                            e.preventDefault();
+                            toggleEliminateOption(opt.key);
+                          }}
+                          className={`flex items-stretch rounded-xl border overflow-hidden transition-colors ${cls}`}
+                        >
+                          <button
+                            type="button"
+                            disabled={!allowSelection}
+                            onClick={() => handleSelectOption(opt.key)}
+                            className={`flex-1 px-4 py-3 text-[13.5px] font-bold whitespace-nowrap cursor-pointer disabled:cursor-default text-center transition-opacity ${
+                              isEliminated
+                                ? 'line-through decoration-[var(--bad)]/75 decoration-[1.5px] opacity-55'
+                                : ''
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                          {allowSelection && (
+                            <button
+                              type="button"
+                              onClick={() => toggleEliminateOption(opt.key)}
+                              aria-pressed={Boolean(currentEliminated[opt.key])}
+                              aria-label={
+                                currentEliminated[opt.key]
+                                  ? `Restaurar alternativa ${opt.label}`
+                                  : `Riscar alternativa ${opt.label} como incorreta`
+                              }
+                              title={
+                                currentEliminated[opt.key]
+                                  ? `Restaurar "${opt.label}"`
+                                  : `Riscar "${opt.label}" (ou botão direito)`
+                              }
+                              className={`grid place-items-center w-10 border-l transition-colors shrink-0 cursor-pointer ${
+                                currentEliminated[opt.key]
+                                  ? 'border-[var(--bad)]/30 bg-[var(--bad)]/12 text-[var(--bad)] hover:bg-[var(--bad)]/20'
+                                  : 'border-[var(--line)] text-[var(--muted)] hover:text-[var(--bad)] hover:bg-[var(--bad)]/10'
+                              }`}
+                            >
+                              <Scissors className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : options.length > 0 ? (
+                  <div className="flex flex-col gap-2">
+                    {options.map((opt) => {
+                      const chosen = answer?.resposta === opt.key;
+                      const isRight = answer && !simulation && answer.gabarito === opt.key;
+                      const isWrong = answer && !simulation && chosen && !answer.correta;
+                      const isEliminated = Boolean(currentEliminated[opt.key]) && !chosen && !isRight && !isWrong;
+
+                      let cls =
+                        'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
+                      if (simulation && chosen) {
+                        cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
+                      } else if (isRight) {
+                        cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
+                      } else if (isWrong) {
+                        cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
+                      } else if (isEliminated) {
+                        cls = 'border-dashed border-[var(--line)] bg-[var(--panel-soft)]/70 text-[var(--muted)]';
+                      }
+
+                      return (
+                        <div
+                          key={opt.key}
+                          onContextMenu={(e) => {
+                            if (!allowSelection) return;
+                            e.preventDefault();
+                            toggleEliminateOption(opt.key);
+                          }}
+                          className={`group flex items-stretch w-full rounded-xl border overflow-hidden transition-colors ${cls}`}
+                        >
+                          <button
+                            type="button"
+                            disabled={!allowSelection}
+                            onClick={() => handleSelectOption(opt.key)}
+                            className={`flex items-start gap-2.5 flex-1 min-w-0 px-3.5 py-2.5 text-left text-[13px] leading-snug cursor-pointer disabled:cursor-default transition-opacity ${
+                              isEliminated ? 'opacity-55' : ''
+                            }`}
+                          >
+                            <span
+                              className={`font-mono-num font-extrabold shrink-0 mt-0.5 ${
+                                isEliminated
+                                  ? 'text-[var(--muted)] line-through decoration-[var(--bad)]/80'
+                                  : 'text-[var(--accent)]'
+                              }`}
+                            >
+                              [{opt.key}]
+                            </span>
+                            <span
+                              className={`flex-1 min-w-0 text-justify leading-relaxed ${
+                                isEliminated
+                                  ? 'line-through decoration-[var(--bad)]/75 decoration-[1.5px]'
+                                  : ''
+                              }`}
+                            >
+                              {opt.text}
+                            </span>
+                          </button>
+
+                          {allowSelection && (
+                            <button
+                              type="button"
+                              onClick={() => toggleEliminateOption(opt.key)}
+                              aria-pressed={Boolean(currentEliminated[opt.key])}
+                              aria-label={
+                                currentEliminated[opt.key]
+                                  ? `Restaurar alternativa ${opt.key}`
+                                  : `Riscar alternativa ${opt.key} como incorreta`
+                              }
+                              title={
+                                currentEliminated[opt.key]
+                                  ? `Restaurar alternativa [${opt.key}]`
+                                  : `Riscar alternativa [${opt.key}] (ou botão direito)`
+                              }
+                              className={`grid place-items-center w-10 border-l transition-colors shrink-0 cursor-pointer ${
+                                currentEliminated[opt.key]
+                                  ? 'border-[var(--bad)]/30 bg-[var(--bad)]/12 text-[var(--bad)] hover:bg-[var(--bad)]/20'
+                                  : 'border-[var(--line)]/70 text-[var(--muted)]/75 hover:text-[var(--bad)] hover:bg-[var(--bad)]/10'
+                              }`}
+                            >
+                              <Scissors className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-5 gap-2">
+                    {['A', 'B', 'C', 'D', 'E'].map((letter) => {
+                      const chosen = answer?.resposta === letter;
+                      const isRight = answer && !simulation && answer.gabarito === letter;
+                      const isWrong = answer && !simulation && chosen && !answer.correta;
+                      const isEliminated = Boolean(currentEliminated[letter]) && !chosen && !isRight && !isWrong;
+
+                      let cls =
+                        'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]';
+                      if (simulation && chosen) {
+                        cls = 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--text)]';
+                      } else if (isRight) {
+                        cls = 'border-[var(--good)] bg-[var(--good)]/15 text-[var(--text)]';
+                      } else if (isWrong) {
+                        cls = 'border-[var(--bad)] bg-[var(--bad)]/15 text-[var(--text)]';
+                      } else if (isEliminated) {
+                        cls = 'border-dashed border-[var(--line)] bg-[var(--panel-soft)]/70 text-[var(--muted)]';
+                      }
+
+                      return (
+                        <div
+                          key={letter}
+                          onContextMenu={(e) => {
+                            if (!allowSelection) return;
+                            e.preventDefault();
+                            toggleEliminateOption(letter);
+                          }}
+                          className={`flex items-stretch rounded-xl border overflow-hidden transition-colors ${cls}`}
+                        >
+                          <button
+                            type="button"
+                            disabled={!allowSelection}
+                            onClick={() => handleSelectOption(letter)}
+                            className={`flex-1 py-2.5 font-mono-num text-[13px] font-bold cursor-pointer disabled:cursor-default transition-opacity ${
+                              isEliminated
+                                ? 'line-through decoration-[var(--bad)]/75 decoration-[1.5px] opacity-55'
+                                : ''
+                            }`}
+                          >
+                            {letter}
+                          </button>
+                          {allowSelection && (
+                            <button
+                              type="button"
+                              onClick={() => toggleEliminateOption(letter)}
+                              aria-pressed={Boolean(currentEliminated[letter])}
+                              aria-label={
+                                currentEliminated[letter]
+                                  ? `Restaurar alternativa ${letter}`
+                                  : `Riscar alternativa ${letter} como incorreta`
+                              }
+                              title={
+                                currentEliminated[letter]
+                                  ? `Restaurar ${letter}`
+                                  : `Riscar ${letter} (ou botão direito)`
+                              }
+                              className={`grid place-items-center w-8 border-l transition-colors shrink-0 cursor-pointer ${
+                                currentEliminated[letter]
+                                  ? 'border-[var(--bad)]/30 bg-[var(--bad)]/12 text-[var(--bad)] hover:bg-[var(--bad)]/20'
+                                  : 'border-[var(--line)]/70 text-[var(--muted)]/75 hover:text-[var(--bad)] hover:bg-[var(--bad)]/10'
+                              }`}
+                            >
+                              <Scissors className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            );
+          })()}
 
           {isTrainingAnswered && answer && (
             <div

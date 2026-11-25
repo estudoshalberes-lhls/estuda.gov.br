@@ -18,6 +18,8 @@ import {
   List,
   ListPlus,
   Loader2,
+  Maximize2,
+  Minimize2,
   Paperclip,
   Pencil,
   Save,
@@ -223,6 +225,8 @@ export const SummariesPage: React.FC = () => {
   const [editorResetKey, setEditorResetKey] = useState(0);
   const [savingNote, setSavingNote] = useState(false);
   const [noteEditorExpanded, setNoteEditorExpanded] = useState(true);
+  const [readingExpanded, setReadingExpanded] = useState(false);
+  const [readingComfortableWidth, setReadingComfortableWidth] = useState(false);
   const [autoSaveState, setAutoSaveState] = useState<{
     status: AutoSaveStatus;
     lastSavedAt: string | null;
@@ -1130,6 +1134,17 @@ export const SummariesPage: React.FC = () => {
 
             <button
               type="button"
+              onClick={() => setReadingExpanded((v) => !v)}
+              aria-pressed={readingExpanded}
+              title="Expandir área de leitura e escrita (oculta painel superior de pastas)"
+              className="inline-flex items-center gap-1.5 h-[36px] px-3 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] whitespace-nowrap cursor-pointer transition-colors"
+            >
+              <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+              Expandir Leitura
+            </button>
+
+            <button
+              type="button"
               disabled={exportingKey !== null || totalCounts.total === 0}
               onClick={() => void handleExportAllPdf()}
               className="inline-flex items-center gap-1.5 h-[36px] px-3.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[12px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-55 whitespace-nowrap"
@@ -1145,7 +1160,38 @@ export const SummariesPage: React.FC = () => {
         }
       />
 
-      {/* Subject Selector + Create New Subject */}
+      {readingExpanded ? (
+        <div className="mb-4 rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] px-4 py-2.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 min-w-0 text-[12.5px]">
+            <BookOpen className="w-4 h-4 text-[var(--accent)] shrink-0" />
+            <strong className="font-bold text-[var(--text)] truncate">
+              {activeFolder === '__ALL__' ? 'Todas as matérias' : visibleName(activeFolder)}
+            </strong>
+            <span className="text-[11px] text-[var(--muted)] hidden sm:inline">
+              · Modo Leitura Expandida
+            </span>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setReadingComfortableWidth((v) => !v)}
+              className="inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer whitespace-nowrap"
+              title="Alternar largura da coluna de leitura e edição"
+            >
+              {readingComfortableWidth ? 'Largura: Confortável' : 'Largura: Ampla'}
+            </button>
+            <button
+              type="button"
+              onClick={() => setReadingExpanded(false)}
+              className="inline-flex items-center gap-1.5 h-7 px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer whitespace-nowrap"
+            >
+              <Minimize2 className="w-3.5 h-3.5" />
+              Restaurar painéis
+            </button>
+          </div>
+        </div>
+      ) : (
+      /* Subject Selector + Create New Subject */
       <Panel className="mb-4">
         <div className="flex flex-col gap-3">
           <div className="flex flex-wrap items-center justify-between gap-2.5">
@@ -1397,10 +1443,11 @@ export const SummariesPage: React.FC = () => {
           )}
         </div>
       </Panel>
+      )}
 
       {/* TAB 1: NOTES & ATTACHED PDFs */}
       {activeTab === 'notes' && (
-        <div className="flex flex-col gap-4">
+        <div className={`flex flex-col gap-4 ${readingExpanded && readingComfortableWidth ? 'max-w-[920px] mx-auto w-full' : ''}`}>
           {!hideUpload && (
             <div className="flex flex-col gap-4">
               {/* Full-Width Word / Google Docs-like Document Composer */}
@@ -1412,21 +1459,39 @@ export const SummariesPage: React.FC = () => {
                       : `Nova anotação de resumo (.docx) · ${visibleName(targetWriteFolder)}`
                   }
                   action={
-                    <button
-                      type="button"
-                      onClick={() => setNoteEditorExpanded((prev) => !prev)}
-                      className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
-                    >
-                      {noteEditorExpanded ? (
-                        <>
-                          Recolher <ChevronUp className="w-3.5 h-3.5" />
-                        </>
-                      ) : (
-                        <>
-                          Expandir <ChevronDown className="w-3.5 h-3.5" />
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2.5">
+                      <button
+                        type="button"
+                        onClick={() => setReadingExpanded((v) => !v)}
+                        className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--accent)] hover:underline cursor-pointer"
+                        title="Expandir ou restaurar área de leitura e edição"
+                      >
+                        {readingExpanded ? (
+                          <>
+                            <Minimize2 className="w-3.5 h-3.5" /> Restaurar
+                          </>
+                        ) : (
+                          <>
+                            <Maximize2 className="w-3.5 h-3.5" /> Expandir Leitura
+                          </>
+                        )}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNoteEditorExpanded((prev) => !prev)}
+                        className="inline-flex items-center gap-1 text-[11.5px] font-bold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer"
+                      >
+                        {noteEditorExpanded ? (
+                          <>
+                            Recolher <ChevronUp className="w-3.5 h-3.5" />
+                          </>
+                        ) : (
+                          <>
+                            Expandir <ChevronDown className="w-3.5 h-3.5" />
+                          </>
+                        )}
+                      </button>
+                    </div>
                   }
                 >
                   {noteEditorExpanded && (

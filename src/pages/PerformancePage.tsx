@@ -41,6 +41,7 @@ import {
   PerformanceCsvDataset,
   exportPerformanceCsv,
 } from '../lib/performanceCsv';
+import { exportWeeklyCycleReportPdf } from '../lib/weeklyReportPdf';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 import { ScheduleTopic, StudyTimeAllocation } from '../types/study';
 import { ReceiptText } from 'lucide-react';
@@ -294,6 +295,22 @@ export const PerformancePage: React.FC = () => {
   const [selectedExamKey, setSelectedExamKey] = useState<string>('ALL');
   const [subjectFilter, setSubjectFilter] = useState('Todas');
   const [historySearch, setHistorySearch] = useState('');
+  const [isExportingWeeklyPdf, setIsExportingWeeklyPdf] = useState(false);
+
+  const handleExportWeeklyPdf = useCallback(async () => {
+    if (isExportingWeeklyPdf) return;
+    setIsExportingWeeklyPdf(true);
+    try {
+      const res = await exportWeeklyCycleReportPdf(db, {
+        studentName: googleUser?.displayName || googleUser?.email || undefined,
+      });
+      toast(`Boletim semanal exportado (${res.filename}).`);
+    } catch (err) {
+      toast((err as Error).message || 'Falha ao gerar o Boletim Semanal em PDF.', true);
+    } finally {
+      setIsExportingWeeklyPdf(false);
+    }
+  }, [db, googleUser?.displayName, googleUser?.email, isExportingWeeklyPdf, toast]);
 
   // Unified list of available exams (Simulados Fechados + Provas da Biblioteca com correções)
   const examSelectorGroups = useMemo(() => {
@@ -1600,6 +1617,21 @@ export const PerformancePage: React.FC = () => {
                 </div>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => void handleExportWeeklyPdf()}
+              disabled={isExportingWeeklyPdf}
+              title="Gerar Boletim de Fechamento Semanal em PDF (horas vs. meta, questões, simulados e Lei Seca da semana)"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] text-[12px] font-bold hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-60 whitespace-nowrap transition-colors cursor-pointer"
+            >
+              {isExportingWeeklyPdf ? (
+                <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--accent)]" />
+              ) : (
+                <CalendarDays className="w-3.5 h-3.5 text-[var(--accent)]" />
+              )}
+              {isExportingWeeklyPdf ? 'Gerando Boletim…' : 'Boletim Semanal (PDF)'}
+            </button>
 
             <button
               type="button"

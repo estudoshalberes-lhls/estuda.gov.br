@@ -5,6 +5,7 @@ import {
   Bookmark,
   CalendarPlus,
   Check,
+  ChevronDown,
   Copy,
   Download,
   FileCode2,
@@ -57,21 +58,21 @@ const CompactUtilCard: React.FC<CompactCardProps> = ({
   children,
   className = '',
 }) => (
-  <section className={`ce-panel rounded-xl p-3.5 flex flex-col h-full ${className}`}>
-    <div className="flex items-start justify-between gap-2 pb-2 mb-2.5 border-b border-[var(--line)]/60">
-      <div className="flex items-start gap-2 min-w-0">
-        <div className="w-7 h-7 rounded-lg bg-[var(--panel-raised)] border border-[var(--line-strong)] flex items-center justify-center shrink-0 text-[var(--accent)]">
+  <section className={`ce-panel rounded-xl p-4 flex flex-col h-full ${className}`}>
+    <div className="flex items-start justify-between gap-2 pb-2.5 mb-3 border-b border-[var(--line)]">
+      <div className="flex items-start gap-2.5 min-w-0">
+        <div className="w-7 h-7 rounded-lg bg-[var(--panel-soft)] border border-[var(--line)] flex items-center justify-center shrink-0 text-[var(--accent)]">
           {icon}
         </div>
         <div className="min-w-0">
           <h3 className="m-0 font-display text-[13.5px] font-bold tracking-tight text-[var(--text)] leading-tight truncate">
             {title}
           </h3>
-          <p className="mt-0.5 mb-0 text-[11px] text-[var(--muted)] leading-snug line-clamp-2">{subtitle}</p>
+          <p className="mt-0.5 mb-0 text-[11.5px] text-[var(--muted)] leading-snug line-clamp-2">{subtitle}</p>
         </div>
       </div>
       {badge && (
-        <span className="shrink-0 px-1.5 py-0.5 rounded bg-[var(--panel-soft)] border border-[var(--line)] text-[10px] font-bold text-[var(--muted)]">
+        <span className="shrink-0 text-[10.5px] font-semibold text-[var(--muted)] tabular-nums whitespace-nowrap pt-0.5">
           {badge}
         </span>
       )}
@@ -108,6 +109,8 @@ export const UtilitiesPage: React.FC = () => {
 
   const hideUpload = moduleVisibility('Utilidades').hide_upload;
   const [category, setCategory] = useState<UtilCategory>('Todos');
+  const [showLawTemplatePreview, setShowLawTemplatePreview] = useState(false);
+  const [showScheduleTemplatePreview, setShowScheduleTemplatePreview] = useState(false);
 
   const availableDisciplines = useMemo(() => {
     const seen = new Set<string>();
@@ -867,16 +870,26 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
             </form>
 
             <div className="mt-auto pt-2.5 border-t border-[var(--line)]/60">
-              <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                <span className="text-[11px] font-bold text-[var(--text)] flex items-center gap-1">
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowLawTemplatePreview((v) => !v)}
+                  aria-expanded={showLawTemplatePreview}
+                  className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer"
+                >
                   <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
-                  Modelo / Exemplo de Formato (.txt):
-                </span>
+                  <span>{showLawTemplatePreview ? 'Ocultar modelo (.txt)' : 'Ver modelo (.txt)'}</span>
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 text-[var(--muted)] transition-transform ${
+                      showLawTemplatePreview ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => void handleCopyLawSample()}
-                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
+                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
                     {copiedModel ? <Check className="w-3 h-3 text-[var(--good)]" /> : <Copy className="w-3 h-3" />}
                     {copiedModel ? 'Copiado!' : 'Copiar'}
@@ -884,16 +897,18 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                   <button
                     type="button"
                     onClick={handleDownloadLawSample}
-                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
+                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
                     Baixar .txt
                   </button>
                 </div>
               </div>
-              <div className="h-[116px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 font-mono text-[10.5px] leading-snug text-[var(--muted)] whitespace-pre-wrap select-all">
-                {sampleTxtLawTemplate}
-              </div>
+              {showLawTemplatePreview && (
+                <div className="mt-2 h-[116px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 font-mono text-[10.5px] leading-snug text-[var(--muted)] whitespace-pre-wrap select-all">
+                  {sampleTxtLawTemplate}
+                </div>
+              )}
             </div>
           </CompactUtilCard>
         )}
@@ -932,16 +947,26 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
             </form>
 
             <div className="mt-auto pt-2.5 border-t border-[var(--line)]/60">
-              <div className="flex flex-wrap items-center justify-between gap-1.5 mb-1.5">
-                <span className="text-[11px] font-bold text-[var(--text)] flex items-center gap-1">
+              <div className="flex flex-wrap items-center justify-between gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => setShowScheduleTemplatePreview((v) => !v)}
+                  aria-expanded={showScheduleTemplatePreview}
+                  className="inline-flex items-center gap-1.5 text-[11px] font-bold text-[var(--text)] hover:text-[var(--accent)] transition-colors cursor-pointer"
+                >
                   <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
-                  Modelo / Exemplo de Formato (.txt):
-                </span>
+                  <span>{showScheduleTemplatePreview ? 'Ocultar modelo (.txt)' : 'Ver modelo (.txt)'}</span>
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 text-[var(--muted)] transition-transform ${
+                      showScheduleTemplatePreview ? 'rotate-180' : ''
+                    }`}
+                  />
+                </button>
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
                     onClick={() => void handleCopyScheduleSample()}
-                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
+                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
                     {copiedScheduleModel ? <Check className="w-3 h-3 text-[var(--good)]" /> : <Copy className="w-3 h-3" />}
                     {copiedScheduleModel ? 'Copiado!' : 'Copiar'}
@@ -949,16 +974,18 @@ Domingo | Revisão Semanal | 1h | Revisão dos cadernos de erros`;
                   <button
                     type="button"
                     onClick={handleDownloadScheduleSample}
-                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors"
+                    className="inline-flex items-center gap-1 text-[10.5px] font-bold text-[var(--accent)] hover:underline bg-[var(--panel-raised)] border border-[var(--line-strong)] px-2 py-0.5 rounded transition-colors cursor-pointer"
                   >
                     <Download className="w-3 h-3" />
                     Baixar .txt
                   </button>
                 </div>
               </div>
-              <div className="h-[116px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 font-mono text-[10.5px] leading-snug text-[var(--muted)] whitespace-pre-wrap select-all">
-                {sampleScheduleTemplate}
-              </div>
+              {showScheduleTemplatePreview && (
+                <div className="mt-2 h-[116px] overflow-y-auto rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] p-2 font-mono text-[10.5px] leading-snug text-[var(--muted)] whitespace-pre-wrap select-all">
+                  {sampleScheduleTemplate}
+                </div>
+              )}
             </div>
           </CompactUtilCard>
         )}

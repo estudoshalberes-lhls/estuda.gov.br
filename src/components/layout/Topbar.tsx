@@ -2,17 +2,21 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   BellRing,
+  BookOpenText,
   Check,
   CloudOff,
   CloudUpload,
   Focus,
   Home,
+  Keyboard,
   Link2,
   Menu,
   Minimize2,
+  Moon,
   RefreshCw,
   RotateCcw,
   SlidersHorizontal,
+  Sun,
   Timer,
   X,
 } from 'lucide-react';
@@ -20,7 +24,7 @@ import { useStudy } from '../../context/StudyContext';
 import { useStudyTimer } from '../../lib/timerTickStore';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { WEEKDAYS, formatClock, formatScheduleDuration, visibleName } from '../../lib/parsers';
-import { ModuleName, WeekdayName } from '../../types/study';
+import { ModuleName, ThemeId, WeekdayName } from '../../types/study';
 import { DailyGoalWidget } from './DailyGoalWidget';
 import { PostItWidget } from './PostItWidget';
 import { ModuleIcon } from '../ui/ModuleIcon';
@@ -32,6 +36,7 @@ interface TopbarProps {
   onExitToLogin?: () => void;
   studyFocusMode?: boolean;
   onToggleStudyFocus?: () => void;
+  onOpenShortcuts?: () => void;
 }
 
 const DEFAULT_QUICK_MODULES: [ModuleName, ModuleName, ModuleName] = [
@@ -172,14 +177,12 @@ const FocusCompactTimer: React.FC<{ onToggleTimer: () => void }> = React.memo(({
 });
 
 export const Topbar: React.FC<TopbarProps> = React.memo(
-  ({ onExitToLogin, studyFocusMode = false, onToggleStudyFocus }) => {
+  ({ onExitToLogin, studyFocusMode = false, onToggleStudyFocus, onOpenShortcuts }) => {
   const {
     db,
     activePage,
     setActivePage,
     setMobileOpen,
-    focusQuote,
-    changeFocusQuote,
     updatePreferences,
     getCurrentTimerSeconds,
     timerRunning,
@@ -340,8 +343,25 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
     );
   }
 
+  const QUICK_THEME_CYCLE: ReadonlyArray<{ id: ThemeId; label: string }> = [
+    { id: 'gov-padrao', label: 'Claro' },
+    { id: 'gov-escuro', label: 'Escuro' },
+    { id: 'reading-comfort', label: 'Leitura' },
+  ];
+  const currentThemeId = db.preferences?.tema || 'gov-padrao';
+  const handleCycleQuickTheme = () => {
+    const idx = QUICK_THEME_CYCLE.findIndex((t) => t.id === currentThemeId);
+    const next = QUICK_THEME_CYCLE[(idx + 1) % QUICK_THEME_CYCLE.length];
+    updatePreferences({ tema: next.id });
+    toast(`Tema alterado para ${next.label}.`);
+  };
+  const nextQuickTheme =
+    QUICK_THEME_CYCLE[
+      (QUICK_THEME_CYCLE.findIndex((t) => t.id === currentThemeId) + 1) % QUICK_THEME_CYCLE.length
+    ];
+
   return (
-    <header className="sticky top-0 z-30 flex items-center justify-between flex-wrap xl:flex-nowrap gap-2 sm:gap-2.5 px-3 sm:px-4 py-2 border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
+    <header className="sticky top-0 z-30 flex items-center justify-between flex-nowrap gap-2 px-3 sm:px-4 h-[56px] border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
       {/* Menu + Título */}
       <div className="flex items-center gap-2 min-w-0 shrink-0 h-9 sm:h-10">
         <button
@@ -365,7 +385,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
               <span className="text-[var(--subtle)]">/</span>
               <span className="text-[var(--muted)] font-semibold">Portal Único</span>
             </div>
-            <h1 className="m-0 font-display text-[15px] font-extrabold tracking-[-0.02em] leading-none text-[var(--text)] truncate max-w-[205px]">
+            <h1 className="m-0 font-display text-[14.5px] font-extrabold tracking-[-0.02em] leading-none text-[var(--text)] truncate max-w-[195px]">
               {getGovModuleLabel(activePage)}
             </h1>
           </div>
@@ -373,36 +393,11 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
       </div>
 
       {/* Meta do Dia do Expediente + Post-it Permanente */}
-      <div className="flex-1 min-w-[180px] sm:min-w-[230px] max-w-[380px] h-9 sm:h-10 flex items-center gap-1.5">
+      <div className="flex-1 min-w-[140px] sm:min-w-[220px] max-w-[400px] h-9 sm:h-10 flex items-center gap-1.5">
         <div className="flex-1 min-w-0 h-full">
           <DailyGoalWidget />
         </div>
         <PostItWidget />
-      </div>
-
-      {/* Caixa do FOCO */}
-      <div className="flex order-last w-full xl:order-none xl:w-auto xl:flex-[1.45] xl:min-w-[240px] xl:max-w-[540px] items-center justify-between gap-2.5 min-h-10 h-auto py-1.5 px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] transition-colors hover:border-[var(--accent)]/60">
-        <div className="min-w-0 flex-1 flex flex-col justify-center">
-          <div className="flex items-center gap-1.5 leading-none mb-1">
-            <span className="text-[9.5px] font-extrabold tracking-[0.06em] text-[var(--accent)] uppercase leading-none">
-              Diretriz Ministerial
-            </span>
-          </div>
-          <p
-            className="m-0 text-[12px] font-medium text-[var(--text)] leading-[1.35] whitespace-normal break-words"
-          >
-            “{focusQuote}”
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={changeFocusQuote}
-          aria-label="Alterar frase do foco do dia"
-          title="Alterar frase do foco do dia"
-          className="grid place-items-center w-7 h-7 rounded-md border border-[var(--line-strong)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
-        >
-          <RefreshCw className="w-3.5 h-3.5" />
-        </button>
       </div>
 
       {/* 3 Módulos de Acesso Rápido + Configurações */}
@@ -801,6 +796,22 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
 
       {/* Ícones Minimalistas: Modo Foco, Instalar PWA, Status Drive, Google e Tela Inicial */}
       <div className="flex items-center gap-1 sm:gap-1.5 h-9 sm:h-10 shrink-0">
+        <button
+          type="button"
+          onClick={handleCycleQuickTheme}
+          aria-label={`Alternar tema rápido (próximo: ${nextQuickTheme.label})`}
+          title={`Alternar tema rápido: Claro · Escuro · Leitura (próximo: ${nextQuickTheme.label})`}
+          className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
+        >
+          {currentThemeId === 'reading-comfort' ? (
+            <BookOpenText className="w-4 h-4 text-[var(--accent)]" />
+          ) : currentThemeId === 'gov-escuro' || currentThemeId.startsWith('black-') ? (
+            <Moon className="w-4 h-4 text-[var(--accent)]" />
+          ) : (
+            <Sun className="w-4 h-4" />
+          )}
+        </button>
+
         {onToggleStudyFocus && (
           <button
             type="button"
@@ -811,7 +822,19 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
             className="inline-flex items-center justify-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Focus className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden sm:inline">Modo Foco</span>
+            <span className="hidden lg:inline">Modo Foco</span>
+          </button>
+        )}
+
+        {onOpenShortcuts && (
+          <button
+            type="button"
+            onClick={onOpenShortcuts}
+            aria-label="Atalhos de teclado"
+            title="Atalhos de teclado (?)"
+            className="hidden lg:grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
+          >
+            <Keyboard className="w-4 h-4" />
           </button>
         )}
 

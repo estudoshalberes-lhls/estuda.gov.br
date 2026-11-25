@@ -3,8 +3,13 @@ import { StudyProvider, useStudy } from './context/StudyContext';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { Sidebar } from './components/layout/Sidebar';
 import { Topbar } from './components/layout/Topbar';
+import {
+  KeyboardShortcutsModal,
+  MODULE_NUMBER_SHORTCUTS,
+} from './components/layout/KeyboardShortcutsModal';
 import { TopModuleNav } from './components/layout/TopModuleNav';
 import { GovFederalBar } from './components/layout/GovFederalBar';
+import { MobileBottomNav } from './components/layout/MobileBottomNav';
 import { MobileTimerFloat } from './components/layout/MobileTimerFloat';
 import { ConfirmDialog } from './components/ui/ConfirmDialog';
 import { DriveSyncConflictDialog } from './components/backup/DriveSyncConflictDialog';
@@ -240,8 +245,19 @@ interface AppShellProps {
 const STUDY_FOCUS_STORAGE_KEY = 'estuda_study_focus_mode';
 
 const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
-  const { db, activePage, setActivePage, mobileOpen, setMobileOpen, examFocusMode } = useStudy();
+  const {
+    db,
+    activePage,
+    setActivePage,
+    mobileOpen,
+    setMobileOpen,
+    examFocusMode,
+    timerRunning,
+    toggleTimer,
+    toast,
+  } = useStudy();
   const prefs = db.preferences;
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [studyFocusMode, setStudyFocusMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -271,15 +287,51 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
 
   useEffect(() => {
     if (examFocusMode) return;
+    const isEditableTarget = (target: EventTarget | null): boolean => {
+      const el = target as HTMLElement | null;
+      if (!el) return false;
+      const tag = el.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+      if (el.isContentEditable) return true;
+      return Boolean(el.closest('[contenteditable="true"]'));
+    };
+
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         toggleStudyFocusMode();
+        return;
+      }
+
+      if (isEditableTarget(e.target)) return;
+
+      // Alt + P -> Iniciar / Pausar cronômetro
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        e.preventDefault();
+        toggleTimer();
+        toast(timerRunning ? 'Cronômetro pausado (Alt+P).' : 'Cronômetro iniciado (Alt+P).');
+        return;
+      }
+
+      // Alt + 1..7 -> Navegação rápida entre módulos principais
+      if (e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey && /^[1-7]$/.test(e.key)) {
+        const match = MODULE_NUMBER_SHORTCUTS.find((item) => item.digit === e.key);
+        if (match) {
+          e.preventDefault();
+          setActivePage(match.page);
+        }
+        return;
+      }
+
+      // ? -> Abrir / fechar guia de atalhos de teclado
+      if (!e.altKey && !e.ctrlKey && !e.metaKey && e.key === '?') {
+        e.preventDefault();
+        setShortcutsOpen((prev) => !prev);
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [examFocusMode, toggleStudyFocusMode]);
+  }, [examFocusMode, toggleStudyFocusMode, toggleTimer, timerRunning, setActivePage, toast]);
 
   const hideNonEssentialChrome = examFocusMode || studyFocusMode;
 
@@ -305,6 +357,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
             onExitToLogin={onExitToLogin}
             studyFocusMode={studyFocusMode}
             onToggleStudyFocus={toggleStudyFocusMode}
+            onOpenShortcuts={() => setShortcutsOpen(true)}
           />
         )}
         {!hideNonEssentialChrome && <TopModuleNav />}
@@ -324,7 +377,9 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
             resetKey={activePage}
             onResetToHome={() => setActivePage('Início')}
           >
-            <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
+            <div key={activePage} className="ce-page-transition">
+              <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
+            </div>
           </AppErrorBoundary>
         </section>
 
@@ -374,10 +429,12 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         />
       )}
 
+      {!hideNonEssentialChrome && <MobileBottomNav />}
       {!studyFocusMode && <MobileTimerFloat />}
       <BackToTopButton />
       <CareerAchievementWatcher />
       <DailyGoalPushWatcher />
+      <KeyboardShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
     </div>
   );
 };

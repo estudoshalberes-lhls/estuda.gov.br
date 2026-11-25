@@ -1,9 +1,18 @@
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { THEMES } from '../data/seedData';
 import { useStudy } from '../context/StudyContext';
 import { ModuleName } from '../types/study';
-import { Cloud, ExternalLink, LogOut, Server } from 'lucide-react';
+import {
+  ChevronDown,
+  Cloud,
+  ExternalLink,
+  Keyboard,
+  LogOut,
+  Server,
+  SlidersHorizontal,
+} from 'lucide-react';
 import { PageHeader, Panel } from '../components/ui/PageHeader';
+import { KEYBOARD_SHORTCUT_GROUPS } from '../components/layout/KeyboardShortcutsModal';
 
 const CONFIGURABLE_MODULES: ReadonlyArray<{
   name: ModuleName;
@@ -38,15 +47,25 @@ export const SettingsPage: React.FC = () => {
   } = useStudy();
   const prefs = db.preferences;
 
+  const [visibilityOpen, setVisibilityOpen] = useState(false);
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
+
+  const hiddenControlsCount = useMemo(() => {
+    let count = 0;
+    for (const mod of CONFIGURABLE_MODULES) {
+      const vis = moduleVisibility(mod.name);
+      if (mod.hasUpload && vis.hide_upload) count += 1;
+      if (mod.hasSearch && vis.hide_search) count += 1;
+    }
+    return count;
+  }, [moduleVisibility]);
+
   const allModulesHidden = CONFIGURABLE_MODULES.every((mod) => {
     const vis = moduleVisibility(mod.name);
     return (!mod.hasUpload || vis.hide_upload) && (!mod.hasSearch || vis.hide_search);
   });
 
-  const anyModuleHidden = CONFIGURABLE_MODULES.some((mod) => {
-    const vis = moduleVisibility(mod.name);
-    return (mod.hasUpload && vis.hide_upload) || (mod.hasSearch && vis.hide_search);
-  });
+  const anyModuleHidden = hiddenControlsCount > 0;
 
   const setAllModulesVisibility = (hide: boolean) => {
     const nextModules = { ...(prefs.modules || {}) };
@@ -80,14 +99,14 @@ export const SettingsPage: React.FC = () => {
     <div>
       <PageHeader
         eyebrow="PREFERÊNCIAS DO PORTAL · CONFIGURAÇÕES"
-        title="Nuvem, aparência e controles por módulo"
-        description="Acompanhe a conexão com o Google Apps Script (Google Drive), personalize o tema institucional, a barra lateral e os painéis visíveis."
+        title="Nuvem, aparência e controles da interface"
+        description="Gerencie a conexão com o Google Apps Script, tema visual, navegação e atalhos de produtividade."
       />
 
       <div className="grid grid-cols-1 gap-4">
         <Panel
-          title="Conexão em Nuvem — Modo 100% Google Apps Script"
-          subtitle="Seus dados, cronogramas, leis, PDFs e Post-it sincronizam diretamente com seu Google Drive via Apps Script (sessão de 30 dias)."
+          title="Conexão em Nuvem"
+          subtitle="Sincronização direta com seu Google Drive via Apps Script (sessão de 30 dias)."
           action={
             <button
               type="button"
@@ -163,7 +182,7 @@ export const SettingsPage: React.FC = () => {
                   key={theme.id}
                   type="button"
                   onClick={() => updatePreferences({ tema: theme.id })}
-                  className={`flex flex-col items-start gap-2 rounded-xl border p-3.5 text-left transition-colors ${
+                  className={`flex flex-col items-start gap-2 rounded-xl border p-3.5 text-left transition-colors cursor-pointer ${
                     active
                       ? 'border-[var(--accent)] bg-[var(--accent-soft)]'
                       : 'border-[var(--line)] bg-[var(--panel-soft)] hover:border-[var(--line-strong)]'
@@ -280,81 +299,175 @@ export const SettingsPage: React.FC = () => {
           </div>
         </Panel>
 
-        <Panel
-          title="Visibilidade de envio e busca por módulo"
-          subtitle="Modo limpeza: oculte formulários de upload ou campos de filtro quando estiver apenas revisando."
-          action={
-            <div className="flex flex-wrap items-center gap-2">
-              {anyModuleHidden && (
-                <button
-                  type="button"
-                  onClick={() => setAllModulesVisibility(false)}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap transition-colors"
-                >
-                  Mostrar todos
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={() => setAllModulesVisibility(true)}
-                disabled={allModulesHidden}
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap transition-colors"
-              >
-                Ocultar todos
-              </button>
-            </div>
-          }
-        >
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
-            {CONFIGURABLE_MODULES.map((mod) => {
-              const vis = moduleVisibility(mod.name);
-              return (
-                <div
-                  key={mod.name}
-                  className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 flex flex-col gap-2.5"
-                >
-                  <strong className="text-[13px] font-bold text-[var(--text)]">
-                    {mod.name}
+        {/* Controles Avançados (Progressive Disclosure — evita poluição visual) */}
+        <section className="ce-panel rounded-xl overflow-hidden divide-y divide-[var(--line)]">
+          {/* Drawer 1: Visibilidade de envio e busca por módulo */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setVisibilityOpen((v) => !v)}
+              aria-expanded={visibilityOpen}
+              className="w-full flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 text-left hover:bg-[var(--panel-soft)]/70 transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <SlidersHorizontal className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                <div className="min-w-0">
+                  <strong className="block text-[13.5px] font-bold text-[var(--text)]">
+                    Modo limpeza por módulo (envio e busca)
                   </strong>
-                  {mod.hasUpload && (
-                    <label className="flex items-center justify-between gap-2 text-[12px] text-[var(--muted)] cursor-pointer">
-                      <span>Ocultar envio</span>
-                      <span className="ce-switch">
-                        <input
-                          type="checkbox"
-                          checked={vis.hide_upload}
-                          onChange={(e) =>
-                            updateModuleVisibility(mod.name, 'hide_upload', e.target.checked)
-                          }
-                        />
-                        <span className="ce-switch-track">
-                          <span className="ce-switch-thumb" />
-                        </span>
-                      </span>
-                    </label>
-                  )}
-                  {mod.hasSearch && (
-                    <label className="flex items-center justify-between gap-2 text-[12px] text-[var(--muted)] cursor-pointer">
-                      <span>Ocultar busca</span>
-                      <span className="ce-switch">
-                        <input
-                          type="checkbox"
-                          checked={vis.hide_search}
-                          onChange={(e) =>
-                            updateModuleVisibility(mod.name, 'hide_search', e.target.checked)
-                          }
-                        />
-                        <span className="ce-switch-track">
-                          <span className="ce-switch-thumb" />
-                        </span>
-                      </span>
-                    </label>
-                  )}
+                  <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                    Oculte formulários de upload ou campos de filtro individualmente em {CONFIGURABLE_MODULES.length} módulos.
+                  </span>
                 </div>
-              );
-            })}
+              </div>
+              <div className="flex items-center gap-2.5 shrink-0">
+                <span className="text-[11.5px] font-semibold text-[var(--muted)] tabular-nums">
+                  {hiddenControlsCount === 0
+                    ? 'Todos visíveis'
+                    : `${hiddenControlsCount} oculto(s)`}
+                </span>
+                <ChevronDown
+                  className={`w-4 h-4 text-[var(--muted)] transition-transform ${
+                    visibilityOpen ? 'rotate-180' : ''
+                  }`}
+                />
+              </div>
+            </button>
+
+            {visibilityOpen && (
+              <div className="px-4 sm:px-5 pb-4 pt-2 border-t border-[var(--line)]/60">
+                <div className="flex flex-wrap items-center justify-end gap-2 mb-3">
+                  {anyModuleHidden && (
+                    <button
+                      type="button"
+                      onClick={() => setAllModulesVisibility(false)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap transition-colors cursor-pointer"
+                    >
+                      Mostrar todos
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setAllModulesVisibility(true)}
+                    disabled={allModulesHidden}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11.5px] font-bold hover:bg-[var(--accent-hover)] disabled:opacity-50 whitespace-nowrap transition-colors cursor-pointer"
+                  >
+                    Ocultar todos
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2.5">
+                  {CONFIGURABLE_MODULES.map((mod) => {
+                    const vis = moduleVisibility(mod.name);
+                    return (
+                      <div
+                        key={mod.name}
+                        className="rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] px-3.5 py-3 flex flex-col gap-2"
+                      >
+                        <strong className="text-[12.5px] font-bold text-[var(--text)]">
+                          {mod.name}
+                        </strong>
+                        {mod.hasUpload && (
+                          <label className="flex items-center justify-between gap-2 text-[12px] text-[var(--muted)] cursor-pointer">
+                            <span>Ocultar envio</span>
+                            <span className="ce-switch">
+                              <input
+                                type="checkbox"
+                                checked={vis.hide_upload}
+                                onChange={(e) =>
+                                  updateModuleVisibility(mod.name, 'hide_upload', e.target.checked)
+                                }
+                              />
+                              <span className="ce-switch-track">
+                                <span className="ce-switch-thumb" />
+                              </span>
+                            </span>
+                          </label>
+                        )}
+                        {mod.hasSearch && (
+                          <label className="flex items-center justify-between gap-2 text-[12px] text-[var(--muted)] cursor-pointer">
+                            <span>Ocultar busca</span>
+                            <span className="ce-switch">
+                              <input
+                                type="checkbox"
+                                checked={vis.hide_search}
+                                onChange={(e) =>
+                                  updateModuleVisibility(mod.name, 'hide_search', e.target.checked)
+                                }
+                              />
+                              <span className="ce-switch-track">
+                                <span className="ce-switch-thumb" />
+                              </span>
+                            </span>
+                          </label>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            )}
           </div>
-        </Panel>
+
+          {/* Drawer 2: Atalhos de Teclado */}
+          <div>
+            <button
+              type="button"
+              onClick={() => setShortcutsOpen((v) => !v)}
+              aria-expanded={shortcutsOpen}
+              className="w-full flex items-center justify-between gap-3 px-4 sm:px-5 py-3.5 text-left hover:bg-[var(--panel-soft)]/70 transition-colors cursor-pointer"
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <Keyboard className="w-4 h-4 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                <div className="min-w-0">
+                  <strong className="block text-[13.5px] font-bold text-[var(--text)]">
+                    Atalhos de teclado
+                  </strong>
+                  <span className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                    Controle cronômetro, Modo Foco e troca de módulos sem tirar as mãos do teclado (pressione ? a qualquer hora).
+                  </span>
+                </div>
+              </div>
+              <ChevronDown
+                className={`w-4 h-4 text-[var(--muted)] shrink-0 transition-transform ${
+                  shortcutsOpen ? 'rotate-180' : ''
+                }`}
+              />
+            </button>
+
+            {shortcutsOpen && (
+              <div className="px-4 sm:px-5 pb-4 pt-3 border-t border-[var(--line)]/60 grid grid-cols-1 md:grid-cols-2 gap-4">
+                {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
+                  <div key={group.title}>
+                    <h4 className="m-0 mb-2 text-[11px] font-extrabold uppercase tracking-[0.07em] text-[var(--muted)]">
+                      {group.title}
+                    </h4>
+                    <div className="divide-y divide-[var(--line)] border border-[var(--line)] rounded-lg bg-[var(--panel-soft)]">
+                      {group.items.map((item) => (
+                        <div
+                          key={item.keys.join('+')}
+                          className="flex items-center justify-between gap-2 px-3 py-2 text-[12px]"
+                        >
+                          <span className="text-[var(--text)]">{item.label}</span>
+                          <div className="flex items-center gap-1 shrink-0">
+                            {item.keys.map((k, idx) => (
+                              <React.Fragment key={`${k}-${idx}`}>
+                                {idx > 0 && <span className="text-[10px] text-[var(--muted)]">+</span>}
+                                <kbd className="inline-flex items-center justify-center min-w-[22px] px-1.5 py-0.5 rounded border border-[var(--line-strong)] bg-[var(--panel)] font-mono-num text-[10.5px] font-bold text-[var(--text)]">
+                                  {k}
+                                </kbd>
+                              </React.Fragment>
+                            ))}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </section>
       </div>
     </div>
   );

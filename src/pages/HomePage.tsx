@@ -28,6 +28,7 @@ import { useStudyTimer } from '../lib/timerTickStore';
 import { getGovModuleLabel } from '../data/seedData';
 import { WEEKDAYS, formatScheduleDuration, localDateIso, paymentDateValue, visibleName } from '../lib/parsers';
 import { exportStudentClearanceCertificatePdf } from '../lib/pdfExport';
+import { exportWeeklyCycleReportPdf } from '../lib/weeklyReportPdf';
 import {
   MEDAL_TIER_LABELS,
   MedalTier,
@@ -83,12 +84,31 @@ export const HomePage: React.FC = () => {
     advanceErrorReview,
     startErrorNotebookQuiz,
     addLawReadDate,
+    focusQuote,
+    changeFocusQuote,
     googleUser,
     toast,
   } = useStudy();
 
   const [flashcardsOpen, setFlashcardsOpen] = useState(false);
   const [finalSprintOpen, setFinalSprintOpen] = useState(false);
+  const [exportingWeeklyPdf, setExportingWeeklyPdf] = useState(false);
+  const [homeTab, setHomeTab] = useState<'today' | 'metrics' | 'services'>('today');
+
+  const handleExportWeeklyBoletim = async () => {
+    if (exportingWeeklyPdf) return;
+    setExportingWeeklyPdf(true);
+    try {
+      const res = await exportWeeklyCycleReportPdf(db, {
+        studentName: googleUser?.displayName || googleUser?.email || undefined,
+      });
+      toast(`Boletim semanal gerado: ${res.filename}`);
+    } catch (err) {
+      toast((err as Error).message || 'Não foi possível gerar o Boletim Semanal.', true);
+    } finally {
+      setExportingWeeklyPdf(false);
+    }
+  };
 
   const todayIso = localDateIso();
   const todayWeekday = WEEKDAYS[(new Date().getDay() + 6) % 7];
@@ -372,6 +392,35 @@ export const HomePage: React.FC = () => {
               <BookOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
               <span>Abrir Cronograma</span>
             </button>
+            <button
+              type="button"
+              onClick={() => void handleExportWeeklyBoletim()}
+              disabled={exportingWeeklyPdf}
+              title="Emitir resumo oficial da semana em PDF (horas vs. meta, questões, simulados e Lei Seca)"
+              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] hover:border-[var(--accent)] text-[var(--text)] text-[12.5px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
+            >
+              <FileDown className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+              <span>{exportingWeeklyPdf ? 'Gerando Boletim…' : 'Boletim Semanal (PDF)'}</span>
+            </button>
+          </div>
+
+          {/* Diretriz Ministerial (movida da Topbar para manter o cabeçalho limpo) */}
+          <div className="pt-3 mt-1 border-t border-[var(--line)] flex items-center justify-between gap-2.5">
+            <p className="m-0 text-[12px] text-[var(--muted)] leading-snug italic min-w-0">
+              <strong className="not-italic font-bold text-[var(--accent)] uppercase tracking-[0.04em] text-[10px] mr-1.5">
+                Diretriz do dia:
+              </strong>
+              “{focusQuote}”
+            </p>
+            <button
+              type="button"
+              onClick={changeFocusQuote}
+              aria-label="Alterar frase do foco do dia"
+              title="Alterar frase do foco do dia"
+              className="grid place-items-center w-7 h-7 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
+            >
+              <RefreshCw className="w-3.5 h-3.5" />
+            </button>
           </div>
         </div>
 
@@ -399,11 +448,76 @@ export const HomePage: React.FC = () => {
       {/* Meta Diária de Horas/Questões + Alerta de Ritmo até a Prova */}
       <DailyGoalPacePanel />
 
-      {/* Fila Inteligente: O que revisar hoje (Lei Seca >7d, Erros e Metas de Hoje) */}
-      <SmartReviewQueuePanel />
+      {/* Navegação por abas da Tela Inicial (reduz rolagem vertical excessiva) */}
+      <div
+        role="tablist"
+        aria-label="Seções da Tela Inicial"
+        className="flex flex-wrap items-center justify-between gap-2 mb-4 pb-2 border-b border-[var(--line)]"
+      >
+        <div className="inline-flex flex-wrap items-center gap-1 p-1 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)]">
+          {(
+            [
+              {
+                id: 'today',
+                label: 'Hoje & Revisão',
+                count: dueReviews.length + todayTopics.length,
+              },
+              {
+                id: 'metrics',
+                label: 'Carreira & Métricas',
+                count: null,
+              },
+              {
+                id: 'services',
+                label: 'Editais & Serviços',
+                count: db.contests.length || null,
+              },
+            ] as const
+          ).map((t) => {
+            const active = homeTab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setHomeTab(t.id)}
+                className={`inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  active
+                    ? 'bg-[var(--accent)] text-white shadow-xs'
+                    : 'text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-raised)]'
+                }`}
+              >
+                <span>{t.label}</span>
+                {t.count !== null && t.count > 0 && (
+                  <span
+                    className={`font-mono-num text-[10.5px] ${
+                      active ? 'text-white/90' : 'text-[var(--muted)]'
+                    }`}
+                  >
+                    ({t.count})
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+        <span className="text-[11.5px] text-[var(--muted)] hidden sm:inline">
+          {homeTab === 'today'
+            ? 'Prioridades imediatas, metas do dia e revisões vencidas'
+            : homeTab === 'metrics'
+              ? 'Identidade do concurseiro, indicadores gerais e evolução por matéria'
+              : 'Progresso dos editais cadastrados e atalhos para serviços'}
+        </span>
+      </div>
 
-      {/* Central de Ferramentas Ativas de Estudo */}
-      <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
+      {homeTab === 'today' && (
+        <>
+          {/* Fila Inteligente: O que revisar hoje (Lei Seca >7d, Erros e Metas de Hoje) */}
+          <SmartReviewQueuePanel />
+
+          {/* Central de Ferramentas Ativas de Estudo */}
+          <section className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-3 mb-5">
         <button
           type="button"
           onClick={() => setFlashcardsOpen(true)}
@@ -747,7 +861,11 @@ export const HomePage: React.FC = () => {
 
       {/* Checklist de Pré-Prova / Reta Final por Concurso */}
       <PreExamChecklistPanel />
+        </>
+      )}
 
+      {homeTab === 'metrics' && (
+        <>
       {/* Carteirinha Digital do Concurseiro */}
       <Panel
         title="Identidade Nacional do Concurseiro (Documento Digital)"
@@ -1288,7 +1406,11 @@ export const HomePage: React.FC = () => {
           )}
         </Panel>
       </div>
+        </>
+      )}
 
+      {homeTab === 'services' && (
+        <>
       {/* Progresso dos Editais */}
       {db.contests.length > 0 && (
         <Panel
@@ -1390,6 +1512,8 @@ export const HomePage: React.FC = () => {
           ))}
         </div>
       </div>
+        </>
+      )}
       </div>
 
       <FlashcardsReviewModal

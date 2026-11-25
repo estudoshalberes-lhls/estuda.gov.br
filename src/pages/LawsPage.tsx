@@ -120,6 +120,7 @@ export const LawsPage: React.FC = () => {
   const [showHighlightsDrawer, setShowHighlightsDrawer] = useState(false);
   const [highlightColorFilter, setHighlightColorFilter] = useState<'all' | HighlightColorKey>('all');
   const [onlyHighlightedArticles, setOnlyHighlightedArticles] = useState(false);
+  const [readingExpanded, setReadingExpanded] = useState(false);
 
   const [clozeRevealSignal, setClozeRevealSignal] = useState(0);
   const [clozeHideSignal, setClozeHideSignal] = useState(0);
@@ -1270,12 +1271,22 @@ export const LawsPage: React.FC = () => {
               />
               <button
                 type="button"
+                onClick={() => setReadingExpanded((v) => !v)}
+                aria-pressed={readingExpanded}
+                title="Expandir área de leitura (oculta filtros, barras de progresso e cabeçalhos extras)"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors cursor-pointer"
+              >
+                <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
+                Expandir Leitura
+              </button>
+              <button
+                type="button"
                 onClick={() => setExamFocusMode(true)}
                 title="Ativar Modo Leitura (oculta barras laterais e cabeçalho para maximizar a leitura)"
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] transition-colors cursor-pointer"
               >
                 <Maximize2 className="w-3.5 h-3.5 text-[var(--accent)]" />
-                Modo Leitura
+                Tela Cheia
               </button>
             </div>
           }
@@ -1284,6 +1295,39 @@ export const LawsPage: React.FC = () => {
 
       {folderNames.length ? (
         <>
+          {readingExpanded && (
+            <div className="mb-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] px-3.5 py-2 flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0 text-[12.5px]">
+                <strong className="font-bold text-[var(--text)] truncate">
+                  {visibleName(activeFolder)}
+                </strong>
+                <span className="text-[11px] text-[var(--muted)] font-mono-num whitespace-nowrap">
+                  {readingStats.read}/{readingStats.total} lidos ({readingStats.pct}%)
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={toggleComfortableWidth}
+                  className="inline-flex items-center gap-1 h-7 px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] cursor-pointer whitespace-nowrap"
+                  title="Alternar entre coluna confortável (82ch) e largura total"
+                >
+                  {readingPrefs.comfortableWidth ? 'Coluna: Confortável' : 'Coluna: Ampla'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setReadingExpanded(false)}
+                  className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white text-[11px] font-bold hover:bg-[var(--accent-hover)] cursor-pointer whitespace-nowrap"
+                >
+                  <Minimize2 className="w-3.5 h-3.5" />
+                  Restaurar painéis
+                </button>
+              </div>
+            </div>
+          )}
+
+          {!readingExpanded && (
+            <>
           <div className="flex flex-wrap items-center gap-2.5 mb-3">
             <select
               aria-label="Selecionar legislação"
@@ -1860,6 +1904,8 @@ export const LawsPage: React.FC = () => {
               />
             </>
           )}
+            </>
+          )}
 
           {readerTab === 'history' ? (
             <LawReadingAnalyticsPanel
@@ -1964,6 +2010,20 @@ export const LawsPage: React.FC = () => {
                   >
                     <Sparkles className="w-3 h-3" />
                     Guias da Matriz {showMatrixGuidesInContinuous ? '(Ativo)' : '(Oculto)'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setReadingExpanded((v) => !v)}
+                    aria-pressed={readingExpanded}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                      readingExpanded
+                        ? 'border-[var(--accent)] bg-[var(--accent)] text-white'
+                        : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                    }`}
+                    title="Expandir área de leitura recolhendo painéis superiores"
+                  >
+                    {readingExpanded ? <Minimize2 className="w-3 h-3" /> : <Maximize2 className="w-3 h-3" />}
+                    {readingExpanded ? 'Restaurar painéis' : 'Expandir Leitura'}
                   </button>
                   <button
                     type="button"
@@ -2298,7 +2358,11 @@ export const LawsPage: React.FC = () => {
                     lineHeight: LINE_HEIGHT_VAL[readingPrefs.lineHeight],
                     fontFamily: FONT_FAMILY_CSS[readingPrefs.fontFamily],
                   }}
-                  className={`law-reader min-h-[350px] max-h-[650px] overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-5 text-[var(--text)] select-text ${
+                  className={`law-reader overflow-y-auto rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-5 text-[var(--text)] select-text ${
+                    readingExpanded
+                      ? 'min-h-[540px] max-h-[calc(100vh-195px)]'
+                      : 'min-h-[350px] max-h-[650px]'
+                  } ${
                     !douMode && readingPrefs.comfortableWidth ? 'max-w-[82ch] mx-auto' : ''
                   }`}
                 >
