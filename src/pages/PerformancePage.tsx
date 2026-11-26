@@ -57,6 +57,7 @@ import {
   WeeklyStudyHoursD3Chart,
 } from '../components/charts/PerformanceWeeklyAndSubjectD3Panels';
 import { WeeklyGoalProgressD3Dashboard } from '../components/charts/WeeklyGoalProgressD3Dashboard';
+import { StudyScheduleTimelineD3Dashboard } from '../components/charts/StudyScheduleTimelineD3Dashboard';
 import {
   ExamBlockPacingPoint,
   ExamErrorTypeBreakdownRow,
@@ -262,6 +263,9 @@ export const PerformancePage: React.FC = () => {
     fixedSubjects,
     setActivePage,
     deleteStudyTimeRecord,
+    addManualStudySessionInterval,
+    deleteStudySessionInterval,
+    activeTimerTopic,
     syncUncountedCompletedGoals,
     requestConfirm,
     updatePreferences,
@@ -2103,6 +2107,34 @@ export const PerformancePage: React.FC = () => {
                   toast(`Meta semanal de estudo atualizada para ${hours.toLocaleString('pt-BR')}h.`);
                 }}
                 onNavigate={(page) => setActivePage(page)}
+              />
+            </div>
+
+            <div
+              data-d3-chart-card=""
+              data-d3-chart-title="Registro de Horários de Estudo · Linha do Tempo & Turnos"
+              data-d3-chart-subtitle="Faixas horárias exatas de início e pausa do cronômetro ao longo do dia (00h–24h), mapa de turnos e extrato de ponto."
+            >
+              <StudyScheduleTimelineD3Dashboard
+                db={db}
+                fixedSubjects={fixedSubjects}
+                subjectFilter={subjectFilter}
+                activeTimerSubject={
+                  activeTimerTopic?.disciplinaFixa || activeTimerTopic?.materia
+                }
+                activeTimerTopicLabel={activeTimerTopic?.materia}
+                onAddManualInterval={addManualStudySessionInterval}
+                onDeleteInterval={(id) => {
+                  void requestConfirm({
+                    title: 'Remover registro de horário',
+                    description:
+                      'Deseja remover este intervalo de horário do extrato no Portal da Transparência?',
+                    confirmLabel: 'Remover',
+                    danger: true,
+                  }).then((ok) => {
+                    if (ok) deleteStudySessionInterval(id);
+                  });
+                }}
               />
             </div>
 

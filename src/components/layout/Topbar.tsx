@@ -98,11 +98,30 @@ const TopbarWallClock: React.FC = React.memo(() => {
 });
 
 const TopbarTimerReadout: React.FC = React.memo(() => {
-  const { timerSeconds, timerRunning, pomodoroMode, pomodoroPhase, pomodoroRemainingSeconds } =
-    useStudyTimer();
+  const {
+    timerSeconds,
+    timerRunning,
+    timerStartedAt,
+    pomodoroMode,
+    pomodoroPhase,
+    pomodoroRemainingSeconds,
+  } = useStudyTimer();
+
+  const startedAtClock =
+    timerRunning && timerStartedAt > 0
+      ? new Date(timerStartedAt).toLocaleTimeString('pt-BR', {
+          hour: '2-digit',
+          minute: '2-digit',
+        })
+      : '';
 
   return (
     <div
+      title={
+        startedAtClock
+          ? `Sessão atual iniciada às ${startedAtClock} (será registrada no Portal da Transparência ao pausar)`
+          : 'Cronômetro de estudo'
+      }
       className={`flex flex-col justify-center leading-none h-8 px-2.5 rounded-lg transition-colors shrink-0 ${
         timerRunning
           ? 'border border-[var(--accent)] bg-[var(--accent)] shadow-xs'
@@ -115,10 +134,12 @@ const TopbarTimerReadout: React.FC = React.memo(() => {
         }`}
       >
         {pomodoroMode === 'continuous'
-          ? 'CRONÔMETRO'
+          ? startedAtClock
+            ? `CRONÔMETRO · ${startedAtClock}`
+            : 'CRONÔMETRO'
           : pomodoroPhase === 'focus'
-          ? `POMO ${pomodoroMode === 'custom' ? 'PERS.' : pomodoroMode}`
-          : `PAUSA`}
+          ? `POMO ${pomodoroMode === 'custom' ? 'PERS.' : pomodoroMode}${startedAtClock ? ` · ${startedAtClock}` : ''}`
+          : 'PAUSA'}
       </span>
       <strong
         className={`font-mono-num text-[13px] font-extrabold tabular-nums leading-none transition-colors ${

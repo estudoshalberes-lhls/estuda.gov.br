@@ -5,6 +5,7 @@ export interface TimerTickSnapshot {
   nowTick: number;
   timerSeconds: number;
   timerRunning: boolean;
+  timerStartedAt: number;
   pomodoroMode: PomodoroMode;
   pomodoroPhase: 'focus' | 'break';
   pomodoroRemainingSeconds: number;
@@ -14,6 +15,7 @@ let snapshot: TimerTickSnapshot = {
   nowTick: Date.now(),
   timerSeconds: 0,
   timerRunning: false,
+  timerStartedAt: 0,
   pomodoroMode: 'continuous',
   pomodoroPhase: 'focus',
   pomodoroRemainingSeconds: 0,
@@ -41,6 +43,7 @@ export function publishTimerTickSnapshot(patch: Partial<TimerTickSnapshot>): voi
   if (
     next.timerSeconds === snapshot.timerSeconds &&
     next.timerRunning === snapshot.timerRunning &&
+    next.timerStartedAt === snapshot.timerStartedAt &&
     next.pomodoroMode === snapshot.pomodoroMode &&
     next.pomodoroPhase === snapshot.pomodoroPhase &&
     next.pomodoroRemainingSeconds === snapshot.pomodoroRemainingSeconds

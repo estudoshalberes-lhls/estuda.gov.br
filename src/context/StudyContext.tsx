@@ -277,6 +277,8 @@ import {
   ScheduleMap,
   ScheduleTopic,
   StudyDatabase,
+  StudySessionInterval,
+  StudySessionIntervalSource,
   StudyTimeRecord,
   SubmittedSimulation,
   CaseLawVigencia,
@@ -883,6 +885,14 @@ interface StudyContextValue {
   }) => boolean;
   logQuickStudyMinutes: (day: WeekdayName, topic: ScheduleTopic, minutes: number) => boolean;
   deleteStudyTimeRecord: (quizId: string) => void;
+  addManualStudySessionInterval: (payload: {
+    date: string;
+    startTime: string;
+    endTime: string;
+    subject?: string;
+    topicLabel?: string;
+  }) => boolean;
+  deleteStudySessionInterval: (intervalId: string) => void;
   updateStudyCycle: (updater: (prev: StudyCycleConfig) => StudyCycleConfig) => void;
   completeStudyCycleBlock: (itemId: string, customMinutes?: number) => void;
   rateFlashcardSrs: (
@@ -2205,6 +2215,10 @@ function normalizeAndMergeDatabase(rawInput: unknown): StudyDatabase {
     completedSimulations: toArraySafe(dataObj.completedSimulations, seed.completedSimulations || []),
     history: toArraySafe(dataObj.history, seed.history || []),
     studyTimeRecords: toArraySafe(dataObj.studyTimeRecords, seed.studyTimeRecords || []),
+    studySessionIntervals: toArraySafe(
+      dataObj.studySessionIntervals,
+      seed.studySessionIntervals || [],
+    ),
     caseLaw: toArraySafe(dataObj.caseLaw, seed.caseLaw || []),
     completedGoals: toArraySafe(dataObj.completedGoals, seed.completedGoals || []),
     incompleteGoals: toArraySafe(dataObj.incompleteGoals, seed.incompleteGoals || []),
@@ -3982,6 +3996,55 @@ async function restoreFilesAndOrphansFromDriveList(
   };
 }
 
+function buildStudySessionIntervalsFromSpan(
+  startMs: number,
+  endMs: number,
+  meta: {
+    subject?: string;
+    topicLabel?: string;
+    source: StudySessionIntervalSource;
+    pomodoroPhase?: 'focus' | 'break';
+  },
+): StudySessionInterval[] {
+  if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) return [];
+  const totalSec = Math.round((endMs - startMs) / 1000);
+  if (totalSec < 5) return [];
+
+  const intervals: StudySessionInterval[] = [];
+  let cursor = startMs;
+  let guard = 0;
+  while (cursor < endMs && guard < 14) {
+    guard += 1;
+    const cursorDate = new Date(cursor);
+    const nextMidnight = new Date(
+      cursorDate.getFullYear(),
+      cursorDate.getMonth(),
+      cursorDate.getDate() + 1,
+      0,
+      0,
+      0,
+      0,
+    ).getTime();
+    const segmentEnd = Math.min(endMs, nextMidnight);
+    const segSec = Math.max(1, Math.round((segmentEnd - cursor) / 1000));
+    if (segSec >= 5) {
+      intervals.push({
+        id: `sint-${uid(10)}`,
+        date: localDateIso(cursorDate),
+        startedAt: new Date(cursor).toISOString(),
+        endedAt: new Date(segmentEnd).toISOString(),
+        durationSeconds: segSec,
+        ...(meta.subject?.trim() ? { subject: meta.subject.trim() } : {}),
+        ...(meta.topicLabel?.trim() ? { topicLabel: meta.topicLabel.trim() } : {}),
+        source: meta.source,
+        ...(meta.pomodoroPhase ? { pomodoroPhase: meta.pomodoroPhase } : {}),
+      });
+    }
+    cursor = segmentEnd;
+  }
+  return intervals;
+}
+
 function loadTimer(scope: string): TimerStored {
   try {
     const scopedKey = getTimerStorageKey(scope);
@@ -4896,10 +4959,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const now = Date.now();
     const sec = computeCurrentTimerSeconds(timerState, now);
     lastTimerSecRef.current = sec;
-    publishTimerTickSnapshot({
+      publishTimerTickSnapshot({
       nowTick: now,
       timerSeconds: sec,
       timerRunning: timerState.startedAt > 0,
+      timerStartedAt: timerState.startedAt,
       pomodoroMode,
       pomodoroPhase,
       pomodoroRemainingSeconds: pomodoroRemainingRef.current,
@@ -4946,6 +5010,34 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           pomodoroRemainingRef.current = nextRem;
           setPomodoroPhase(nextPhase);
           setPomodoroRemainingSeconds(nextRem);
+
+          // Split active timer span at Pomodoro boundary so focus intervals have exact start/end times
+          const activeTopicSnap = activeTimerTopicRef.current;
+          const completedFocusIntervals = finishedFocus
+            ? buildStudySessionIntervalsFromSpan(t.startedAt, now, {
+                subject:
+                  activeTopicSnap?.disciplinaFixa?.trim() ||
+                  activeTopicSnap?.materia?.trim() ||
+                  'Estudo Geral',
+                topicLabel: activeTopicSnap?.materia?.trim() || undefined,
+                source: 'pomodoro',
+                pomodoroPhase: 'focus',
+              })
+            : [];
+          const nextTimerSnap: TimerStored = { elapsed: curTimerSec, startedAt: now };
+          timerStateRef.current = nextTimerSnap;
+          setTimerState(nextTimerSnap);
+
+          if (completedFocusIntervals.length > 0) {
+            setDb((prev) => ({
+              ...prev,
+              studySessionIntervals: [
+                ...(prev.studySessionIntervals || []),
+                ...completedFocusIntervals,
+              ],
+            }));
+          }
+
           const shouldAutoCommit =
             finishedFocus &&
             dbRef.current.preferences?.pomodoro_auto_commit !== false &&
@@ -4974,6 +5066,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           nowTick: now,
           timerSeconds: curTimerSec,
           timerRunning: true,
+          timerStartedAt: timerStateRef.current.startedAt || t.startedAt,
           pomodoroMode: pomodoroModeRef.current,
           pomodoroPhase: pomodoroPhaseRef.current,
           pomodoroRemainingSeconds: pomodoroRemainingRef.current,
@@ -10499,37 +10592,91 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     pickQuote(true);
   }, [pickQuote]);
 
+  const recordActiveTimerSpan = useCallback(
+    (
+      startMs: number,
+      endMs: number,
+      overrideMeta?: { subject?: string; topicLabel?: string; source?: StudySessionIntervalSource },
+    ) => {
+      if (!startMs || endMs <= startMs) return;
+      const isBreakPhase =
+        pomodoroModeRef.current !== 'continuous' && pomodoroPhaseRef.current === 'break';
+      if (isBreakPhase) return;
+      const topic = activeTimerTopicRef.current;
+      const resolvedSubject =
+        overrideMeta?.subject?.trim() ||
+        topic?.disciplinaFixa?.trim() ||
+        topic?.materia?.trim() ||
+        (quizRef.current && !quizRef.current.completed ? quizRef.current.materia : undefined) ||
+        'Estudo Geral';
+      const resolvedLabel =
+        overrideMeta?.topicLabel?.trim() ||
+        (topic?.materia?.trim() && topic.materia.trim() !== resolvedSubject
+          ? topic.materia.trim()
+          : undefined) ||
+        (quizRef.current && !quizRef.current.completed ? quizRef.current.titulo : undefined);
+
+      const newIntervals = buildStudySessionIntervalsFromSpan(startMs, endMs, {
+        subject: resolvedSubject,
+        topicLabel: resolvedLabel,
+        source:
+          overrideMeta?.source ||
+          (pomodoroModeRef.current !== 'continuous' ? 'pomodoro' : 'timer'),
+        ...(pomodoroModeRef.current !== 'continuous' ? { pomodoroPhase: 'focus' } : {}),
+      });
+      if (newIntervals.length === 0) return;
+
+      setDb((prev) => ({
+        ...prev,
+        studySessionIntervals: [...(prev.studySessionIntervals || []), ...newIntervals],
+      }));
+    },
+    [],
+  );
+
   const toggleTimer = useCallback(() => {
     const now = Date.now();
     setNowTick(now);
-    setTimerState((prev) => {
-      if (prev.startedAt) {
-        const stoppedElapsed = computeCurrentTimerSeconds(prev, now);
-        lastTimerSecRef.current = stoppedElapsed;
-        return { elapsed: stoppedElapsed, startedAt: 0 };
-      }
-      const next = { elapsed: prev.elapsed, startedAt: now };
-      lastTimerSecRef.current = prev.elapsed;
-      return next;
-    });
-  }, [computeCurrentTimerSeconds]);
+    const current = timerStateRef.current;
+    if (current.startedAt > 0) {
+      const stoppedElapsed = computeCurrentTimerSeconds(current, now);
+      lastTimerSecRef.current = stoppedElapsed;
+      const next: TimerStored = { elapsed: stoppedElapsed, startedAt: 0 };
+      timerStateRef.current = next;
+      setTimerState(next);
+      recordActiveTimerSpan(current.startedAt, now);
+    } else {
+      const next: TimerStored = { elapsed: current.elapsed, startedAt: now };
+      lastTimerSecRef.current = current.elapsed;
+      timerStateRef.current = next;
+      setTimerState(next);
+    }
+  }, [computeCurrentTimerSeconds, recordActiveTimerSpan]);
 
   const resetTimer = useCallback(() => {
+    const now = Date.now();
+    const current = timerStateRef.current;
+    if (current.startedAt > 0) {
+      recordActiveTimerSpan(current.startedAt, now);
+    }
     lastTimerSecRef.current = 0;
-    setTimerState({ elapsed: 0, startedAt: 0 });
+    const next: TimerStored = { elapsed: 0, startedAt: 0 };
+    timerStateRef.current = next;
+    setTimerState(next);
     quizTimerBaselineRef.current = 0;
     setQuiz((prev) => (prev && !prev.completed ? { ...prev, timerBaseline: 0 } : prev));
     toast('Cronômetro zerado.');
-  }, [toast]);
+  }, [recordActiveTimerSpan, toast]);
 
   const ensureTimerRunning = useCallback(() => {
     const now = Date.now();
     setNowTick(now);
-    setTimerState((prev) => {
-      if (prev.startedAt) return prev;
-      lastTimerSecRef.current = prev.elapsed;
-      return { ...prev, startedAt: now };
-    });
+    const current = timerStateRef.current;
+    if (current.startedAt > 0) return;
+    lastTimerSecRef.current = current.elapsed;
+    const next: TimerStored = { ...current, startedAt: now };
+    timerStateRef.current = next;
+    setTimerState(next);
   }, []);
 
   const setPomodoroMode = useCallback(
@@ -10556,6 +10703,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   const linkTimerToScheduleTopic = useCallback(
     (day: WeekdayName, topic: ScheduleTopic, startNow = false) => {
+      const now = Date.now();
       const fixedList = dbRef.current.fixedSubjects?.length
         ? dbRef.current.fixedSubjects
         : DEFAULT_FIXED_SUBJECTS;
@@ -10565,6 +10713,22 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         undefined;
       const concursoAlvo = topic.concurso_alvo?.trim() || undefined;
       const materia = topic.materia.trim() || disciplinaFixa || 'Estudo Geral';
+
+      const prevTopic = activeTimerTopicRef.current;
+      const runningState = timerStateRef.current;
+      if (
+        runningState.startedAt > 0 &&
+        prevTopic &&
+        (prevTopic.topicId !== topic.id || prevTopic.materia !== materia)
+      ) {
+        recordActiveTimerSpan(runningState.startedAt, now);
+        const curElapsed = computeCurrentTimerSeconds(runningState, now);
+        const splitNext: TimerStored = { elapsed: curElapsed, startedAt: now };
+        lastTimerSecRef.current = curElapsed;
+        timerStateRef.current = splitNext;
+        setTimerState(splitNext);
+      }
+
       setActiveTimerTopic({
         day,
         topicId: topic.id,
@@ -10586,7 +10750,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           : `Cronômetro vinculado a: ${label} (${day}).`,
       );
     },
-    [ensureTimerRunning, toast],
+    [computeCurrentTimerSeconds, ensureTimerRunning, recordActiveTimerSpan, toast],
   );
 
   const clearTimerLink = useCallback(() => {
@@ -10623,6 +10787,11 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
       let launchedSubject = target.disciplinaFixa?.trim() || targetMateria;
       let launchedContest = target.concursoAlvo?.trim() || undefined;
+
+      const activeTimerSnapshot = timerStateRef.current;
+      const activeStartMs = activeTimerSnapshot.startedAt;
+      const isBreakPhase =
+        pomodoroModeRef.current !== 'continuous' && pomodoroPhaseRef.current === 'break';
 
       setDb((prev) => {
         const fixedList = prev.fixedSubjects?.length ? prev.fixedSubjects : DEFAULT_FIXED_SUBJECTS;
@@ -10688,10 +10857,24 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
           ],
         };
 
+        const committedIntervals =
+          activeStartMs > 0 && !isBreakPhase
+            ? buildStudySessionIntervalsFromSpan(activeStartMs, nowMs, {
+                subject: effectiveFixedSubject,
+                topicLabel: combinedLabel,
+                source: pomodoroModeRef.current !== 'continuous' ? 'pomodoro' : 'timer',
+                ...(pomodoroModeRef.current !== 'continuous' ? { pomodoroPhase: 'focus' } : {}),
+              })
+            : [];
+
         const withUpdatedTime: StudyDatabase = {
           ...prev,
           schedule: { ...prev.schedule, [targetDay]: currentDayTopics },
           studyTimeRecords: [...prev.studyTimeRecords, record],
+          studySessionIntervals: [
+            ...(prev.studySessionIntervals || []),
+            ...committedIntervals,
+          ],
         };
         return buildUpdatedWeeklyScheduleState(
           withUpdatedTime,
@@ -10700,7 +10883,10 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         );
       });
 
-      setTimerState({ elapsed: 0, startedAt: 0 });
+      const resetNext: TimerStored = { elapsed: 0, startedAt: 0 };
+      lastTimerSecRef.current = 0;
+      timerStateRef.current = resetNext;
+      setTimerState(resetNext);
       quizTimerBaselineRef.current = 0;
       setQuiz((prev) => (prev && !prev.completed ? { ...prev, timerBaseline: 0 } : prev));
       toast(
@@ -10714,6 +10900,72 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   );
 
   commitTimerToScheduleRef.current = () => commitTimerToSchedule();
+
+  const addManualStudySessionInterval = useCallback(
+    (payload: {
+      date: string;
+      startTime: string;
+      endTime: string;
+      subject?: string;
+      topicLabel?: string;
+    }): boolean => {
+      const dateStr = (payload.date || '').trim();
+      const startParts = (payload.startTime || '').trim().split(':').map(Number);
+      const endParts = (payload.endTime || '').trim().split(':').map(Number);
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(dateStr) ||
+        startParts.length < 2 ||
+        endParts.length < 2 ||
+        startParts.some((n) => !Number.isFinite(n)) ||
+        endParts.some((n) => !Number.isFinite(n))
+      ) {
+        toast('Informe data e horários válidos (HH:MM).', true);
+        return false;
+      }
+      const [y, m, d] = dateStr.split('-').map(Number);
+      const startMs = new Date(y, m - 1, d, startParts[0], startParts[1], 0, 0).getTime();
+      let endMs = new Date(y, m - 1, d, endParts[0], endParts[1], 0, 0).getTime();
+      if (endMs <= startMs) {
+        // Allow crossing midnight when endTime < startTime
+        endMs += 24 * 60 * 60 * 1000;
+      }
+      const durationSec = Math.round((endMs - startMs) / 1000);
+      if (durationSec < 60 || durationSec > 20 * 3600) {
+        toast('O intervalo deve ter entre 1 minuto e 20 horas.', true);
+        return false;
+      }
+
+      const intervals = buildStudySessionIntervalsFromSpan(startMs, endMs, {
+        subject: payload.subject?.trim() || 'Estudo Geral',
+        topicLabel: payload.topicLabel?.trim() || undefined,
+        source: 'manual',
+      });
+      if (intervals.length === 0) return false;
+
+      setDb((prev) => ({
+        ...prev,
+        studySessionIntervals: [...(prev.studySessionIntervals || []), ...intervals],
+      }));
+      toast(
+        `Horário ${payload.startTime}–${payload.endTime} registrado no Portal da Transparência.`,
+      );
+      return true;
+    },
+    [toast],
+  );
+
+  const deleteStudySessionInterval = useCallback(
+    (intervalId: string) => {
+      setDb((prev) => ({
+        ...prev,
+        studySessionIntervals: (prev.studySessionIntervals || []).filter(
+          (item) => item.id !== intervalId,
+        ),
+      }));
+      toast('Registro de horário removido.');
+    },
+    [toast],
+  );
 
   const updateStudyCycle = useCallback(
     (updater: (prev: StudyCycleConfig) => StudyCycleConfig) => {
@@ -11527,6 +11779,18 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       });
     }
 
+    const quizFallbackIntervals =
+      !timerState.startedAt &&
+      currentQuiz.startedAt &&
+      now - currentQuiz.startedAt >= 10_000 &&
+      updatedAnswers.some(Boolean)
+        ? buildStudySessionIntervalsFromSpan(currentQuiz.startedAt, now, {
+            subject: currentQuiz.materia || 'Questões / Simulado',
+            topicLabel: resolvedSimTitle,
+            source: currentQuiz.kind === 'simulation' ? 'simulation' : 'quiz',
+          })
+        : [];
+
     setDb((oldDb) => {
       const nextCompleted = record
         ? [record, ...oldDb.completedSimulations.filter((s) => s.id !== record.id)]
@@ -11536,10 +11800,29 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       const nextAnnotations = dedupedNewErrors.length
         ? [...dedupedNewErrors, ...oldDb.annotations]
         : oldDb.annotations;
+      const existingIntervals = oldDb.studySessionIntervals || [];
+      const hasOverlapWithQuiz =
+        quizFallbackIntervals.length > 0 &&
+        currentQuiz.startedAt !== undefined &&
+        existingIntervals.some((iv) => {
+          const ivStart = Date.parse(iv.startedAt);
+          const ivEnd = Date.parse(iv.endedAt);
+          return (
+            Number.isFinite(ivStart) &&
+            Number.isFinite(ivEnd) &&
+            ivEnd > (currentQuiz.startedAt || 0) &&
+            ivStart < now
+          );
+        });
+      const nextIntervals =
+        quizFallbackIntervals.length > 0 && !hasOverlapWithQuiz
+          ? [...existingIntervals, ...quizFallbackIntervals]
+          : existingIntervals;
       return {
         ...oldDb,
         completedSimulations: nextCompleted,
         annotations: nextAnnotations,
+        studySessionIntervals: nextIntervals,
       };
     });
 
@@ -18079,6 +18362,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         commitTimerToSchedule,
         logQuickStudyMinutes,
         deleteStudyTimeRecord,
+        addManualStudySessionInterval,
+        deleteStudySessionInterval,
         updateStudyCycle,
         completeStudyCycleBlock,
         rateFlashcardSrs,
@@ -18351,6 +18636,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       commitTimerToSchedule,
       logQuickStudyMinutes,
       deleteStudyTimeRecord,
+      addManualStudySessionInterval,
+      deleteStudySessionInterval,
       updateStudyCycle,
       completeStudyCycleBlock,
       rateFlashcardSrs,

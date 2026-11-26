@@ -119,6 +119,20 @@ export interface StudyTimeRecord {
   allocations: StudyTimeAllocation[];
 }
 
+export type StudySessionIntervalSource = 'timer' | 'pomodoro' | 'quiz' | 'simulation' | 'manual';
+
+export interface StudySessionInterval {
+  id: string;
+  date: string; // YYYY-MM-DD (local date)
+  startedAt: string; // ISO timestamp
+  endedAt: string; // ISO timestamp
+  durationSeconds: number;
+  subject?: string;
+  topicLabel?: string;
+  source: StudySessionIntervalSource;
+  pomodoroPhase?: 'focus' | 'break';
+}
+
 export interface ActiveTimerLink {
   day: WeekdayName;
   topicId: string;
@@ -692,6 +706,7 @@ export interface StudyDatabase {
   completedSimulations: CompletedSimulation[];
   history: HistoryRecord[];
   studyTimeRecords: StudyTimeRecord[];
+  studySessionIntervals?: StudySessionInterval[];
   annotations: ErrorNotebookEntry[];
   caseLaw: CaseLawItem[];
   contests: ContestItem[];
