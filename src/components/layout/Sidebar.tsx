@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { ChevronDown, Search, X } from 'lucide-react';
 import { MODULES, getGovModuleLabel } from '../../data/seedData';
 import { useStudy } from '../../context/StudyContext';
-import { normalizeSearch } from '../../lib/parsers';
+import { WEEKDAYS, localDateIso, normalizeSearch } from '../../lib/parsers';
 import { ModuleName } from '../../types/study';
 import { ModuleIcon } from '../ui/ModuleIcon';
 import { PWAInstallButton } from '../ui/PWAInstallButton';
@@ -65,6 +65,7 @@ interface SidebarProps {
 export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) => {
   const {
     db,
+    allErrorEntries,
     activePage,
     setActivePage,
     setMobileOpen,
@@ -73,6 +74,23 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
     disconnectGoogleDrive,
     connectGoogleDrive,
   } = useStudy();
+
+  const moduleCounts = useMemo<Partial<Record<ModuleName, number>>>(() => {
+    const todayIso = localDateIso();
+    const todayWeekday = WEEKDAYS[(new Date().getDay() + 6) % 7];
+    const todayTopicsCount = (db.schedule?.[todayWeekday] || []).length;
+    const dueReviewsCount = allErrorEntries.filter(
+      (entry) =>
+        (entry.proxima_revisao && entry.proxima_revisao <= todayIso) ||
+        (!entry.corrigido && !entry.correcao_prova),
+    ).length;
+    const incompleteCount = (db.incompleteGoals || []).length;
+    return {
+      Cronograma: todayTopicsCount,
+      'Caderno de Erros': dueReviewsCount,
+      'Metas Não Concluídas': incompleteCount,
+    };
+  }, [db.schedule, db.incompleteGoals, allErrorEntries]);
 
   const [moduleQuery, setModuleQuery] = useState('');
   const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>(() =>
@@ -128,10 +146,10 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
           setActivePage('Início');
           setMobileOpen(false);
         }}
-        className="brand shrink-0 flex flex-col items-start gap-2 w-full text-left px-2 py-2 mb-2 rounded-xl border border-transparent hover:border-[var(--line)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
+        className="brand shrink-0 flex flex-col items-start gap-2 w-full text-left px-2 py-2 mb-2 rounded-[var(--radius-md)] border border-transparent hover:border-[var(--line)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
         aria-label="estuda.gov.br — ir para Início"
       >
-        <span className="brand-mark-mec inline-flex items-center justify-center rounded-xl border border-[var(--line-strong)] bg-white px-2.5 py-1.5 shadow-xs shrink-0 max-w-full overflow-hidden">
+        <span className="brand-mark-mec inline-flex items-center justify-center rounded-[var(--radius-md)] border border-[var(--line-strong)] px-2.5 py-1.5 shadow-xs shrink-0 max-w-full overflow-hidden">
           <img
             src="/assets/aistudio/MEC-GOV-2025-Positivo-Horizontal_0f35c2cb.png"
             alt="Ministério da Educação · Governo do Brasil"
@@ -178,7 +196,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
         {/* Acesso Rápido (Mobile) */}
         {!normalizedQuery && (
           <div className="min-[721px]:hidden mb-3 pb-2.5 border-b border-[var(--line)]">
-            <div className="nav-caption px-2 pt-1 pb-1.5 text-[9.5px] font-bold tracking-[0.08em] text-[var(--subtle)] uppercase">
+            <div className="nav-caption px-2 pt-1 pb-1.5 text-[11px] font-bold text-[var(--subtle)]">
               Atalhos Rápidos
             </div>
             <div className="grid grid-cols-3 gap-1.5 px-1">
@@ -229,7 +247,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                   type="button"
                   onClick={() => toggleGroup(group.label)}
                   aria-expanded={!isCollapsed}
-                  className="nav-caption w-full flex items-center justify-between gap-1 px-2 pt-1 pb-1 text-[10px] font-bold tracking-[0.06em] text-[var(--subtle)] hover:text-[var(--text)] uppercase transition-colors cursor-pointer"
+                  className="nav-caption w-full flex items-center justify-between gap-1 px-2 pt-1.5 pb-1 text-[11px] font-bold text-[var(--subtle)] hover:text-[var(--text)] transition-colors cursor-pointer"
                 >
                   <span className="truncate">{group.label}</span>
                   <ChevronDown
@@ -249,6 +267,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                     if (!mod) return null;
                     const isActive = activePage === mod.name;
                     const displayLabel = getGovModuleLabel(mod.name);
+                    const pendingCount = moduleCounts[mod.name] || 0;
                     return (
                       <button
                         key={mod.name}
@@ -259,10 +278,14 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                           setActivePage(mod.name);
                           setMobileOpen(false);
                         }}
-                        title={displayLabel}
-                        className={`nav-link group flex items-center gap-2.5 w-full min-h-[34px] px-2.5 py-1.5 rounded-[6px] border text-left text-[13px] transition-colors cursor-pointer ${
+                        title={
+                          pendingCount > 0
+                            ? `${displayLabel} (${pendingCount} pendência${pendingCount === 1 ? '' : 's'})`
+                            : displayLabel
+                        }
+                        className={`nav-link group flex items-center gap-2.5 w-full min-h-[34px] px-2.5 py-1.5 rounded-[var(--radius-sm)] border text-left text-[13px] transition-colors cursor-pointer ${
                           isActive
-                            ? 'active border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] font-bold'
+                            ? 'active border-[var(--accent)]/35 bg-[var(--accent-soft)] text-[var(--accent)] font-bold'
                             : 'border-transparent font-medium text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--text)]'
                         }`}
                       >
@@ -273,7 +296,20 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({ onExitToLogin }) =>
                         >
                           <ModuleIcon name={mod.icon} className="w-[18px] h-[18px] shrink-0" />
                         </span>
-                        <span className="nav-label truncate">{displayLabel}</span>
+                        <span className="nav-label truncate flex-1">{displayLabel}</span>
+                        {pendingCount > 0 && (
+                          <span
+                            className={`nav-count font-mono-num tabular-nums text-[11px] font-semibold shrink-0 ${
+                              isActive
+                                ? 'text-[var(--accent)]'
+                                : mod.name === 'Caderno de Erros'
+                                  ? 'text-[var(--warning)]'
+                                  : 'text-[var(--subtle)]'
+                            }`}
+                          >
+                            {pendingCount}
+                          </span>
+                        )}
                       </button>
                     );
                   })}

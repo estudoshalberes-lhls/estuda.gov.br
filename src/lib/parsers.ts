@@ -2759,7 +2759,7 @@ export function serializeScheduleWeekToText(
     } else {
       list.forEach((t) => {
         const cleanSubject = String(t.materia || '').replace(/\|/g, '/').trim() || '(Tópico sem título)';
-        const cleanTime = String(t.tempo || '1h').replace(/\|/g, '/').trim();
+        const cleanTime = String(t.tempo || '').replace(/\|/g, '/').trim();
         const cleanNotes = String(t.observacoes || '').replace(/\r?\n/g, ' ').replace(/\|/g, '/').trim();
         const sec = Math.max(0, Math.round(Number(t.estudado_segundos || 0)));
         const customFlag = t.data_personalizada ? '1' : '0';

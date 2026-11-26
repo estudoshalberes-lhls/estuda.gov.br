@@ -1,10 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { List, type RowComponentProps, useDynamicRowHeight } from 'react-window';
 import {
   CalendarPlus,
   ChevronDown,
   Clock3,
   ExternalLink,
   FileDown,
+  Layers,
+  ListFilter,
   Pencil,
   RotateCcw,
   Save,
@@ -77,6 +80,13 @@ export const CompletedGoalsPage: React.FC = () => {
   const [weekValue, setWeekValue] = useState(() => isoWeekInputValue(localDateIso()));
   const [pendingTargetDays, setPendingTargetDays] = useState<Record<string, WeekdayName>>({});
   const [pendingSearch, setPendingSearch] = useState('');
+  const [historyViewMode, setHistoryViewMode] = useState<'grouped' | 'virtual'>(() =>
+    db.completedGoals.length > 40 ? 'virtual' : 'grouped',
+  );
+  const virtualRowHeight = useDynamicRowHeight({
+    defaultRowHeight: 92,
+    key: `completed-goals-${db.completedGoals.length}-${dateFrom}-${dateTo}`,
+  });
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editMateria, setEditMateria] = useState('');
@@ -546,6 +556,137 @@ export const CompletedGoalsPage: React.FC = () => {
         </div>
       </details>
 
+      {filtered.length > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+          <span className="text-[12px] text-[var(--muted)] tabular-nums">
+            Exibindo <strong className="text-[var(--text)]">{filtered.length}</strong>{' '}
+            {filtered.length === 1 ? 'meta concluída' : 'metas concluídas'}
+          </span>
+          <div className="inline-flex items-center gap-1 p-1 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)]">
+            <button
+              type="button"
+              onClick={() => setHistoryViewMode('grouped')}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                historyViewMode === 'grouped'
+                  ? 'bg-[var(--panel)] text-[var(--text)] shadow-xs'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              Agrupado por data
+            </button>
+            <button
+              type="button"
+              onClick={() => setHistoryViewMode('virtual')}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11.5px] font-bold transition-colors cursor-pointer whitespace-nowrap ${
+                historyViewMode === 'virtual'
+                  ? 'bg-[var(--panel)] text-[var(--text)] shadow-xs'
+                  : 'text-[var(--muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              <ListFilter className="w-3.5 h-3.5" />
+              Lista virtualizada
+            </button>
+          </div>
+        </div>
+      )}
+
+      {historyViewMode === 'virtual' && filtered.length > 0 ? (
+        <Panel className="p-3 overflow-hidden">
+          <List
+            rowCount={filtered.length}
+            rowHeight={virtualRowHeight}
+            overscanCount={6}
+            style={{ height: Math.min(640, Math.max(240, filtered.length * 92)) }}
+            rowProps={{
+              items: filtered,
+              onEdit: (item: CompletedGoal) => {
+                setHistoryViewMode('grouped');
+                startEditing(item);
+              },
+              onReopen: reopenCompletedGoal,
+              onDelete: deleteCompletedGoal,
+            }}
+            rowComponent={({
+              index,
+              style,
+              items,
+              onEdit,
+              onReopen,
+              onDelete,
+            }: RowComponentProps<{
+              items: CompletedGoal[];
+              onEdit: (item: CompletedGoal) => void;
+              onReopen: (id: string) => void;
+              onDelete: (id: string) => void;
+            }>) => {
+              const item = items[index];
+              if (!item) return null;
+              return (
+                <div style={style} className="pb-2 pr-1">
+                  <div className="flex flex-wrap items-start justify-between gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <strong className="text-[13.5px] font-bold text-[var(--text)]">
+                          {item.materia}
+                        </strong>
+                        {item.data && (
+                          <span className="font-mono-num text-[11.5px] text-[var(--muted)]">
+                            · {item.data}
+                          </span>
+                        )}
+                        {item.dia_semana && (
+                          <span className="text-[11.5px] text-[var(--muted)]">
+                            · {item.dia_semana}
+                          </span>
+                        )}
+                        {item.tempo && (
+                          <span className="font-mono-num text-[11.5px] font-semibold text-[var(--accent)]">
+                            · {item.tempo}
+                          </span>
+                        )}
+                      </div>
+                      {item.observacoes && (
+                        <p className="mt-1 mb-0 text-[12px] text-[var(--muted)] truncate">
+                          {item.observacoes}
+                        </p>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => onEdit(item)}
+                        aria-label={`Editar ${item.materia}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                      >
+                        <Pencil className="w-3 h-3 text-[var(--accent)]" />
+                        Editar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onReopen(item.id)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap cursor-pointer"
+                      >
+                        <RotateCcw className="w-3 h-3" />
+                        Reabrir
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onDelete(item.id)}
+                        aria-label={`Excluir ${item.materia}`}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)] whitespace-nowrap cursor-pointer"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                        Excluir
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              );
+            }}
+          />
+        </Panel>
+      ) : (
       <div className="flex flex-col gap-3">
         {groupedByDate.length ? (
           groupedByDate.map((group, idx) => (
@@ -733,6 +874,7 @@ export const CompletedGoalsPage: React.FC = () => {
           <EmptyState message="Nenhuma meta concluída registrada para este filtro." />
         )}
       </div>
+      )}
     </div>
   );
 };

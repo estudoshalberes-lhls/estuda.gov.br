@@ -13,6 +13,7 @@ import {
   AiSummaryAnalysisMode,
   AiSummaryAnalysisResponse,
   AiSummaryMindMapPayload,
+  analyzeSummaryStreamWithAi,
   analyzeSummaryWithAi,
 } from '../../lib/aiApi';
 import { getFileBlob } from '../../lib/fileStorage';
@@ -77,6 +78,7 @@ export const SummaryAiStudioModal: React.FC<SummaryAiStudioModalProps> = ({
   const [count, setCount] = useState<number>(5);
   const [banca, setBanca] = useState<string>('');
   const [loading, setLoading] = useState(false);
+  const [streamingPreview, setStreamingPreview] = useState('');
   const [result, setResult] = useState<AiSummaryAnalysisResponse | null>(null);
   const [savingAction, setSavingAction] = useState(false);
 
@@ -111,9 +113,30 @@ export const SummaryAiStudioModal: React.FC<SummaryAiStudioModalProps> = ({
 
   const handleGenerate = async () => {
     setLoading(true);
+    setStreamingPreview('');
     setResult(null);
     try {
       const sourceText = await extractSourceText();
+      if (mode === 'summary') {
+        try {
+          const streamed = await analyzeSummaryStreamWithAi(
+            {
+              subject: subjectLabel,
+              title: itemTitle,
+              sourceText,
+            },
+            (_delta, accumulated) => {
+              setStreamingPreview(accumulated);
+            },
+          );
+          setResult(streamed);
+          setStreamingPreview('');
+          return;
+        } catch {
+          // Fallback transparently to non-streaming JSON route
+          setStreamingPreview('');
+        }
+      }
       const res = await analyzeSummaryWithAi({
         mode,
         subject: subjectLabel,
@@ -303,6 +326,19 @@ export const SummaryAiStudioModal: React.FC<SummaryAiStudioModalProps> = ({
               {loading ? 'Analisando material…' : 'Gerar agora'}
             </button>
           </div>
+
+          {/* Live Streaming Preview */}
+          {loading && streamingPreview && (
+            <div className="rounded-xl border border-[var(--accent)]/40 bg-[var(--panel-soft)] p-3.5 flex flex-col gap-2">
+              <div className="flex items-center gap-2 text-[11.5px] font-bold text-[var(--accent)]">
+                <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                <span>Escrevendo resumo em tempo real…</span>
+              </div>
+              <pre className="m-0 whitespace-pre-wrap font-sans text-[12.5px] leading-relaxed text-[var(--text)] max-h-[280px] overflow-y-auto">
+                {streamingPreview}
+              </pre>
+            </div>
+          )}
 
           {/* Result Area */}
           {result?.mode === 'summary' && result.summary && (

@@ -18,6 +18,8 @@ import { BackToTopButton } from './components/ui/BackToTopButton';
 import { OfflineIndicator } from './components/ui/OfflineIndicator';
 import { CareerAchievementWatcher } from './components/performance/CareerAchievementWatcher';
 import { DailyGoalPushWatcher } from './components/study/DailyGoalPushWatcher';
+import { CommandPaletteModal } from './components/layout/CommandPaletteModal';
+import { PageLoadingSkeleton } from './components/ui/PageLoadingSkeleton';
 import { ModuleName } from './types/study';
 import { PAGE_LOADERS } from './lib/routePrefetch';
 
@@ -175,17 +177,7 @@ const UtilitiesPage = lazyWithRetry(PAGE_LOADERS['Utilidades']);
 const BackupPage = lazyWithRetry(PAGE_LOADERS['Backup e Restauração']);
 const SettingsPage = lazyWithRetry(PAGE_LOADERS['Configurações']);
 
-const PageLoadingFallback: React.FC = () => (
-  <div className="flex items-center justify-center min-h-[280px] rounded-xl border border-[var(--line)] bg-[var(--panel)] px-6 py-12">
-    <div className="flex items-center gap-3 text-[13px] font-medium text-[var(--muted)]">
-      <span
-        className="w-4 h-4 rounded-full border-2 border-[var(--line-strong)] border-t-[var(--accent)] animate-spin"
-        aria-hidden="true"
-      />
-      <span>Carregando módulo…</span>
-    </div>
-  </div>
-);
+// PageLoadingSkeleton is rendered inside Suspense fallback with module context
 
 function renderActivePage(page: ModuleName): React.ReactNode {
   switch (page) {
@@ -258,6 +250,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
   } = useStudy();
   const prefs = db.preferences;
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [studyFocusMode, setStudyFocusMode] = useState<boolean>(() => {
     if (typeof window === 'undefined') return false;
     try {
@@ -297,6 +290,12 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPaletteOpen((prev) => !prev);
+        return;
+      }
+
       if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'f') {
         e.preventDefault();
         toggleStudyFocusMode();
@@ -358,6 +357,7 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
             studyFocusMode={studyFocusMode}
             onToggleStudyFocus={toggleStudyFocusMode}
             onOpenShortcuts={() => setShortcutsOpen(true)}
+            onOpenCommandPalette={() => setPaletteOpen(true)}
           />
         )}
         {!hideNonEssentialChrome && <TopModuleNav />}
@@ -378,7 +378,9 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
             onResetToHome={() => setActivePage('Início')}
           >
             <div key={activePage} className="ce-page-transition">
-              <Suspense fallback={<PageLoadingFallback />}>{renderActivePage(activePage)}</Suspense>
+              <Suspense fallback={<PageLoadingSkeleton activePage={activePage} />}>
+                {renderActivePage(activePage)}
+              </Suspense>
             </div>
           </AppErrorBoundary>
         </section>
@@ -435,6 +437,13 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
       <CareerAchievementWatcher />
       <DailyGoalPushWatcher />
       <KeyboardShortcutsModal open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <CommandPaletteModal
+        open={paletteOpen}
+        onClose={() => setPaletteOpen(false)}
+        studyFocusMode={studyFocusMode}
+        onToggleStudyFocus={toggleStudyFocusMode}
+        onOpenShortcuts={() => setShortcutsOpen(true)}
+      />
     </div>
   );
 };

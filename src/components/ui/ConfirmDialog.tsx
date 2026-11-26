@@ -18,12 +18,12 @@ export const ConfirmDialog: React.FC = () => {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-[2px]"
+      className="ce-backdrop-enter fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/55 backdrop-blur-[2px]"
       role="dialog"
       aria-modal="true"
       aria-labelledby="confirm-dialog-title"
     >
-      <div className="w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-5 shadow-2xl">
+      <div className="ce-modal-enter w-full max-w-lg max-h-[90vh] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] p-5 shadow-2xl">
         <div className="flex items-start gap-3">
           <div
             className={`grid place-items-center w-9 h-9 rounded-lg border shrink-0 ${

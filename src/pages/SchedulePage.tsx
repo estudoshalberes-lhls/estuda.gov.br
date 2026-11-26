@@ -13,6 +13,7 @@ import {
   FileText,
   FileUp,
   FolderOpen,
+  GripVertical,
   Link2,
   Play,
   Plus,
@@ -122,6 +123,7 @@ export const SchedulePage: React.FC = () => {
     addTopicToDay,
     deleteScheduleTopic,
     moveScheduleTopicToDay,
+    reorderScheduleTopic,
     completeScheduleTopic,
     archiveTopicAsIncomplete,
     executeGuidedWeeklyClose,
@@ -340,6 +342,44 @@ export const SchedulePage: React.FC = () => {
     setOpenDays((prev) => ({ ...prev, [toDay]: true }));
 
     moveScheduleTopicToDay(fromDay, idx, toDay, snapshotBeforeMove);
+  };
+
+  const [draggingTopic, setDraggingTopic] = useState<{
+    day: WeekdayName;
+    idx: number;
+    topicId: string;
+  } | null>(null);
+  const [dragOverDay, setDragOverDay] = useState<WeekdayName | null>(null);
+  const [dragOverSlot, setDragOverSlot] = useState<{ day: WeekdayName; idx: number } | null>(null);
+
+  const handleReorderScheduleTopic = (day: WeekdayName, fromIdx: number, toIdx: number) => {
+    if (fromIdx === toIdx) return;
+    const existingTimer = saveTimersRef.current[day];
+    if (existingTimer) {
+      window.clearTimeout(existingTimer);
+      delete saveTimersRef.current[day];
+    }
+    dirtyDaysRef.current.delete(day);
+
+    const currentDayTopics = [...(draftRef.current[day] || db.schedule[day] || [])];
+    if (fromIdx < 0 || toIdx < 0 || fromIdx >= currentDayTopics.length || toIdx >= currentDayTopics.length) {
+      return;
+    }
+    const [moved] = currentDayTopics.splice(fromIdx, 1);
+    if (!moved) return;
+    currentDayTopics.splice(toIdx, 0, moved);
+    clearDayTopicDrafts(currentDayTopics);
+
+    const nextDraft: ScheduleMap = { ...draftRef.current, [day]: currentDayTopics };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
+    reorderScheduleTopic(day, fromIdx, toIdx, draftRef.current[day]);
+  };
+
+  const clearDragState = () => {
+    setDraggingTopic(null);
+    setDragOverDay(null);
+    setDragOverSlot(null);
   };
 
   useEffect(() => {
@@ -922,32 +962,79 @@ export const SchedulePage: React.FC = () => {
           const generalDayDate = db.scheduleDayDates?.[day] || activeWeekDates[day] || todayBr;
           const dayStudiedTotal = topics.reduce((sum, t) => sum + (t.estudado_segundos || 0), 0);
 
+          const isDayDropActive =
+            Boolean(draggingTopic) && dragOverDay === day && draggingTopic?.day !== day;
+
           return (
-            <Panel key={day} className="overflow-hidden p-0">
+            <Panel
+              key={day}
+              className={`overflow-hidden p-0 transition-all ${
+                isDayDropActive
+                  ? 'ring-2 ring-[var(--accent)] border-[var(--accent)]'
+                  : isToday
+                    ? 'border-[var(--accent)]/60'
+                    : ''
+              }`}
+            >
+              <div
+                onDragOver={(e) => {
+                  if (!draggingTopic) return;
+                  e.preventDefault();
+                  e.dataTransfer.dropEffect = 'move';
+                  if (dragOverDay !== day) setDragOverDay(day);
+                }}
+                onDragLeave={(e) => {
+                  if (!e.currentTarget.contains(e.relatedTarget as Node | null)) {
+                    if (dragOverDay === day) setDragOverDay(null);
+                  }
+                }}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  if (!draggingTopic) return;
+                  if (draggingTopic.day !== day) {
+                    handleMoveScheduleTopic(draggingTopic.day, draggingTopic.idx, day);
+                  }
+                  clearDragState();
+                }}
+              >
               <button
                 type="button"
                 onClick={() => toggleDay(day)}
-                className="flex items-center justify-between w-full px-4 py-3.5 text-left hover:bg-[var(--panel-soft)] transition-colors"
+                className={`flex items-center justify-between w-full px-4 py-3.5 text-left transition-colors cursor-pointer ${
+                  isToday
+                    ? 'bg-[var(--accent-soft)]/35 hover:bg-[var(--accent-soft)]/50'
+                    : 'hover:bg-[var(--panel-soft)]'
+                }`}
               >
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <strong className="font-display text-[15px] font-bold text-[var(--text)]">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-[12px]">
+                  <strong className="font-display text-[15px] font-extrabold text-[var(--text)]">
                     {day}
                   </strong>
                   {isToday && (
-                    <span className="px-2 py-0.5 rounded-md border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[10px] font-extrabold uppercase tracking-wider text-[var(--accent)]">
-                      Hoje
+                    <span className="text-[11px] font-extrabold text-[var(--accent)]">
+                      · Hoje
                     </span>
                   )}
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] text-[11px] font-mono-num font-semibold text-[var(--muted)]">
-                    <Calendar className="w-3 h-3 text-[var(--accent)]" />
+                  <span className="text-[var(--subtle)]" aria-hidden="true">·</span>
+                  <span className="inline-flex items-center gap-1 font-mono-num font-semibold text-[var(--muted)] tabular-nums">
+                    <Calendar className="w-3 h-3 text-[var(--accent)]" aria-hidden="true" />
                     {generalDayDate}
                   </span>
-                  <span className="text-[12px] text-[var(--muted)] tabular-nums">
+                  <span className="text-[var(--subtle)]" aria-hidden="true">·</span>
+                  <span className="text-[var(--muted)] font-medium tabular-nums">
                     {topics.length} {topics.length === 1 ? 'tópico' : 'tópicos'}
                   </span>
                   {dayStudiedTotal > 0 && (
-                    <span className="px-2 py-0.5 rounded-md border border-[var(--good)]/40 bg-[var(--good)]/10 text-[11px] font-bold text-[var(--good)] font-mono-num">
-                      Estudado: {formatScheduleDuration(dayStudiedTotal)}
+                    <>
+                      <span className="text-[var(--subtle)]" aria-hidden="true">·</span>
+                      <span className="font-bold text-[var(--good)] font-mono-num tabular-nums">
+                        Estudado: {formatScheduleDuration(dayStudiedTotal)}
+                      </span>
+                    </>
+                  )}
+                  {isDayDropActive && (
+                    <span className="text-[11.5px] font-bold text-[var(--accent)]">
+                      — Solte aqui para mover para {day}
                     </span>
                   )}
                 </div>
@@ -957,6 +1044,7 @@ export const SchedulePage: React.FC = () => {
                   }`}
                 />
               </button>
+              </div>
 
               {isOpen && (
                 <div className="px-4 pb-4 pt-2 border-t border-[var(--line)]">
@@ -1015,8 +1103,8 @@ export const SchedulePage: React.FC = () => {
                         const isLinked = activeTimerTopic?.topicId === topic.id;
                         const studiedSec = topic.estudado_segundos || 0;
                         const manualTempoSec = scheduleDurationSeconds(topic.tempo || '');
-                        const pendingManualCreditSec =
-                          manualTempoSec > studiedSec ? manualTempoSec - studiedSec : 0;
+                        const pendingManualCreditSec = manualTempoSec > 0 ? manualTempoSec : 0;
+                        const projectedTotalSec = studiedSec + pendingManualCreditSec;
                         const hasInvalidManualTempo =
                           Boolean(topic.tempo?.trim()) && manualTempoSec <= 0;
                         const isCustomDate = Boolean(
@@ -1038,11 +1126,55 @@ export const SchedulePage: React.FC = () => {
                           ? effectiveContest.toUpperCase()
                           : 'DEFINIR CONCURSO / EDITAL';
 
+                        const isBeingDragged =
+                          draggingTopic?.day === day && draggingTopic?.idx === idx;
+                        const isDropTargetSlot =
+                          dragOverSlot?.day === day &&
+                          dragOverSlot?.idx === idx &&
+                          !(draggingTopic?.day === day && draggingTopic?.idx === idx);
+
                         return (
                           <div
                             key={topic.id}
-                            className={`rounded-xl border p-3 transition-colors ${
-                              isLinked
+                            draggable
+                            onDragStart={(e) => {
+                              const tag = (e.target as HTMLElement | null)?.tagName;
+                              if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') {
+                                e.preventDefault();
+                                return;
+                              }
+                              e.dataTransfer.effectAllowed = 'move';
+                              e.dataTransfer.setData('text/plain', `${day}:${idx}`);
+                              setDraggingTopic({ day, idx, topicId: topic.id });
+                            }}
+                            onDragOver={(e) => {
+                              if (!draggingTopic) return;
+                              e.preventDefault();
+                              e.stopPropagation();
+                              e.dataTransfer.dropEffect = 'move';
+                              if (dragOverSlot?.day !== day || dragOverSlot?.idx !== idx) {
+                                setDragOverSlot({ day, idx });
+                              }
+                              if (dragOverDay !== day) setDragOverDay(day);
+                            }}
+                            onDrop={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              if (!draggingTopic) return;
+                              if (draggingTopic.day === day) {
+                                handleReorderScheduleTopic(day, draggingTopic.idx, idx);
+                              } else {
+                                handleMoveScheduleTopic(draggingTopic.day, draggingTopic.idx, day);
+                              }
+                              clearDragState();
+                            }}
+                            onDragEnd={clearDragState}
+                            className={`rounded-xl border p-3 transition-all ${
+                              isBeingDragged
+                                ? 'opacity-50 border-dashed border-[var(--accent)]'
+                                : isDropTargetSlot
+                                ? 'border-[var(--accent)] ring-2 ring-[var(--accent)]/40 bg-[var(--accent-soft)]/30'
+                                : isLinked
                                 ? 'border-[var(--accent)] bg-[var(--accent-soft)]/50 shadow-sm'
                                 : 'border-[var(--line-strong)] bg-[var(--panel-soft)] hover:border-[var(--accent)]/50'
                             }`}
@@ -1050,6 +1182,13 @@ export const SchedulePage: React.FC = () => {
                             {/* Cabeçalho de Identificação da Matéria Fixa e Edital Alvo */}
                             <div className="flex flex-wrap items-center justify-between gap-2 mb-2.5 pb-2 border-b border-[var(--line)]/80">
                               <div className="flex flex-wrap items-center gap-1.5">
+                                <span
+                                  title="Arraste para reordenar no dia ou solte em outro dia da semana"
+                                  className="inline-flex items-center justify-center w-6 h-6 rounded-[var(--radius-sm)] border border-[var(--line)] bg-[var(--panel)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] cursor-grab active:cursor-grabbing shrink-0 transition-colors"
+                                  aria-hidden="true"
+                                >
+                                  <GripVertical className="w-3.5 h-3.5" />
+                                </span>
                                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-[var(--accent)]/50 bg-[var(--accent-soft)] text-[11px] font-extrabold tracking-wide text-[var(--accent)]">
                                   <Bookmark className="w-3 h-3 shrink-0" />
                                   {formattedMateriaBadge}
@@ -1210,14 +1349,14 @@ export const SchedulePage: React.FC = () => {
                               />
                               <input
                                 type="text"
-                                aria-label="Tempo de estudo (minutos, 1h26min ou 01:26:26)"
-                                title="Aceita minutos (ex.: 45), horas/minutos (ex.: 1h26min) ou relógio HH:MM:SS (ex.: 01:26:26). Ao concluir, o tempo é somado na matéria no Portal da Transparência."
+                                aria-label="Tempo extra de estudo para somar ao cronômetro (minutos, 1h26min ou 01:26:26)"
+                                title="Tempo adicional para somar a mais no cronômetro (ex.: 45, 1h26min ou 01:26:26). Deixe vazio se usar apenas o cronômetro; ao concluir, o valor digitado aqui é somado a mais no Portal da Transparência."
                                 value={topic.tempo}
                                 onChange={(e) =>
                                   updateTopicFields(day, idx, { tempo: e.target.value })
                                 }
                                 onBlur={() => flushDaySave(day)}
-                                placeholder="Ex: 45, 1h26min, 01:26:26"
+                                placeholder="+ Tempo extra (ex: 30min)"
                                 className="ce-input font-mono-num text-[12px]"
                               />
                               <input
@@ -1274,7 +1413,7 @@ export const SchedulePage: React.FC = () => {
                                   }}
                                   title={
                                     pendingManualCreditSec > 0
-                                      ? `Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')} e somar +${formatScheduleDuration(pendingManualCreditSec)} em ${visibleName(effectiveFixedSubject || topic.materia || 'Estudo Geral')} no Portal da Transparência`
+                                      ? `Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')} e somar +${formatScheduleDuration(pendingManualCreditSec)} a mais${studiedSec > 0 ? ` (total: ${formatScheduleDuration(projectedTotalSec)})` : ''} em ${visibleName(effectiveFixedSubject || topic.materia || 'Estudo Geral')} no Portal da Transparência`
                                       : `Concluir ${visibleName(topic.materia || effectiveFixedSubject || 'tópico')}`
                                   }
                                   aria-label="Concluir tópico"
@@ -1348,8 +1487,9 @@ export const SchedulePage: React.FC = () => {
                                   {pendingManualCreditSec > 0 && (
                                     <span className="inline-flex items-center gap-1 font-bold text-[var(--accent)] font-mono-num">
                                       <Clock3 className="w-3 h-3" />
-                                      Ao finalizar: +{formatScheduleDuration(pendingManualCreditSec)} ({formatClock(pendingManualCreditSec)}) →{' '}
+                                      Ao finalizar: +{formatScheduleDuration(pendingManualCreditSec)} ({formatClock(pendingManualCreditSec)}) a mais →{' '}
                                       {visibleName(effectiveFixedSubject || topic.materia || 'Estudo Geral')}
+                                      {studiedSec > 0 ? ` (total: ${formatScheduleDuration(projectedTotalSec)})` : ''}
                                     </span>
                                   )}
                                   {hasInvalidManualTempo && (

@@ -177,10 +177,10 @@ export const WeeklySubjectGoalsPanel: React.FC = () => {
     addTopicToDay(todayWeekday, {
       disciplina_fixa: subject,
       materia: `Reforço semanal · ${visibleName(subject)}`,
-      tempo: '1h',
+      tempo: '',
       observacoes: 'Priorizado pela meta de carga horária semanal',
     });
-    toast(`"${visibleName(subject)}" (1h) adicionado ao Expediente de hoje (${todayWeekday}).`);
+    toast(`"${visibleName(subject)}" adicionado ao Expediente de hoje (${todayWeekday}).`);
   };
 
   return (

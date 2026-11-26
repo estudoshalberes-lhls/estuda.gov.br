@@ -350,64 +350,70 @@ export const HomePage: React.FC = () => {
     <div>
       <div className="print:hidden">
       <PageHeader
-        eyebrow="PORTAL DE SERVIÇOS AO ESTUDANTE"
+        compact
+        eyebrow="Portal de Serviços ao Estudante"
         title="Comprovante de Situação nos Estudos"
-        description="Acompanhe seu rendimento por disciplina, prazos de inscrição em editais e metas diárias do Programa Nacional de Sobrevivência Acadêmica."
+        description="Acompanhe rendimento por disciplina, prazos de editais e metas diárias."
       />
 
       {/* Ministerial Focal Hero Banner */}
-      <section className="ce-panel rounded-xl overflow-hidden mb-5 grid grid-cols-1 lg:grid-cols-[1.35fr_0.65fr] items-stretch">
-        <div className="p-5 sm:p-6 flex flex-col justify-between gap-4">
+      <section className="ce-panel rounded-[var(--radius-md)] overflow-hidden mb-4 grid grid-cols-1 lg:grid-cols-[1.4fr_0.6fr] items-stretch">
+        <div className="p-4 sm:p-5 flex flex-col justify-between gap-3.5">
           <div>
-            <div className="flex flex-wrap items-center gap-2 text-[11.5px] font-bold text-[var(--accent)] mb-2">
-              <FileCheck2 className="w-4 h-4 shrink-0" aria-hidden="true" />
+            <div className="flex flex-wrap items-center gap-2 text-[12px] font-semibold text-[var(--accent)] mb-1.5">
+              <FileCheck2 className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>Programa Bolsa-Questão &amp; Fomento à Aprovação · Exercício 2026</span>
             </div>
-            <h3 className="m-0 font-display text-[20px] sm:text-[23px] font-extrabold leading-snug tracking-[-0.02em] text-[var(--text)] text-left">
+            <h3 className="m-0 font-display text-[19px] sm:text-[22px] font-extrabold leading-snug tracking-[-0.02em] text-[var(--text)] text-left text-balance">
               {dueReviews.length > 0
                 ? `Atenção, cidadão-estudante: você tem ${dueReviews.length} revisão(ões) pendente(s) no protocolo de hoje.`
                 : 'Situação Cadastral Regular: todas as revisões programadas para hoje estão em dia.'}
             </h3>
-            <p className="mt-2 mb-0 text-[13.5px] leading-relaxed text-[var(--muted)] max-w-[60ch]">
+            <p className="mt-1.5 mb-0 text-[13px] leading-relaxed text-[var(--muted)] max-w-[62ch]">
               {todayTopics.length > 0
-                ? `Constam ${todayTopics.length} meta(s) agendada(s) para ${todayWeekday} no seu cronograma. Bata o ponto eletrônico ao lado e inicie sua bateria de questões.`
+                ? `Constam ${todayTopics.length} meta(s) agendada(s) para ${todayWeekday} no seu cronograma. Bata o ponto eletrônico acima e inicie sua bateria de questões.`
                 : `Nenhuma meta cadastrada para ${todayWeekday}. Utilize o Treino Diário ou configure sua agenda semanal no Cronograma.`}
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2.5 pt-1">
+          {/* 1 Primary Focal CTA + Clean Secondary Actions */}
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-2 pt-0.5">
             <button
               type="button"
               onClick={() => setActivePage('Treino Diário')}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="inline-flex items-center gap-2 px-4 py-2 rounded-[var(--radius-sm)] border border-[var(--accent)] bg-[var(--accent)] hover:bg-[var(--accent-hover)] text-white text-[13px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <Play className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
               <span>Iniciar Treino Diário</span>
             </button>
-            <button
-              type="button"
-              onClick={() => setActivePage('Cronograma')}
-              className="inline-flex items-center gap-2 px-4 py-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] hover:border-[var(--accent)] text-[var(--text)] text-[13px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-            >
-              <BookOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
-              <span>Abrir Cronograma</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => void handleExportWeeklyBoletim()}
-              disabled={exportingWeeklyPdf}
-              title="Emitir resumo oficial da semana em PDF (horas vs. meta, questões, simulados e Lei Seca)"
-              className="inline-flex items-center gap-2 px-3.5 py-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] hover:border-[var(--accent)] text-[var(--text)] text-[12.5px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60"
-            >
-              <FileDown className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
-              <span>{exportingWeeklyPdf ? 'Gerando Boletim…' : 'Boletim Semanal (PDF)'}</span>
-            </button>
+
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+              <button
+                type="button"
+                onClick={() => setActivePage('Cronograma')}
+                className="inline-flex items-center gap-1.5 py-1.5 text-[12.5px] font-bold text-[var(--text)] hover:text-[var(--accent)] transition-colors whitespace-nowrap shrink-0 cursor-pointer bg-transparent border-0"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                <span>Abrir Cronograma</span>
+              </button>
+              <span className="text-[var(--line-strong)] hidden sm:inline" aria-hidden="true">·</span>
+              <button
+                type="button"
+                onClick={() => void handleExportWeeklyBoletim()}
+                disabled={exportingWeeklyPdf}
+                title="Emitir resumo oficial da semana em PDF (horas vs. meta, questões, simulados e Lei Seca)"
+                className="inline-flex items-center gap-1.5 py-1.5 text-[12.5px] font-semibold text-[var(--muted)] hover:text-[var(--text)] transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-60 bg-transparent border-0"
+              >
+                <FileDown className="w-3.5 h-3.5 text-[var(--accent)] shrink-0" aria-hidden="true" />
+                <span>{exportingWeeklyPdf ? 'Gerando Boletim…' : 'Boletim Semanal (PDF)'}</span>
+              </button>
+            </div>
           </div>
 
-          {/* Diretriz Ministerial (movida da Topbar para manter o cabeçalho limpo) */}
-          <div className="pt-3 mt-1 border-t border-[var(--line)] flex items-center justify-between gap-2.5">
+          {/* Diretriz Ministerial */}
+          <div className="pt-2.5 border-t border-[var(--line)] flex items-center justify-between gap-2.5">
             <p className="m-0 text-[12px] text-[var(--muted)] leading-snug italic min-w-0">
-              <strong className="not-italic font-bold text-[var(--accent)] uppercase tracking-[0.04em] text-[10px] mr-1.5">
+              <strong className="not-italic font-bold text-[var(--accent)] text-[11px] mr-1.5">
                 Diretriz do dia:
               </strong>
               “{focusQuote}”
@@ -417,14 +423,14 @@ export const HomePage: React.FC = () => {
               onClick={changeFocusQuote}
               aria-label="Alterar frase do foco do dia"
               title="Alterar frase do foco do dia"
-              className="grid place-items-center w-7 h-7 rounded-md border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
+              className="grid place-items-center w-7 h-7 rounded-[var(--radius-sm)] border border-transparent hover:border-[var(--line)] hover:bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--accent)] transition-colors shrink-0 cursor-pointer"
             >
               <RefreshCw className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
 
-        <div className="relative min-h-[170px] lg:min-h-full border-t lg:border-t-0 lg:border-l border-[var(--line)] bg-[var(--panel-soft)]">
+        <div className="relative min-h-[150px] lg:min-h-full border-t lg:border-t-0 lg:border-l border-[var(--line)] bg-[var(--panel-soft)]">
           {!heroImgFailed ? (
             <img
               src={heroStudyDesk}
@@ -438,7 +444,7 @@ export const HomePage: React.FC = () => {
               <span className="font-display text-[14px] font-bold">estuda.gov.br</span>
             </div>
           )}
-          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/35 to-transparent px-4 py-2.5 text-white text-[11px] font-medium flex items-center justify-between gap-2">
+          <div className="absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/80 via-black/40 to-transparent px-4 py-2.5 text-white text-[11px] font-medium flex items-center justify-between gap-2">
             <span>Central de Atendimento ao Concurseiro</span>
             <span className="font-mono-num text-white/85">DF · BR</span>
           </div>

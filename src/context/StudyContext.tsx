@@ -13,6 +13,8 @@ import {
   createInitialDatabase,
   ensureSeededBlobs,
 } from '../data/seedData';
+import { resolveModuleFromLocation, syncUrlWithModule } from '../lib/moduleRoutes';
+import { publishStudySlices } from './studySliceStore';
 import {
   clearAllFileBlobs,
   clearDriveJsonCacheForScope,
@@ -1044,6 +1046,12 @@ interface StudyContextValue {
     index: number,
     toDay: WeekdayName,
     currentScheduleSnapshot?: ScheduleMap,
+  ) => void;
+  reorderScheduleTopic: (
+    day: WeekdayName,
+    fromIndex: number,
+    toIndex: number,
+    currentDayTopics?: ScheduleTopic[],
   ) => void;
   completeScheduleTopic: (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => void;
   archiveTopicAsIncomplete: (day: WeekdayName, index: number, currentSchedule: ScheduleMap) => void;
@@ -4094,11 +4102,25 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   }
 
   const [db, setDbState] = useState<StudyDatabase>(() => loadStoredDatabase(initialScope));
-  const [activePage, setActivePageState] = useState<ModuleName>('Início');
-  const setActivePage = useCallback((page: ModuleName) => {
+  const [activePage, setActivePageState] = useState<ModuleName>(() => resolveModuleFromLocation());
+  const setActivePage = useCallback((page: ModuleName, options?: { skipHistory?: boolean }) => {
     window.dispatchEvent(new CustomEvent('central-estudos:flush-drafts'));
     setExamFocusMode(false);
     setActivePageState(page);
+    if (!options?.skipHistory) {
+      syncUrlWithModule(page);
+    }
+  }, []);
+
+  useEffect(() => {
+    syncUrlWithModule(activePage, { replace: true });
+    const onPopState = () => {
+      const nextMod = resolveModuleFromLocation();
+      setActivePage(nextMod, { skipHistory: true });
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [lawDeepLink, setLawDeepLink] = useState<LawDeepLink | null>(null);
   const [selectedEditalContestId, setSelectedEditalContestId] = useState<string | null>(null);
@@ -13976,7 +13998,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               ...(defaultFixedSubject ? { disciplina_fixa: defaultFixedSubject } : {}),
               ...(defaultContest ? { concurso_alvo: defaultContest } : {}),
               materia: preset?.materia || '',
-              tempo: preset?.tempo || '1h',
+              tempo: preset?.tempo ?? '',
               observacoes: preset?.observacoes || '',
               ...(preset?.editalContestId ? { editalContestId: preset.editalContestId } : {}),
               ...(preset?.editalPointId ? { editalPointId: preset.editalPointId } : {}),
@@ -14061,6 +14083,27 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     [activeTimerTopic, scheduleAutoScheduleTxtSync, toast],
   );
 
+  const reorderScheduleTopic = useCallback(
+    (day: WeekdayName, fromIndex: number, toIndex: number, currentDayTopics?: ScheduleTopic[]) => {
+      if (fromIndex === toIndex || fromIndex < 0 || toIndex < 0) return;
+      lastUrgentSaveMsRef.current = Date.now();
+      setDb((prev) => {
+        const list = [...(currentDayTopics || prev.schedule[day] || [])];
+        if (fromIndex >= list.length || toIndex >= list.length) return prev;
+        const [moved] = list.splice(fromIndex, 1);
+        if (!moved) return prev;
+        list.splice(toIndex, 0, moved);
+        const nextSchedule: ScheduleMap = {
+          ...prev.schedule,
+          [day]: list,
+        };
+        return buildUpdatedWeeklyScheduleState(prev, nextSchedule, prev.scheduleDayDates);
+      });
+      scheduleAutoScheduleTxtSync();
+    },
+    [scheduleAutoScheduleTxtSync],
+  );
+
   const completeScheduleTopic = useCallback(
     (day: WeekdayName, index: number, currentDayTopics?: ScheduleTopic[]) => {
       const previewSnapshot = dbRef.current;
@@ -14082,22 +14125,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         previewRemoved.materia?.trim() ||
         'Estudo Geral';
       const previewManualSec = scheduleDurationSeconds(previewRemoved.tempo || '');
-      const previewLoggedFromRecords = previewRemoved.id
-        ? previewSnapshot.studyTimeRecords.reduce(
-            (sum, rec) =>
-              sum +
-              rec.allocations
-                .filter((a) => a.topicId === previewRemoved.id)
-                .reduce((s, a) => s + (a.seconds || 0), 0),
-            0,
-          )
-        : 0;
-      const previewAlreadyLogged = Math.max(
-        previewRemoved.estudado_segundos || 0,
-        previewLoggedFromRecords,
-      );
-      const previewCreditsSec =
-        previewManualSec > previewAlreadyLogged ? previewManualSec - previewAlreadyLogged : 0;
+      const previewCreditsSec = previewManualSec > 0 ? previewManualSec : 0;
       const linkedContestId = previewRemoved.editalContestId || '';
       const linkedPointId = previewRemoved.editalPointId || '';
 
@@ -14136,9 +14164,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
             )
           : 0;
         const alreadyLoggedSeconds = Math.max(removed.estudado_segundos || 0, loggedFromRecords);
-        const secondsToAdd =
-          manualSeconds > alreadyLoggedSeconds ? manualSeconds - alreadyLoggedSeconds : 0;
-        const effectiveTotalSeconds = Math.max(manualSeconds, alreadyLoggedSeconds);
+        const secondsToAdd = manualSeconds > 0 ? manualSeconds : 0;
+        const effectiveTotalSeconds = alreadyLoggedSeconds + secondsToAdd;
 
         let nextStudyTimeRecords = prev.studyTimeRecords;
         let createdRecordId: string | undefined;
@@ -14174,8 +14201,9 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         const nextSchedule = { ...prev.schedule, [day]: list };
         const formattedGoalTempo =
-          removed.tempo?.trim() ||
-          (effectiveTotalSeconds > 0 ? formatScheduleDuration(effectiveTotalSeconds) : '0min');
+          effectiveTotalSeconds > 0
+            ? formatScheduleDuration(effectiveTotalSeconds)
+            : removed.tempo?.trim() || '0min';
 
         // Bidirectional Edital sync: automatically mark linked Edital point as studied
         const nextContests =
@@ -14517,7 +14545,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         disciplina_fixa: target.subject,
         concurso_alvo: target.contestName || undefined,
         materia: `Revisão ${stageTag}: ${target.topic}`,
-        tempo: '30m',
+        tempo: '',
         observacoes: `Revisão espaçada (${stageTag}) · concluído originalmente em ${target.completedAt}`,
         ...(target.contestId ? { editalContestId: target.contestId } : {}),
         ...(target.source === 'edital' && target.sourceId ? { editalPointId: target.sourceId } : {}),
@@ -14979,8 +15007,8 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
         const manualSeconds = scheduleDurationSeconds(target.tempo || '');
         const alreadyLoggedSeconds = target.estudado_segundos || 0;
-        const secondsToAdd =
-          manualSeconds > alreadyLoggedSeconds ? manualSeconds - alreadyLoggedSeconds : 0;
+        const secondsToAdd = manualSeconds > 0 ? manualSeconds : 0;
+        const effectiveTotalSeconds = alreadyLoggedSeconds + secondsToAdd;
 
         let nextStudyTimeRecords = prev.studyTimeRecords;
         let createdRecordId: string | undefined;
@@ -15028,14 +15056,17 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
               data: goalDateBr,
               dia_semana: target.dia_semana,
               materia: target.materia,
-              tempo: target.tempo,
+              tempo:
+                effectiveTotalSeconds > 0
+                  ? formatScheduleDuration(effectiveTotalSeconds)
+                  : target.tempo || '0min',
               observacoes: target.observacoes,
               disciplina_fixa: resolvedSubject,
               ...(target.concurso_alvo ? { concurso_alvo: target.concurso_alvo } : {}),
               ...(target.topicId ? { topicId: target.topicId } : {}),
               ...(createdRecordId ? { studyRecordId: createdRecordId } : {}),
-              ...(Math.max(manualSeconds, alreadyLoggedSeconds) > 0
-                ? { estudado_segundos: Math.max(manualSeconds, alreadyLoggedSeconds) }
+              ...(effectiveTotalSeconds > 0
+                ? { estudado_segundos: effectiveTotalSeconds }
                 : {}),
             },
             ...prev.completedGoals,
@@ -18325,6 +18356,44 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     gasOperationQueue.length +
     driveUploadOutboxItems.length;
 
+  useEffect(() => {
+    publishStudySlices({
+      nav: { activePage },
+      sync: {
+        totalPendingSyncCount,
+        pendingLocalChangesCount,
+        hasPendingCloudChanges,
+        gasQueueCount: gasOperationQueue.length,
+        driveOutboxCount: driveUploadOutboxItems.length,
+        isSyncing: isSyncingDrive,
+        driveConnected,
+        gasConnected,
+        lastCloudSyncAt,
+      },
+      timer: {
+        timerRunning: timerState.startedAt > 0,
+        activeTimerTopic,
+        pomodoroMode,
+        pomodoroPhase,
+      },
+    });
+  }, [
+    activePage,
+    totalPendingSyncCount,
+    pendingLocalChangesCount,
+    hasPendingCloudChanges,
+    gasOperationQueue.length,
+    driveUploadOutboxItems.length,
+    isSyncingDrive,
+    driveConnected,
+    gasConnected,
+    lastCloudSyncAt,
+    timerState.startedAt,
+    activeTimerTopic,
+    pomodoroMode,
+    pomodoroPhase,
+  ]);
+
   const contextValue = useMemo<StudyContextValue>(
     () => ({
       db,
@@ -18427,6 +18496,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         addTopicToDay,
         deleteScheduleTopic,
         moveScheduleTopicToDay,
+        reorderScheduleTopic,
         completeScheduleTopic,
         archiveTopicAsIncomplete,
         archiveFullWeek,
@@ -18700,6 +18770,7 @@ export const StudyProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       addTopicToDay,
       deleteScheduleTopic,
       moveScheduleTopicToDay,
+      reorderScheduleTopic,
       completeScheduleTopic,
       archiveTopicAsIncomplete,
       archiveFullWeek,

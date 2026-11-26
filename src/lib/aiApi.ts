@@ -44,6 +44,94 @@ async function postAiRoute<T>(endpoint: string, body: Record<string, unknown>): 
   return data;
 }
 
+async function postAiSseRoute<T>(
+  endpoint: string,
+  body: Record<string, unknown>,
+  onChunk?: (delta: string, accumulated: string) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const headers = await getAuthHeaders();
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      ...headers,
+      Accept: 'text/event-stream',
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+
+  if (!res.ok) {
+    const errData = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(errData?.error || `Falha no streaming de IA (HTTP ${res.status}).`);
+  }
+
+  if (!res.body) {
+    throw new Error('Navegador sem suporte a leitura de fluxo SSE.');
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let accumulated = '';
+  let finalResult: T | null = null;
+  let streamError: string | null = null;
+
+  const processEventBlock = (block: string) => {
+    const lines = block.split(/\r?\n/);
+    let eventName = 'message';
+    const dataLines: string[] = [];
+    for (const line of lines) {
+      if (line.startsWith('event:')) {
+        eventName = line.slice(6).trim();
+      } else if (line.startsWith('data:')) {
+        dataLines.push(line.slice(5).trim());
+      }
+    }
+    if (!dataLines.length) return;
+    const rawData = dataLines.join('\n');
+    try {
+      const parsed = JSON.parse(rawData) as Record<string, unknown>;
+      if (eventName === 'chunk') {
+        const piece = typeof parsed.text === 'string' ? parsed.text : '';
+        if (piece) {
+          accumulated += piece;
+          onChunk?.(piece, accumulated);
+        }
+      } else if (eventName === 'done') {
+        finalResult = parsed as unknown as T;
+      } else if (eventName === 'error') {
+        streamError = typeof parsed.error === 'string' ? parsed.error : 'Erro durante a transmissão com IA.';
+      }
+    } catch {
+      // Ignore malformed partial SSE frame
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split('\n\n');
+    buffer = parts.pop() || '';
+    for (const part of parts) {
+      if (part.trim()) processEventBlock(part);
+    }
+  }
+
+  if (buffer.trim()) {
+    processEventBlock(buffer);
+  }
+
+  if (streamError) {
+    throw new Error(streamError);
+  }
+  if (!finalResult) {
+    throw new Error('A transmissão da IA encerrou sem retornar o resultado final.');
+  }
+  return finalResult;
+}
+
 export async function analyzeEditalWithAi(params: {
   text: string;
   defaultSubject?: string;
@@ -58,6 +146,18 @@ export async function reviewEssayWithAi(params: {
   banca?: string;
 }): Promise<AiEssayReviewResult> {
   return postAiRoute<AiEssayReviewResult>('/api/ai/review-essay', params);
+}
+
+export async function reviewEssayStreamWithAi(
+  params: {
+    title: string;
+    essayText: string;
+    banca?: string;
+  },
+  onChunk?: (delta: string, accumulated: string) => void,
+  signal?: AbortSignal,
+): Promise<AiEssayReviewResult> {
+  return postAiSseRoute<AiEssayReviewResult>('/api/ai/review-essay/stream', params, onChunk, signal);
 }
 
 export async function generateQuestionsWithAi(params: {
@@ -111,3 +211,19 @@ export async function analyzeSummaryWithAi(params: {
   return postAiRoute<AiSummaryAnalysisResponse>('/api/ai/analyze-summary', params);
 }
 
+export async function analyzeSummaryStreamWithAi(
+  params: {
+    subject: string;
+    title: string;
+    sourceText: string;
+  },
+  onChunk?: (delta: string, accumulated: string) => void,
+  signal?: AbortSignal,
+): Promise<AiSummaryAnalysisResponse> {
+  return postAiSseRoute<AiSummaryAnalysisResponse>(
+    '/api/ai/analyze-summary/stream',
+    { ...params, mode: 'summary' },
+    onChunk,
+    signal,
+  );
+}

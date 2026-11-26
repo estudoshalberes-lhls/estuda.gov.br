@@ -11,6 +11,7 @@ import {
   Printer,
   Search,
   Trash2,
+  Type,
   X,
 } from 'lucide-react';
 import {
@@ -62,6 +63,24 @@ export const DiscursivePage: React.FC = () => {
   const hideUpload = moduleVisibility('Discursiva').hide_upload;
 
   const [guideOpen, setGuideOpen] = useState(false);
+  const [editorialSerif, setEditorialSerif] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('ce-discursive-serif-mode') === '1';
+    } catch {
+      return false;
+    }
+  });
+  const toggleEditorialSerif = () => {
+    setEditorialSerif((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('ce-discursive-serif-mode', next ? '1' : '0');
+      } catch {
+        // ignore storage errors
+      }
+      return next;
+    });
+  };
   const [editingState, setEditingState] = useState<{
     id: string;
     tab: 'rubric' | 'rewrite';
@@ -263,11 +282,25 @@ export const DiscursivePage: React.FC = () => {
           description="Escreva na folha pautada cronometrada ou anexe arquivos, registre o espelho por banca, mapeie erros recorrentes e compare sua reescrita V2."
           actions={
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                onClick={toggleEditorialSerif}
+                aria-pressed={editorialSerif}
+                title="Alternar fonte serifada de leitura prolongada nas redações e pareceres"
+                className={`inline-flex items-center gap-1.5 h-[36px] px-3 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                  editorialSerif
+                    ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                    : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5" />
+                {editorialSerif ? 'Leitura Editorial: Ativa' : 'Leitura Editorial'}
+              </button>
               {!hideUpload && (
                 <button
                   type="button"
                   onClick={() => setGuideOpen((prev) => !prev)}
-                  className={`inline-flex items-center gap-1.5 h-[36px] px-3 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap ${
+                  className={`inline-flex items-center gap-1.5 h-[36px] px-3 rounded-lg border text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
                     guideOpen
                       ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
                       : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)]'
@@ -281,7 +314,7 @@ export const DiscursivePage: React.FC = () => {
                 type="button"
                 disabled={filteredEssays.length === 0}
                 onClick={() => triggerPrint(null)}
-                className="inline-flex items-center gap-1.5 h-[36px] px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45 whitespace-nowrap"
+                className="inline-flex items-center gap-1.5 h-[36px] px-3.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] disabled:opacity-45 whitespace-nowrap cursor-pointer"
               >
                 <Printer className="w-3.5 h-3.5" />
                 Imprimir Dossiê (A4)
@@ -752,7 +785,11 @@ export const DiscursivePage: React.FC = () => {
                   )}
 
                   {promptOpen && (essay.proposta || essay.espelho) && (
-                    <div className="mt-2.5 grid grid-cols-1 md:grid-cols-2 gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3 text-[12px]">
+                    <div
+                      className={`mt-2.5 grid grid-cols-1 md:grid-cols-2 gap-2.5 rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--panel-soft)] p-3.5 ${
+                        editorialSerif ? 'ce-editorial-serif' : 'text-[12.5px]'
+                      }`}
+                    >
                       {essay.proposta && (
                         <div>
                           <strong className="block text-[10.5px] uppercase tracking-wider text-[var(--muted)] mb-1">
@@ -780,12 +817,12 @@ export const DiscursivePage: React.FC = () => {
 
                   {essay.feedback.trim() && (
                     <div className="ce-notice mt-3 text-[var(--text)]">
-                      <strong className="block text-[11px] uppercase tracking-wider text-[var(--muted)] mb-1">
+                      <strong className="block text-[11.5px] font-bold text-[var(--muted)] mb-1">
                         Parecer da correção
                       </strong>
                       <StructuredLegalText
                         text={essay.feedback}
-                        className="text-[12.5px] text-[var(--text)]"
+                        className={`text-[var(--text)] ${editorialSerif ? 'ce-editorial-serif' : 'text-[12.5px]'}`}
                       />
                     </div>
                   )}
@@ -799,8 +836,8 @@ export const DiscursivePage: React.FC = () => {
 
                   {compareOpen && essay.texto_original && essay.reescrita?.texto && (
                     <div className="mt-3 grid grid-cols-1 lg:grid-cols-2 gap-3">
-                      <div className="rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3">
-                        <div className="flex items-center justify-between gap-2 pb-1.5 mb-2 border-b border-[var(--line)] text-[11px] font-extrabold uppercase tracking-wider text-[var(--muted)]">
+                      <div className="rounded-[var(--radius-md)] border border-[var(--line)] bg-[var(--panel-soft)] p-3.5">
+                        <div className="flex items-center justify-between gap-2 pb-1.5 mb-2 border-b border-[var(--line)] text-[11.5px] font-bold text-[var(--muted)]">
                           <span>Versão 1 (Original)</span>
                           <span className="font-mono-num tabular-nums">
                             {essay.linhas_escritas ||
@@ -809,13 +846,17 @@ export const DiscursivePage: React.FC = () => {
                             {essay.rubrica ? ` · ${essay.rubrica.notaFinal.toFixed(2)} pts` : ''}
                           </span>
                         </div>
-                        <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-[var(--text)]/85 max-h-[340px] overflow-y-auto pr-1">
+                        <div
+                          className={`whitespace-pre-wrap text-[var(--text)]/90 max-h-[340px] overflow-y-auto pr-1 ${
+                            editorialSerif ? 'ce-editorial-serif' : 'text-[12.5px] leading-relaxed'
+                          }`}
+                        >
                           {essay.texto_original}
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-[var(--good)]/45 bg-[var(--good)]/6 p-3">
-                        <div className="flex items-center justify-between gap-2 pb-1.5 mb-2 border-b border-[var(--good)]/25 text-[11px] font-extrabold uppercase tracking-wider text-[var(--good)]">
+                      <div className="rounded-[var(--radius-md)] border border-[var(--good)]/45 bg-[var(--good)]/6 p-3.5">
+                        <div className="flex items-center justify-between gap-2 pb-1.5 mb-2 border-b border-[var(--good)]/25 text-[11.5px] font-bold text-[var(--good)]">
                           <span>Versão 2 (Reescrita)</span>
                           <span className="font-mono-num tabular-nums">
                             {essay.reescrita.linhas_escritas ||
@@ -831,7 +872,11 @@ export const DiscursivePage: React.FC = () => {
                             Ajustes: {essay.reescrita.observacoes}
                           </div>
                         )}
-                        <div className="whitespace-pre-wrap text-[12.5px] leading-relaxed text-[var(--text)] max-h-[340px] overflow-y-auto pr-1">
+                        <div
+                          className={`whitespace-pre-wrap text-[var(--text)] max-h-[340px] overflow-y-auto pr-1 ${
+                            editorialSerif ? 'ce-editorial-serif' : 'text-[12.5px] leading-relaxed'
+                          }`}
+                        >
                           {essay.reescrita.texto}
                         </div>
                       </div>

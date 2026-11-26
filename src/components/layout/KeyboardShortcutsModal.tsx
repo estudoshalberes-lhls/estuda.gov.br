@@ -27,6 +27,7 @@ export const KEYBOARD_SHORTCUT_GROUPS: ReadonlyArray<ShortcutGroup> = [
   {
     title: 'Estudo & Foco',
     items: [
+      { keys: ['Ctrl', 'K'], label: 'Abrir busca global (módulos, leis, resumos e cronograma)' },
       { keys: ['Alt', 'P'], label: 'Iniciar ou pausar o cronômetro de estudos' },
       { keys: ['Alt', 'Shift', 'F'], label: 'Ativar ou sair do Modo Foco' },
       { keys: ['?'], label: 'Abrir ou fechar este guia de atalhos' },
@@ -73,14 +74,14 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({ 
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/55 backdrop-blur-[1px]"
+      className="ce-backdrop-enter fixed inset-0 z-[70] flex items-center justify-center p-4 bg-black/55 backdrop-blur-[2px]"
       onClick={onClose}
       role="dialog"
       aria-modal="true"
       aria-labelledby="keyboard-shortcuts-title"
     >
       <div
-        className="w-full max-w-[580px] max-h-[85vh] overflow-y-auto rounded-xl border border-[var(--line-strong)] bg-[var(--panel)] shadow-2xl"
+        className="ce-modal-enter w-full max-w-[580px] max-h-[85vh] overflow-y-auto rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between gap-3 px-5 py-4 border-b border-[var(--line)]">
@@ -111,7 +112,7 @@ export const KeyboardShortcutsModal: React.FC<KeyboardShortcutsModalProps> = ({ 
         <div className="p-5 space-y-5">
           {KEYBOARD_SHORTCUT_GROUPS.map((group) => (
             <section key={group.title}>
-              <h3 className="m-0 mb-2 text-[11px] font-extrabold uppercase tracking-[0.08em] text-[var(--muted)]">
+              <h3 className="m-0 mb-2 text-[12px] font-bold text-[var(--muted)]">
                 {group.title}
               </h3>
               <div className="divide-y divide-[var(--line)] border border-[var(--line)] rounded-lg bg-[var(--panel-soft)]/50">

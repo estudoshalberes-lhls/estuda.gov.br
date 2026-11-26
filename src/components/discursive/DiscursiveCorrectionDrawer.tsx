@@ -10,7 +10,7 @@ import {
   Wand2,
 } from 'lucide-react';
 import { UpdateEssayCorrectionOptions } from '../../context/StudyContext';
-import { reviewEssayWithAi } from '../../lib/aiApi';
+import { reviewEssayStreamWithAi, reviewEssayWithAi } from '../../lib/aiApi';
 import {
   computeRubricFinalScore,
   ESSAY_BANKS,
@@ -192,23 +192,37 @@ export const DiscursiveCorrectionDrawer: React.FC<DiscursiveCorrectionDrawerProp
       if (espelho.trim()) enrichedParts.push(`ESPELHO DE REFERÊNCIA:\n${espelho.trim()}`);
       enrichedParts.push(`REDAÇÃO DO CANDIDATO:\n${essayText}`);
 
-      const res = await reviewEssayWithAi({
+      const payload = {
         title: visibleName(essay.titulo),
         essayText: enrichedParts.join('\n\n'),
         banca,
-      });
+      };
 
-      const sections: string[] = [];
-      if (res.scoreEstimate) sections.push(`Nota estimada: ${res.scoreEstimate}`);
-      if (res.feedback) sections.push(res.feedback);
-      if (res.strengths?.length) {
-        sections.push(`Pontos fortes:\n- ${res.strengths.join('\n- ')}`);
+      let res;
+      try {
+        setFeedbackDraft('');
+        res = await reviewEssayStreamWithAi(payload, (_delta, accumulated) => {
+          setFeedbackDraft(accumulated);
+        });
+      } catch {
+        res = await reviewEssayWithAi(payload);
       }
-      if (res.improvements?.length) {
-        sections.push(`Pontos a melhorar:\n- ${res.improvements.join('\n- ')}`);
+
+      if (res.feedback && !res.feedback.includes('Pontos fortes:') && (res.strengths?.length || res.improvements?.length)) {
+        const sections: string[] = [];
+        if (res.scoreEstimate) sections.push(`Nota estimada: ${res.scoreEstimate}`);
+        if (res.feedback) sections.push(res.feedback);
+        if (res.strengths?.length) {
+          sections.push(`Pontos fortes:\n- ${res.strengths.join('\n- ')}`);
+        }
+        if (res.improvements?.length) {
+          sections.push(`Pontos a melhorar:\n- ${res.improvements.join('\n- ')}`);
+        }
+        setFeedbackDraft(sections.join('\n\n'));
+      } else if (res.feedback) {
+        setFeedbackDraft(res.feedback);
       }
-      setFeedbackDraft(sections.join('\n\n'));
-      onNotify('Parecer preliminar gerado por IA. Revise e ajuste o espelho antes de salvar.');
+      onNotify('Parecer preliminar gerado por IA em tempo real. Revise e ajuste o espelho antes de salvar.');
     } catch (err) {
       onNotify((err as Error).message || 'Falha ao corrigir redação com IA.', true);
     } finally {

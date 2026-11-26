@@ -13,8 +13,10 @@ import {
   Menu,
   Minimize2,
   Moon,
+  MoreHorizontal,
   RefreshCw,
   RotateCcw,
+  Search,
   SlidersHorizontal,
   Sun,
   Timer,
@@ -37,6 +39,7 @@ interface TopbarProps {
   studyFocusMode?: boolean;
   onToggleStudyFocus?: () => void;
   onOpenShortcuts?: () => void;
+  onOpenCommandPalette?: () => void;
 }
 
 const DEFAULT_QUICK_MODULES: [ModuleName, ModuleName, ModuleName] = [
@@ -87,7 +90,7 @@ const TopbarWallClock: React.FC = React.memo(() => {
       title={fullDateTitle}
       className="hidden xl:flex flex-col justify-center leading-none pr-2.5 border-r border-[var(--line)] h-7"
     >
-      <span className="text-[8px] font-extrabold tracking-[0.14em] text-[var(--muted)] uppercase whitespace-nowrap leading-none mb-1">
+      <span className="text-[9.5px] font-semibold text-[var(--muted)] whitespace-nowrap leading-none mb-1 tabular-nums">
         {dateText}
       </span>
       <strong className="font-mono-num text-[12.5px] font-bold text-[var(--text)] tabular-nums leading-none">
@@ -129,17 +132,17 @@ const TopbarTimerReadout: React.FC = React.memo(() => {
       }`}
     >
       <span
-        className={`text-[8px] font-extrabold tracking-[0.14em] uppercase whitespace-nowrap leading-none mb-1 transition-colors ${
-          timerRunning ? 'text-white' : 'text-[var(--muted)]'
+        className={`text-[9.5px] font-semibold whitespace-nowrap leading-none mb-0.5 transition-colors tabular-nums ${
+          timerRunning ? 'text-white/90' : 'text-[var(--muted)]'
         }`}
       >
         {pomodoroMode === 'continuous'
           ? startedAtClock
-            ? `CRONÔMETRO · ${startedAtClock}`
-            : 'CRONÔMETRO'
+            ? `Cronômetro · ${startedAtClock}`
+            : 'Cronômetro'
           : pomodoroPhase === 'focus'
-          ? `POMO ${pomodoroMode === 'custom' ? 'PERS.' : pomodoroMode}${startedAtClock ? ` · ${startedAtClock}` : ''}`
-          : 'PAUSA'}
+          ? `Pomo ${pomodoroMode === 'custom' ? 'Pers.' : pomodoroMode}${startedAtClock ? ` · ${startedAtClock}` : ''}`
+          : 'Pausa'}
       </span>
       <strong
         className={`font-mono-num text-[13px] font-extrabold tabular-nums leading-none transition-colors ${
@@ -198,7 +201,13 @@ const FocusCompactTimer: React.FC<{ onToggleTimer: () => void }> = React.memo(({
 });
 
 export const Topbar: React.FC<TopbarProps> = React.memo(
-  ({ onExitToLogin, studyFocusMode = false, onToggleStudyFocus, onOpenShortcuts }) => {
+  ({
+    onExitToLogin,
+    studyFocusMode = false,
+    onToggleStudyFocus,
+    onOpenShortcuts,
+    onOpenCommandPalette,
+  }) => {
   const {
     db,
     activePage,
@@ -250,9 +259,10 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
   const [pickerDay, setPickerDay] = useState<WeekdayName>(todayWeekday);
   const linkPopoverRef = useRef<HTMLDivElement | null>(null);
 
-  // Quick access 3 customizable modules state
+  // Quick access 3 customizable modules state & unified utilities menu
   const [quickConfigOpen, setQuickConfigOpen] = useState(false);
-  const quickPopoverRef = useRef<HTMLDivElement | null>(null);
+  const [moreMenuOpen, setMoreMenuOpen] = useState(false);
+  const morePopoverRef = useRef<HTMLDivElement | null>(null);
 
   // Unsynced pending changes popover
   const [pendingSyncOpen, setPendingSyncOpen] = useState(false);
@@ -287,18 +297,19 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
         setLinkMenuOpen(false);
         setPomoMenuOpen(false);
       }
-      if (quickPopoverRef.current && !quickPopoverRef.current.contains(e.target as Node)) {
+      if (morePopoverRef.current && !morePopoverRef.current.contains(e.target as Node)) {
+        setMoreMenuOpen(false);
         setQuickConfigOpen(false);
       }
       if (pendingPopoverRef.current && !pendingPopoverRef.current.contains(e.target as Node)) {
         setPendingSyncOpen(false);
       }
     };
-    if (linkMenuOpen || pomoMenuOpen || quickConfigOpen || pendingSyncOpen) {
+    if (linkMenuOpen || pomoMenuOpen || moreMenuOpen || quickConfigOpen || pendingSyncOpen) {
       document.addEventListener('mousedown', handleOutside);
     }
     return () => document.removeEventListener('mousedown', handleOutside);
-  }, [linkMenuOpen, pomoMenuOpen, quickConfigOpen, pendingSyncOpen]);
+  }, [linkMenuOpen, pomoMenuOpen, moreMenuOpen, quickConfigOpen, pendingSyncOpen]);
 
   const handleSyncPendingNow = async () => {
     if (manualSyncing) return;
@@ -364,196 +375,63 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
     );
   }
 
-  const QUICK_THEME_CYCLE: ReadonlyArray<{ id: ThemeId; label: string }> = [
+  const QUICK_THEME_OPTIONS: ReadonlyArray<{ id: ThemeId; label: string }> = [
     { id: 'gov-padrao', label: 'Claro' },
     { id: 'gov-escuro', label: 'Escuro' },
     { id: 'reading-comfort', label: 'Leitura' },
   ];
   const currentThemeId = db.preferences?.tema || 'gov-padrao';
-  const handleCycleQuickTheme = () => {
-    const idx = QUICK_THEME_CYCLE.findIndex((t) => t.id === currentThemeId);
-    const next = QUICK_THEME_CYCLE[(idx + 1) % QUICK_THEME_CYCLE.length];
-    updatePreferences({ tema: next.id });
-    toast(`Tema alterado para ${next.label}.`);
+  const handleSelectQuickTheme = (themeId: ThemeId, label: string) => {
+    updatePreferences({ tema: themeId });
+    toast(`Tema alterado para ${label}.`);
   };
-  const nextQuickTheme =
-    QUICK_THEME_CYCLE[
-      (QUICK_THEME_CYCLE.findIndex((t) => t.id === currentThemeId) + 1) % QUICK_THEME_CYCLE.length
-    ];
 
   return (
-    <header className="sticky top-0 z-30 flex items-center justify-between flex-nowrap gap-2 px-3 sm:px-4 h-[56px] border-b border-[var(--line)] bg-[var(--panel)] w-full shadow-xs">
-      {/* Menu + Título */}
-      <div className="flex items-center gap-2 min-w-0 shrink-0 h-9 sm:h-10">
+    <header className="sticky top-0 z-30 flex items-center justify-between flex-nowrap gap-3 px-3 sm:px-5 h-[56px] border-b border-[var(--line)] bg-[var(--panel)]/95 backdrop-blur-xs w-full">
+      {/* Zona 1: Menu Mobile + Contexto do Módulo */}
+      <div className="flex items-center gap-2.5 min-w-0 shrink-0 h-9">
         <button
           type="button"
           onClick={() => setMobileOpen(true)}
           aria-label="Abrir menu"
-          className="mobile-menu-btn w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 grid place-items-center"
+          className="mobile-menu-btn w-9 h-9 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 grid place-items-center"
         >
           <Menu className="w-4 h-4" />
         </button>
         <div className="min-w-0 hidden sm:flex items-center gap-2.5">
-          <span className="grid place-items-center w-8 h-8 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] shrink-0">
+          <span className="grid place-items-center w-8 h-8 rounded-lg bg-[var(--panel-soft)] border border-[var(--line)] shrink-0">
             <ModuleIcon
               name={MODULES.find((m) => m.name === activePage)?.icon || 'home'}
-              className="w-[18px] h-[18px] shrink-0"
+              className="w-[17px] h-[17px] shrink-0"
             />
           </span>
           <div className="min-w-0 flex flex-col justify-center">
-            <div className="flex items-center gap-1.5 text-[10px] font-bold tracking-[0.06em] uppercase text-[var(--accent)] leading-none mb-1">
-              <span>estuda.gov.br</span>
+            <div className="flex items-center gap-1 text-[10.5px] font-semibold text-[var(--muted)] leading-none mb-0.5">
+              <span className="text-[var(--accent)] font-bold">estuda.gov.br</span>
               <span className="text-[var(--subtle)]">/</span>
-              <span className="text-[var(--muted)] font-semibold">Portal Único</span>
+              <span className="truncate">Portal Único</span>
             </div>
-            <h1 className="m-0 font-display text-[14.5px] font-extrabold tracking-[-0.02em] leading-none text-[var(--text)] truncate max-w-[195px]">
+            <h1 className="m-0 font-display text-[14px] font-extrabold tracking-[-0.015em] leading-none text-[var(--text)] truncate max-w-[200px]">
               {getGovModuleLabel(activePage)}
             </h1>
           </div>
         </div>
       </div>
 
-      {/* Meta do Dia do Expediente + Post-it Permanente */}
-      <div className="flex-1 min-w-[140px] sm:min-w-[220px] max-w-[400px] h-9 sm:h-10 flex items-center gap-1.5">
-        <div className="flex-1 min-w-0 h-full">
-          <DailyGoalWidget />
-        </div>
-        <PostItWidget />
-      </div>
-
-      {/* 3 Módulos de Acesso Rápido + Configurações */}
-      <div
-        ref={quickPopoverRef}
-        className="relative hidden md:flex items-center h-10 p-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-soft)] shrink-0"
-        aria-label="Acesso rápido a 3 módulos"
-      >
-        <div className="flex items-center h-8 rounded-lg overflow-hidden border border-[var(--line-strong)] bg-[var(--panel-raised)] divide-x divide-[var(--line-strong)]">
-          {quickModules.map((modName, idx) => {
-            const isCurrent = activePage === modName;
-            const moduleInfo = MODULES.find((m) => m.name === modName);
-            const iconName = moduleInfo ? moduleInfo.icon : 'home';
-            const displayLabel = getGovModuleLabel(modName);
-            return (
-              <button
-                key={`${idx}-${modName}`}
-                type="button"
-                onClick={() => setActivePage(modName)}
-                title={`Abrir ${displayLabel}`}
-                aria-label={`Abrir ${displayLabel}`}
-                className={`grid place-items-center w-9 h-full text-[12px] font-bold transition-colors cursor-pointer ${
-                  isCurrent
-                    ? 'bg-[var(--accent-soft)] ring-1 ring-inset ring-[var(--accent)]'
-                    : 'bg-transparent hover:bg-[var(--panel-soft)]'
-                }`}
-              >
-                <ModuleIcon name={iconName} className="w-[17px] h-[17px] shrink-0" />
-              </button>
-            );
-          })}
-
-          <button
-            type="button"
-            onClick={() => setQuickConfigOpen((v) => !v)}
-            aria-label="Configurar módulos de acesso rápido nas configurações"
-            title="Configurar módulos de acesso rápido"
-            className={`grid place-items-center w-9 h-full transition-colors shrink-0 ${
-              quickConfigOpen
-                ? 'bg-[var(--accent-soft)] text-[var(--accent)]'
-                : 'bg-transparent text-[var(--muted)] hover:bg-[var(--panel-soft)] hover:text-[var(--text)]'
-            }`}
-          >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-          </button>
-        </div>
-
-        {quickConfigOpen && (
-          <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[320px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
-            <div className="flex items-center justify-between gap-2 pb-2.5 mb-2.5 border-b border-[var(--line)]">
-              <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
-                Configurar Atalhos Rápidos (1, 2, 3)
-              </strong>
-              <button
-                type="button"
-                onClick={() => setQuickConfigOpen(false)}
-                className="grid place-items-center w-6 h-6 rounded-lg border border-transparent text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-soft)] transition-colors"
-                aria-label="Fechar"
-              >
-                <X className="w-3.5 h-3.5" />
-              </button>
-            </div>
-
-            <div className="flex flex-col gap-2 mb-3">
-              {([0, 1, 2] as const).map((slotIdx) => {
-                const slotModule = MODULES.find((m) => m.name === quickModules[slotIdx]);
-                return (
-                  <div
-                    key={slotIdx}
-                    className="rounded-xl border p-2 border-[var(--line)] bg-[var(--panel-soft)] flex flex-col gap-1.5"
-                  >
-                    <div className="flex items-center justify-between gap-2 text-[10.5px] font-bold text-[var(--muted)]">
-                      <span className="inline-flex items-center gap-1.5">
-                        <ModuleIcon name={slotModule ? slotModule.icon : 'home'} className="w-4 h-4 shrink-0" />
-                        <span>Atalho #{slotIdx + 1}</span>
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setActivePage(quickModules[slotIdx]);
-                          setQuickConfigOpen(false);
-                        }}
-                        className="text-[var(--accent)] hover:underline font-bold"
-                      >
-                        Ir agora
-                      </button>
-                    </div>
-                    <select
-                      aria-label={`Atalho ${slotIdx + 1}`}
-                      value={quickModules[slotIdx]}
-                      onChange={(e) => {
-                        setQuickModuleAtSlot(slotIdx, e.target.value as ModuleName);
-                      }}
-                      className="ce-select w-full text-[11.5px] h-8 py-0 px-2.5 font-semibold"
-                    >
-                      {MODULES.map((m) => (
-                        <option key={m.name} value={m.name}>
-                          {getGovModuleLabel(m.name)}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div className="flex items-center justify-between gap-2 pt-2.5 border-t border-[var(--line)] text-[11px]">
-              <button
-                type="button"
-                onClick={() => {
-                  updatePreferences({ quick_access_modules: [...DEFAULT_QUICK_MODULES] });
-                  toast('Atalhos restaurados.');
-                }}
-                className="inline-flex items-center h-7 px-2 rounded-lg text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-soft)] font-semibold transition-colors"
-              >
-                Restaurar padrão
-              </button>
-              <button
-                type="button"
-                onClick={() => setQuickConfigOpen(false)}
-                className="inline-flex items-center justify-center h-7 px-3 rounded-lg border border-[var(--accent)] bg-[var(--accent)] text-white font-bold"
-              >
-                Salvar
-              </button>
-            </div>
+      {/* Zona 2: Meta do Dia, Post-it e Cronômetro */}
+      <div className="flex items-center justify-center gap-2 flex-1 min-w-0">
+        <div className="flex-1 min-w-[130px] sm:min-w-[200px] max-w-[360px] h-9 flex items-center gap-1.5">
+          <div className="flex-1 min-w-0 h-full">
+            <DailyGoalWidget />
           </div>
-        )}
-      </div>
+          <PostItWidget />
+        </div>
 
-      {/* Relógio, Cronômetro e Ações */}
-      <div
-        ref={linkPopoverRef}
-        className="relative flex items-center justify-between sm:justify-start w-full sm:w-auto gap-1.5 sm:gap-2.5 min-h-10 px-2 sm:px-2.5 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] shrink-0"
-        aria-label="Cronômetro"
-      >
+        <div
+          ref={linkPopoverRef}
+          className="relative flex items-center justify-between sm:justify-start gap-1.5 sm:gap-2 min-h-9 px-2 sm:px-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] shrink-0"
+          aria-label="Cronômetro"
+        >
         <TopbarWallClock />
 
         <TopbarTimerReadout />
@@ -630,7 +508,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
         </div>
 
         {pomoMenuOpen && (
-          <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+          <div className="ce-popover-enter absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
             <div className="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-[var(--line)]">
               <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
                 Modo Pomodoro &amp; Ponto Eletrônico
@@ -729,7 +607,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
         )}
 
         {linkMenuOpen && (
-          <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[320px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+          <div className="ce-popover-enter absolute right-0 top-[calc(100%+8px)] z-40 w-[320px] max-w-[92vw] rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
             <div className="flex items-center justify-between gap-2 pb-2.5 mb-2.5 border-b border-[var(--line)]">
               <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
                 Vincular ao Cronograma
@@ -813,25 +691,25 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
             </div>
           </div>
         )}
+        </div>
       </div>
 
-      {/* Ícones Minimalistas: Modo Foco, Instalar PWA, Status Drive, Google e Tela Inicial */}
-      <div className="flex items-center gap-1 sm:gap-1.5 h-9 sm:h-10 shrink-0">
-        <button
-          type="button"
-          onClick={handleCycleQuickTheme}
-          aria-label={`Alternar tema rápido (próximo: ${nextQuickTheme.label})`}
-          title={`Alternar tema rápido: Claro · Escuro · Leitura (próximo: ${nextQuickTheme.label})`}
-          className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
-        >
-          {currentThemeId === 'reading-comfort' ? (
-            <BookOpenText className="w-4 h-4 text-[var(--accent)]" />
-          ) : currentThemeId === 'gov-escuro' || currentThemeId.startsWith('black-') ? (
-            <Moon className="w-4 h-4 text-[var(--accent)]" />
-          ) : (
-            <Sun className="w-4 h-4" />
-          )}
-        </button>
+      {/* Zona 3: Busca Ctrl+K, Modo Foco, Sync Ativo e Menu Rápido Consolidado */}
+      <div className="flex items-center gap-1.5 h-9 shrink-0">
+        {onOpenCommandPalette && (
+          <button
+            type="button"
+            onClick={onOpenCommandPalette}
+            aria-label="Busca global (Ctrl+K)"
+            title="Busca global em módulos, leis, resumos e cronograma (Ctrl+K)"
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] text-[11.5px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+          >
+            <Search className="w-3.5 h-3.5 shrink-0" />
+            <span className="hidden xl:inline text-[11px] font-mono-num text-[var(--subtle)]">
+              Ctrl+K
+            </span>
+          </button>
+        )}
 
         {onToggleStudyFocus && (
           <button
@@ -840,22 +718,10 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
             aria-pressed="false"
             aria-label="Ativar Modo Foco"
             title="Ativar Modo Foco (Alt+Shift+F) — oculta barra lateral, barra Gov e rodapé"
-            className="inline-flex items-center justify-center gap-1.5 h-9 sm:h-10 px-2.5 sm:px-3 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11.5px] font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="inline-flex items-center justify-center gap-1.5 h-9 px-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)] hover:text-[var(--accent)] text-[11.5px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             <Focus className="w-3.5 h-3.5 shrink-0" />
-            <span className="hidden lg:inline">Modo Foco</span>
-          </button>
-        )}
-
-        {onOpenShortcuts && (
-          <button
-            type="button"
-            onClick={onOpenShortcuts}
-            aria-label="Atalhos de teclado"
-            title="Atalhos de teclado (?)"
-            className="hidden lg:grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--accent)] hover:border-[var(--accent)] transition-colors shrink-0 cursor-pointer"
-          >
-            <Keyboard className="w-4 h-4" />
+            <span className="hidden lg:inline">Foco</span>
           </button>
         )}
 
@@ -868,7 +734,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
             disabled={isSyncingDrive}
             aria-label="Autorizar pasta do Google Drive"
             title={`Autorizar acesso aos backups da pasta "${drivePermissionNeedsPicker.folderName}" no Google Drive`}
-            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg border border-[var(--warning)]/60 bg-[var(--warning)]/15 text-[var(--warning)] text-[11px] font-bold hover:bg-[var(--warning)]/25 transition-colors shrink-0 whitespace-nowrap"
           >
             <CloudOff className="w-3.5 h-3.5 shrink-0" />
             <span className="hidden sm:inline">Autorizar Drive</span>
@@ -877,7 +743,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
           <span
             aria-label="Sincronizando sessão do Google Drive"
             title="Validando conexão com o Google Drive em segundo plano…"
-            className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2 sm:px-2.5 rounded-xl border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold shrink-0 whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg border border-[var(--accent)]/40 bg-[var(--accent-soft)] text-[var(--accent)] text-[11px] font-bold shrink-0 whitespace-nowrap"
           >
             <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
             <span className="hidden sm:inline">Sincronizando…</span>
@@ -893,7 +759,7 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
                   ? `${totalPendingSyncCount} alteração(ões) local(is) aguardando envio para a nuvem`
                   : `${totalPendingSyncCount} alteração(ões) salva(s) apenas localmente (conecte a nuvem para sincronizar)`
               }
-              className="inline-flex items-center gap-1.5 h-9 sm:h-10 px-2.5 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap cursor-pointer"
+              className="inline-flex items-center gap-1.5 h-9 px-2.5 rounded-lg border border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0 whitespace-nowrap cursor-pointer"
             >
               {isSyncingDrive || manualSyncing ? (
                 <RefreshCw className="w-3.5 h-3.5 text-[var(--accent)] animate-spin shrink-0" />
@@ -903,13 +769,10 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
               <span className="font-mono-num text-[11.5px] font-bold tabular-nums">
                 {totalPendingSyncCount}
               </span>
-              <span className="hidden lg:inline text-[11px] font-semibold text-[var(--muted)]">
-                {totalPendingSyncCount === 1 ? 'pendente' : 'pendentes'}
-              </span>
             </button>
 
             {pendingSyncOpen && (
-              <div className="absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-2xl border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+              <div className="ce-popover-enter absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
                 <div className="flex items-center justify-between gap-2 pb-2 mb-2.5 border-b border-[var(--line)]">
                   <strong className="text-[12px] font-extrabold text-[var(--text)] leading-none">
                     Pendências de Sincronização
@@ -990,42 +853,216 @@ export const Topbar: React.FC<TopbarProps> = React.memo(
 
         <GasConnectionTopbarWidget />
 
-        <button
-          type="button"
-          onClick={() => setPushModalOpen(true)}
-          aria-label="Alertas Push de Metas Diárias"
-          title={
-            pushAlertsActive
-              ? 'Notificações Push de metas diárias ativas — clique para configurar'
-              : 'Configurar notificações Push de metas diárias'
-          }
-          className={`relative grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border transition-colors shrink-0 cursor-pointer ${
-            pushAlertsActive
-              ? 'border-[var(--good)]/50 bg-[var(--good)]/10 text-[var(--good)] hover:border-[var(--good)]'
-              : 'border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
-          }`}
-        >
-          {pushAlertsActive ? (
-            <BellRing className="w-4 h-4" />
-          ) : (
-            <Bell className="w-4 h-4" />
-          )}
-          {pushAlertsActive && (
-            <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[var(--good)]" />
-          )}
-        </button>
-
-        {onExitToLogin && (
+        {/* Menu Rápido Consolidado: Tema, Atalhos 1-2-3, Alertas Push, Teclado e Tela Inicial */}
+        <div ref={morePopoverRef} className="relative shrink-0">
           <button
             type="button"
-            onClick={onExitToLogin}
-            aria-label="Tela Inicial"
-            title="Tela Inicial"
-            className="grid place-items-center w-9 h-9 sm:w-10 sm:h-10 rounded-xl border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)] transition-colors shrink-0"
+            onClick={() => {
+              setMoreMenuOpen((v) => !v);
+              setQuickConfigOpen(false);
+            }}
+            aria-expanded={moreMenuOpen}
+            aria-label="Preferências rápidas e utilitários"
+            title="Tema, atalhos rápidos, alertas Push e mais opções"
+            className={`relative grid place-items-center w-9 h-9 rounded-lg border transition-colors shrink-0 cursor-pointer ${
+              moreMenuOpen
+                ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)]'
+                : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--muted)] hover:text-[var(--text)] hover:border-[var(--accent)]'
+            }`}
           >
-            <Home className="w-4 h-4" />
+            <MoreHorizontal className="w-4 h-4" />
+            {pushAlertsActive && (
+              <span
+                className="sr-only"
+                aria-label="Notificações Push ativas"
+              >
+                Push ativo
+              </span>
+            )}
           </button>
-        )}
+
+          {moreMenuOpen && (
+            <div className="ce-popover-enter absolute right-0 top-[calc(100%+8px)] z-40 w-[300px] max-w-[92vw] rounded-[var(--radius-lg)] border border-[var(--line-strong)] bg-[var(--panel)] p-3.5 shadow-xl">
+              {/* Aparência (Claro / Escuro / Leitura) */}
+              <div className="pb-3 mb-3 border-b border-[var(--line)]">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11.5px] font-bold text-[var(--text)]">Tema rápido</span>
+                  <span className="text-[10.5px] text-[var(--muted)]">
+                    {currentThemeId === 'reading-comfort'
+                      ? 'Leitura'
+                      : currentThemeId === 'gov-escuro' || currentThemeId.startsWith('black-')
+                        ? 'Escuro'
+                        : 'Claro'}
+                  </span>
+                </div>
+                <div className="grid grid-cols-3 gap-1 p-1 rounded-lg bg-[var(--panel-soft)] border border-[var(--line)]">
+                  {QUICK_THEME_OPTIONS.map((opt) => {
+                    const active = currentThemeId === opt.id;
+                    return (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => handleSelectQuickTheme(opt.id, opt.label)}
+                        className={`inline-flex items-center justify-center gap-1 h-7 rounded-md text-[11px] font-bold transition-colors cursor-pointer ${
+                          active
+                            ? 'bg-[var(--panel)] text-[var(--accent)] shadow-xs border border-[var(--line)]'
+                            : 'text-[var(--muted)] hover:text-[var(--text)]'
+                        }`}
+                      >
+                        {opt.id === 'gov-padrao' ? (
+                          <Sun className="w-3 h-3" />
+                        ) : opt.id === 'gov-escuro' ? (
+                          <Moon className="w-3 h-3" />
+                        ) : (
+                          <BookOpenText className="w-3 h-3" />
+                        )}
+                        <span>{opt.label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Atalhos Rápidos (1, 2, 3) */}
+              <div className="pb-3 mb-3 border-b border-[var(--line)]">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11.5px] font-bold text-[var(--text)]">Atalhos rápidos</span>
+                  <button
+                    type="button"
+                    onClick={() => setQuickConfigOpen((v) => !v)}
+                    className="inline-flex items-center gap-1 text-[11px] font-semibold text-[var(--accent)] hover:underline cursor-pointer bg-transparent border-0 p-0"
+                  >
+                    <SlidersHorizontal className="w-3 h-3" />
+                    {quickConfigOpen ? 'Concluir' : 'Personalizar'}
+                  </button>
+                </div>
+
+                {!quickConfigOpen ? (
+                  <div className="grid grid-cols-3 gap-1.5">
+                    {quickModules.map((modName, idx) => {
+                      const isCurrent = activePage === modName;
+                      const moduleInfo = MODULES.find((m) => m.name === modName);
+                      const iconName = moduleInfo ? moduleInfo.icon : 'home';
+                      const displayLabel = getGovModuleLabel(modName);
+                      return (
+                        <button
+                          key={`${idx}-${modName}`}
+                          type="button"
+                          onClick={() => {
+                            setActivePage(modName);
+                            setMoreMenuOpen(false);
+                          }}
+                          title={`Abrir ${displayLabel}`}
+                          className={`flex flex-col items-center justify-center gap-1 p-2 rounded-lg border text-center transition-colors cursor-pointer ${
+                            isCurrent
+                              ? 'border-[var(--accent)] bg-[var(--accent-soft)] text-[var(--accent)] font-bold'
+                              : 'border-[var(--line)] bg-[var(--panel-soft)] text-[var(--text)] hover:border-[var(--accent)]'
+                          }`}
+                        >
+                          <ModuleIcon name={iconName} className="w-4 h-4 shrink-0" />
+                          <span className="text-[10.5px] font-semibold truncate w-full">
+                            {displayLabel}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-1.5">
+                    {([0, 1, 2] as const).map((slotIdx) => (
+                      <div key={slotIdx} className="flex items-center gap-2">
+                        <span className="text-[10.5px] font-mono-num font-bold text-[var(--muted)] w-5 shrink-0">
+                          #{slotIdx + 1}
+                        </span>
+                        <select
+                          aria-label={`Atalho ${slotIdx + 1}`}
+                          value={quickModules[slotIdx]}
+                          onChange={(e) => {
+                            setQuickModuleAtSlot(slotIdx, e.target.value as ModuleName);
+                          }}
+                          className="ce-select flex-1 text-[11.5px] h-8 py-0 px-2 font-semibold"
+                        >
+                          {MODULES.map((m) => (
+                            <option key={m.name} value={m.name}>
+                              {getGovModuleLabel(m.name)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        updatePreferences({ quick_access_modules: [...DEFAULT_QUICK_MODULES] });
+                        toast('Atalhos restaurados.');
+                      }}
+                      className="self-start mt-1 text-[11px] font-semibold text-[var(--muted)] hover:text-[var(--text)] cursor-pointer bg-transparent border-0 p-0"
+                    >
+                      Restaurar padrão
+                    </button>
+                  </div>
+                )}
+              </div>
+
+              {/* Ações Utilitárias */}
+              <div className="flex flex-col gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMoreMenuOpen(false);
+                    setPushModalOpen(true);
+                  }}
+                  className="flex items-center justify-between gap-2 w-full px-2.5 py-2 rounded-lg text-[12px] font-semibold text-[var(--text)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
+                >
+                  <span className="inline-flex items-center gap-2">
+                    {pushAlertsActive ? (
+                      <BellRing className="w-3.5 h-3.5 text-[var(--good)]" />
+                    ) : (
+                      <Bell className="w-3.5 h-3.5 text-[var(--muted)]" />
+                    )}
+                    <span>Alertas Push de metas</span>
+                  </span>
+                  <span className={`text-[11px] font-semibold ${pushAlertsActive ? 'text-[var(--good)]' : 'text-[var(--subtle)]'}`}>
+                    {pushAlertsActive ? 'Ativo' : 'Configurar'}
+                  </span>
+                </button>
+
+                {onOpenShortcuts && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      onOpenShortcuts();
+                    }}
+                    className="flex items-center justify-between gap-2 w-full px-2.5 py-2 rounded-lg text-[12px] font-semibold text-[var(--text)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Keyboard className="w-3.5 h-3.5 text-[var(--muted)]" />
+                      <span>Atalhos de teclado</span>
+                    </span>
+                    <kbd className="font-mono-num text-[10.5px] text-[var(--subtle)]">?</kbd>
+                  </button>
+                )}
+
+                {onExitToLogin && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      onExitToLogin();
+                    }}
+                    className="flex items-center justify-between gap-2 w-full px-2.5 py-2 rounded-lg text-[12px] font-semibold text-[var(--text)] hover:bg-[var(--panel-soft)] transition-colors cursor-pointer"
+                  >
+                    <span className="inline-flex items-center gap-2">
+                      <Home className="w-3.5 h-3.5 text-[var(--muted)]" />
+                      <span>Tela de Acesso / Login</span>
+                    </span>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       </div>
 
       <DailyGoalPushModal open={pushModalOpen} onClose={() => setPushModalOpen(false)} />
