@@ -296,6 +296,60 @@ export const SettingsPage: React.FC = () => {
                 </span>
               </span>
             </label>
+
+            <div className="md:col-span-2 flex flex-col sm:flex-row sm:items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--panel-soft)] p-3.5">
+              <div className="min-w-0">
+                <strong className="block text-[13px] font-bold text-[var(--text)]">
+                  Margens laterais da área de estudo
+                </strong>
+                <small className="block text-[11.5px] text-[var(--muted)] mt-0.5">
+                  Escolha entre aproveitar toda a largura da tela (bordas reduzidas) ou manter o conteúdo centralizado como antes.
+                </small>
+              </div>
+              <div
+                role="radiogroup"
+                aria-label="Margens laterais da área de estudo"
+                className="inline-flex items-center gap-1 p-1 rounded-lg border border-[var(--line)] bg-[var(--panel)] shrink-0 self-start sm:self-center"
+              >
+                {(
+                  [
+                    {
+                      id: 'compact',
+                      label: 'bordas Reduzidas',
+                    },
+                    {
+                      id: 'classic',
+                      label: 'bordas Centralizadas',
+                    },
+                  ] as const
+                ).map((opt) => {
+                  const active = (prefs.content_margins || 'compact') === opt.id;
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      onClick={() => {
+                        updatePreferences({ content_margins: opt.id });
+                        toast(
+                          opt.id === 'classic'
+                            ? 'Margens laterais restauradas para o padrão centralizado (1440px).'
+                            : 'Margens laterais reduzidas ativadas (largura total).',
+                        );
+                      }}
+                      className={`px-3 py-1.5 rounded-md text-[12px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                        active
+                          ? 'bg-[var(--accent)] text-white shadow-xs'
+                          : 'text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--panel-soft)]'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
           </div>
         </Panel>
 

@@ -123,6 +123,7 @@ export const DEFAULT_PREFERENCES: AppPreferences = {
   sidebar_hidden: false,
   fullscreen: false,
   whiteboard_enabled: true,
+  content_margins: 'compact',
   modules: {},
   quick_access_modules: ['Cronograma', 'Lei Seca', 'Matriz de Incidência'],
 };

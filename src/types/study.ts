@@ -621,6 +621,7 @@ export interface AppPreferences {
   sidebar_hidden: boolean;
   fullscreen: boolean;
   whiteboard_enabled: boolean;
+  content_margins?: 'compact' | 'classic';
   modules: Record<string, ModuleVisibility>;
   quick_access_modules?: ModuleName[];
   default_drive_folder?: DefaultDriveFolderPreference;

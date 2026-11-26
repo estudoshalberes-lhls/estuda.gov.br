@@ -363,12 +363,18 @@ const AppShell: React.FC<AppShellProps> = ({ onExitToLogin }) => {
         {!hideNonEssentialChrome && <TopModuleNav />}
 
         <section
-          className={`flex-1 w-full mx-auto ${
-            examFocusMode
-              ? 'max-w-[1600px] px-3 sm:px-6 py-3 sm:py-4'
-              : studyFocusMode
-              ? 'max-w-[1440px] px-4 sm:px-8 py-4 sm:py-6'
-              : 'max-w-[1440px] px-4 sm:px-7 py-5 sm:py-6'
+          className={`flex-1 w-full ${
+            prefs.content_margins === 'classic'
+              ? `mx-auto ${
+                  examFocusMode
+                    ? 'max-w-[1600px] px-3 sm:px-6 py-3 sm:py-4'
+                    : studyFocusMode
+                    ? 'max-w-[1440px] px-4 sm:px-8 py-4 sm:py-6'
+                    : 'max-w-[1440px] px-4 sm:px-7 py-5 sm:py-6'
+                }`
+              : examFocusMode
+              ? 'px-3 sm:px-4 py-3 sm:py-4'
+              : 'px-3 sm:px-4 py-4 sm:py-5'
           }`}
           id="page-content"
         >
