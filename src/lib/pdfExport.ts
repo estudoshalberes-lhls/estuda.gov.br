@@ -1,9 +1,12 @@
 import { jsPDF } from 'jspdf';
 import {
   CompletedGoal,
+  ContestEditalPoint,
+  ContestItem,
   ErrorNotebookEntry,
   HighlightColorKey,
   IncompleteGoal,
+  LawFolderData,
   LawHighlight,
   LawItem,
 } from '../types/study';
@@ -13,10 +16,12 @@ import {
   formatIsoDateBr,
   formatScheduleDuration,
   formatSequentialDeviceLabel,
+  itemMatchesMultiArticleSpec,
   localDateBrazilian,
   localDateIso,
   localDateTimeBrazilian,
   normalizeSearch,
+  parseMultiArticleSpec,
   scheduleDurationSeconds,
   visibleName,
 } from './parsers';
@@ -3345,6 +3350,448 @@ export function exportExamSubjectErrorStatsPdf(params: {
   doc.save(fileName);
   return fileName;
 }
+
+export interface ContestEditalPdfResult {
+  fileName: string;
+  totalPoints: number;
+  studiedCount: number;
+  subjectsCount: number;
+}
+
+export function exportContestEditalPdf(params: {
+  contest: ContestItem;
+  points?: ContestEditalPoint[];
+  filterSummary?: string;
+  studentName?: string;
+  lawsMap?: Record<string, LawFolderData>;
+  readLawItems?: Record<string, string[]>;
+}): ContestEditalPdfResult {
+  const { contest } = params;
+  const allPoints = contest.edital_pontos || [];
+  const points = params.points ?? allPoints;
+  const isFiltered = Boolean(params.filterSummary) || points.length !== allPoints.length;
+
+  const ctx = createDoc();
+  const { doc, margin, maxWidth, pageWidth, pageHeight } = ctx;
+  const pdfText = (value: unknown) => normalizePdfLegalText(safePdfText(value));
+  const issuedAt = localDateTimeBrazilian();
+  const issuedDate = localDateBrazilian();
+
+  const contestTitle = visibleName(contest.concurso || 'Edital do Concurso').trim() || 'Edital do Concurso';
+  const studiedCount = points.filter((p) => p.estudado).length;
+  const pendingCount = points.length - studiedCount;
+  const pct = points.length > 0 ? Math.round((studiedCount / points.length) * 100) : 0;
+
+  // Group points by subject preserving insertion order (matches EditalPage)
+  const groupedMap = new Map<string, ContestEditalPoint[]>();
+  points.forEach((pt) => {
+    const label = visibleName(pt.materia || 'Geral').trim() || 'Geral';
+    const list = groupedMap.get(label);
+    if (list) {
+      list.push(pt);
+    } else {
+      groupedMap.set(label, [pt]);
+    }
+  });
+  const groupedSubjects = Array.from(groupedMap.entries());
+
+  // --- Official Federal Header Banner ---
+  const titleLinesBanner = doc.splitTextToSize(pdfText(contestTitle.toUpperCase()), maxWidth) as string[];
+  const shownTitleLines = titleLinesBanner.slice(0, 2);
+  const bannerHeight = shownTitleLines.length > 1 ? 37 : 32;
+
+  doc.setFillColor(7, 29, 65);
+  doc.rect(0, 0, pageWidth, bannerHeight, 'F');
+
+  const third = pageWidth / 3;
+  doc.setFillColor(22, 136, 33);
+  doc.rect(0, bannerHeight, third, 1.9, 'F');
+  doc.setFillColor(255, 205, 7);
+  doc.rect(third, bannerHeight, third, 1.9, 'F');
+  doc.setFillColor(19, 81, 180);
+  doc.rect(third * 2, bannerHeight, pageWidth - third * 2, 1.9, 'F');
+
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  doc.setTextColor(255, 205, 7);
+  doc.text(pdfText('ESTUDA.GOV.BR · DIÁRIO DE EDITAIS · EDITAL VERTICALIZADO'), margin, 9.5);
+
+  doc.setFontSize(shownTitleLines.length > 1 ? 12.2 : 13.6);
+  doc.setTextColor(255, 255, 255);
+  shownTitleLines.forEach((line, idx) => {
+    doc.text(line, margin, 17.5 + idx * 5.6);
+  });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(8.1);
+  doc.setTextColor(215, 227, 244);
+  const holderLine = `Estudante: ${params.studentName || 'Estudante'} · Emitido em ${issuedAt}`;
+  doc.text(
+    (doc.splitTextToSize(pdfText(holderLine), maxWidth) as string[])[0] || '',
+    margin,
+    bannerHeight - 5.2,
+  );
+
+  ctx.y = bannerHeight + 9;
+
+  // --- Protocol / Contest Metadata Card ---
+  const metaEntries: string[] = [];
+  if (contest.data_abertura?.trim()) {
+    metaEntries.push(`Prova / Abertura: ${contest.data_abertura.trim()}`);
+  }
+  if (contest.data_pagamento?.trim()) {
+    metaEntries.push(`Vencimento Boleto/GRU: ${contest.data_pagamento.trim()}`);
+  }
+  if (contest.status_pagamento?.trim()) {
+    metaEntries.push(`Status Pagamento: ${contest.status_pagamento.trim()}`);
+  }
+  if (contest.local_prova?.trim()) {
+    metaEntries.push(`Local de Prova: ${contest.local_prova.trim()}`);
+  }
+  if (contest.edital_arquivo?.trim()) {
+    metaEntries.push(`Arquivo vinculado: ${contest.edital_arquivo.trim()}`);
+  }
+
+  const obsClean = contest.observacoes?.trim() || '';
+  const metaJoined = metaEntries.join('   ·   ');
+  const metaLines = metaJoined
+    ? (doc.splitTextToSize(pdfText(metaJoined), maxWidth - 6) as string[])
+    : [];
+  const contestObsLines = obsClean
+    ? (doc.splitTextToSize(pdfText(`Observações gerais: ${obsClean}`), maxWidth - 6) as string[])
+    : [];
+  const filterLines = params.filterSummary
+    ? (doc.splitTextToSize(pdfText(`Escopo aplicado: ${params.filterSummary}`), maxWidth - 6) as string[])
+    : [];
+
+  if (metaLines.length > 0 || contestObsLines.length > 0 || filterLines.length > 0) {
+    const totalBoxLines = metaLines.length + contestObsLines.length + filterLines.length;
+    const boxH = totalBoxLines * 4.2 + 5;
+    ctx.ensureSpace(boxH + 4);
+    doc.setFillColor(246, 249, 253);
+    doc.setDrawColor(194, 209, 228);
+    doc.setLineWidth(0.25);
+    doc.rect(margin, ctx.y - 3, maxWidth, boxH, 'FD');
+
+    let lineY = ctx.y + 1;
+    if (metaLines.length > 0) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(7, 29, 65);
+      metaLines.forEach((line) => {
+        doc.text(line, margin + 3, lineY);
+        lineY += 4.2;
+      });
+    }
+    if (contestObsLines.length > 0) {
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(8);
+      doc.setTextColor(61, 79, 107);
+      contestObsLines.forEach((line) => {
+        doc.text(line, margin + 3, lineY);
+        lineY += 4.2;
+      });
+    }
+    if (filterLines.length > 0) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.9);
+      doc.setTextColor(19, 81, 180);
+      filterLines.forEach((line) => {
+        doc.text(line, margin + 3, lineY);
+        lineY += 4.2;
+      });
+    }
+    ctx.y += boxH + 3;
+  }
+
+  // --- Executive 4-column KPI Summary Strip ---
+  const summaryH = 15;
+  ctx.ensureSpace(summaryH + 8);
+  doc.setFillColor(250, 252, 255);
+  doc.setDrawColor(186, 204, 228);
+  doc.setLineWidth(0.3);
+  doc.rect(margin, ctx.y - 2, maxWidth, summaryH, 'FD');
+
+  const kpiItems: Array<[string, string, [number, number, number]]> = [
+    [
+      isFiltered ? 'PONTOS NO RECORTE' : 'PONTOS NO EDITAL',
+      isFiltered ? `${points.length} de ${allPoints.length}` : `${points.length} ponto(s)`,
+      [7, 29, 65],
+    ],
+    ['ESTUDADOS', `${studiedCount} concluído(s)`, [22, 136, 33]],
+    ['PENDENTES', `${pendingCount} pendente(s)`, pendingCount > 0 ? [180, 83, 9] : [86, 104, 130]],
+    ['CUMPRIMENTO', `${pct}% · ${groupedSubjects.length} matéria(s)`, [19, 81, 180]],
+  ];
+
+  const kpiColW = maxWidth / 4;
+  kpiItems.forEach(([lbl, val, color], idx) => {
+    const cx = margin + idx * kpiColW;
+    if (idx > 0) {
+      doc.setDrawColor(214, 224, 238);
+      doc.line(cx, ctx.y, cx, ctx.y + summaryH - 4);
+    }
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(6.6);
+    doc.setTextColor(86, 104, 130);
+    doc.text(pdfText(lbl), cx + 2.8, ctx.y + 3);
+
+    doc.setFontSize(9.4);
+    doc.setTextColor(...color);
+    const valLine = (doc.splitTextToSize(pdfText(val), kpiColW - 5.5) as string[])[0] || '';
+    doc.text(valLine, cx + 2.8, ctx.y + 9.6);
+  });
+
+  // Overall progress bar directly underneath KPI strip
+  ctx.y += summaryH - 0.5;
+  doc.setFillColor(229, 235, 243);
+  doc.rect(margin, ctx.y, maxWidth, 2, 'F');
+  if (pct > 0) {
+    doc.setFillColor(pct === 100 ? 22 : 19, pct === 100 ? 136 : 81, pct === 100 ? 33 : 180);
+    doc.rect(margin, ctx.y, Math.max(1.5, (maxWidth * pct) / 100), 2, 'F');
+  }
+  ctx.y += 7.5;
+
+  // --- Section Header ---
+  ctx.ensureSpace(14);
+  doc.setFillColor(232, 239, 249);
+  doc.setDrawColor(7, 29, 65);
+  doc.setLineWidth(0.3);
+  doc.rect(margin, ctx.y, maxWidth, 8, 'FD');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(9.5);
+  doc.setTextColor(7, 29, 65);
+  doc.text(pdfText('1. CONTEÚDO PROGRAMÁTICO POR MATÉRIA'), margin + 3, ctx.y + 5.4);
+  ctx.y += 12;
+
+  if (groupedSubjects.length === 0) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(
+      pdfText('Nenhum ponto programático cadastrado para este edital até o momento.'),
+      margin + 3,
+      ctx.y,
+    );
+    ctx.y += 8;
+  } else {
+    const resolveLawLinkLabel = (link: NonNullable<ContestEditalPoint['artigos_vinculados']>[number]) => {
+      const artDisplay =
+        link.label ||
+        (/^(?:\d|art\b)/i.test(link.filtroArtigos) && !/^art/i.test(link.filtroArtigos)
+          ? `Art(s). ${link.filtroArtigos}`
+          : link.filtroArtigos);
+      const base = `${visibleName(link.pastaLei)} - ${artDisplay}`;
+      const folder = params.lawsMap?.[link.pastaLei];
+      if (!folder) return base;
+      const readSet = new Set(params.readLawItems?.[link.pastaLei] || []);
+      const spec = parseMultiArticleSpec(link.filtroArtigos);
+      const matchedItems =
+        spec.exactKeys.size > 0
+          ? folder.items.filter((it) => itemMatchesMultiArticleSpec(it, spec))
+          : folder.items.filter((it) =>
+              normalizeSearch(`${it.artigo_base || ''} ${it.dispositivo} ${it.texto}`).includes(
+                normalizeSearch(link.filtroArtigos),
+              ),
+            );
+      if (!matchedItems.length) return base;
+      const readCount = matchedItems.filter((it) => readSet.has(it.id)).length;
+      return `${base} (${readCount}/${matchedItems.length} lidos)`;
+    };
+
+    groupedSubjects.forEach(([subjectName, groupPoints], secIdx) => {
+      const subTotal = groupPoints.length;
+      const subStudied = groupPoints.filter((p) => p.estudado).length;
+      const subPct = subTotal > 0 ? Math.round((subStudied / subTotal) * 100) : 0;
+
+      ctx.ensureSpace(22);
+
+      // Subject Banner (matches exportExamSubjectErrorStatsPdf)
+      const secBannerH = 8.8;
+      doc.setFillColor(235, 241, 250);
+      doc.setDrawColor(182, 198, 220);
+      doc.setLineWidth(0.3);
+      doc.rect(margin, ctx.y - 3.8, maxWidth, secBannerH, 'FD');
+      doc.setFillColor(7, 29, 65);
+      doc.rect(margin, ctx.y - 3.8, 2.3, secBannerH, 'F');
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.4);
+      doc.setTextColor(7, 29, 65);
+      const subjTitle =
+        (doc.splitTextToSize(pdfText(`${secIdx + 1}. ${subjectName.toUpperCase()}`), maxWidth - 44) as string[])[0] ||
+        '';
+      doc.text(subjTitle, margin + 5, ctx.y + 1.9);
+
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(8);
+      doc.setTextColor(subPct === 100 ? 22 : 19, subPct === 100 ? 136 : 81, subPct === 100 ? 33 : 180);
+      doc.text(
+        pdfText(`${subStudied}/${subTotal} (${subPct}%)`),
+        margin + maxWidth - 2.5,
+        ctx.y + 1.8,
+        { align: 'right' },
+      );
+
+      // Thin progress strip right under subject banner
+      const progY = ctx.y + secBannerH - 3.8;
+      doc.setFillColor(225, 232, 242);
+      doc.rect(margin, progY, maxWidth, 1.1, 'F');
+      if (subPct > 0) {
+        doc.setFillColor(subPct === 100 ? 22 : 19, subPct === 100 ? 136 : 81, subPct === 100 ? 33 : 180);
+        doc.rect(margin, progY, Math.max(1.2, (maxWidth * subPct) / 100), 1.1, 'F');
+      }
+
+      ctx.y += secBannerH + 2.2;
+
+      groupPoints.forEach((pt, ptIdx) => {
+        const statusText = pt.estudado
+          ? pt.estudado_em
+            ? `ESTUDADO · ${pt.estudado_em}`
+            : 'ESTUDADO'
+          : 'PENDENTE';
+        const titleStr = `${secIdx + 1}.${ptIdx + 1}  ${pt.titulo || 'Ponto do edital'}`;
+        const titleLines = doc.splitTextToSize(pdfText(titleStr), maxWidth - 38) as string[];
+        const obsLines = pt.observacao?.trim()
+          ? (doc.splitTextToSize(pdfText(`Obs.: ${pt.observacao.trim()}`), maxWidth - 10) as string[])
+          : [];
+        const lawLinks = pt.artigos_vinculados || [];
+        const lawLines = lawLinks.length
+          ? (doc.splitTextToSize(
+              pdfText(`Lei Seca: ${lawLinks.map(resolveLawLinkLabel).join(' | ')}`),
+              maxWidth - 10,
+            ) as string[])
+          : [];
+
+        const needed =
+          titleLines.length * 4.4 +
+          obsLines.length * 4 +
+          lawLines.length * 3.9 +
+          5;
+        ctx.ensureSpace(needed);
+
+        // Vector checkbox
+        const boxSize = 3.2;
+        const boxX = margin + 1.6;
+        const boxY = ctx.y - 2.6;
+        if (pt.estudado) {
+          doc.setFillColor(22, 136, 33);
+          doc.setDrawColor(22, 136, 33);
+          doc.setLineWidth(0.25);
+          doc.roundedRect(boxX, boxY, boxSize, boxSize, 0.5, 0.5, 'FD');
+          // Vector checkmark
+          doc.setDrawColor(255, 255, 255);
+          doc.setLineWidth(0.45);
+          doc.line(boxX + 0.7, boxY + 1.65, boxX + 1.35, boxY + 2.35);
+          doc.line(boxX + 1.35, boxY + 2.35, boxX + 2.55, boxY + 0.85);
+        } else {
+          doc.setFillColor(255, 255, 255);
+          doc.setDrawColor(148, 163, 184);
+          doc.setLineWidth(0.3);
+          doc.roundedRect(boxX, boxY, boxSize, boxSize, 0.5, 0.5, 'FD');
+        }
+
+        // Right-aligned status label
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.1);
+        if (pt.estudado) {
+          doc.setTextColor(22, 136, 33);
+        } else {
+          doc.setTextColor(120, 134, 156);
+        }
+        doc.text(pdfText(statusText), margin + maxWidth - 1.5, ctx.y, { align: 'right' });
+
+        // Topic Title
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(9.1);
+        doc.setTextColor(pt.estudado ? 30 : 15, pt.estudado ? 58 : 23, pt.estudado ? 42 : 42);
+        titleLines.forEach((line) => {
+          doc.text(line, margin + 7, ctx.y);
+          ctx.y += 4.4;
+        });
+
+        if (obsLines.length > 0) {
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8.2);
+          doc.setTextColor(61, 79, 107);
+          obsLines.forEach((line) => {
+            doc.text(line, margin + 7, ctx.y);
+            ctx.y += 4;
+          });
+        }
+
+        if (lawLines.length > 0) {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(7.8);
+          doc.setTextColor(19, 81, 180);
+          lawLines.forEach((line) => {
+            doc.text(line, margin + 7, ctx.y);
+            ctx.y += 3.9;
+          });
+        }
+
+        // Row bottom divider
+        doc.setDrawColor(226, 232, 240);
+        doc.setLineWidth(0.2);
+        doc.line(margin, ctx.y + 0.6, margin + maxWidth, ctx.y + 0.6);
+        ctx.y += 3.8;
+      });
+
+      ctx.y += 3.5;
+    });
+  }
+
+  // --- Running Headers & Institutional Footers ---
+  const totalPages = doc.getNumberOfPages();
+  for (let p = 1; p <= totalPages; p++) {
+    doc.setPage(p);
+    if (p > 1) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.4);
+      doc.setTextColor(7, 29, 65);
+      doc.text(pdfText('estuda.gov.br · Edital Verticalizado'), margin, 9.5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(7.4);
+      doc.setTextColor(82, 98, 124);
+      const shortContest = (doc.splitTextToSize(pdfText(contestTitle), 95) as string[])[0] || '';
+      doc.text(shortContest, pageWidth - margin, 9.5, { align: 'right' });
+
+      doc.setDrawColor(198, 211, 228);
+      doc.setLineWidth(0.25);
+      doc.line(margin, 11.5, pageWidth - margin, 11.5);
+    }
+
+    doc.setDrawColor(214, 224, 236);
+    doc.setLineWidth(0.28);
+    doc.line(margin, pageHeight - 12, margin + maxWidth, pageHeight - 12);
+
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(7.5);
+    doc.setTextColor(92, 110, 138);
+    doc.text(
+      pdfText(`estuda.gov.br · Diário de Editais · Emitido em ${issuedDate}`),
+      margin,
+      pageHeight - 7.5,
+    );
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(7, 29, 65);
+    doc.text(pdfText(`Página ${p} de ${totalPages}`), margin + maxWidth, pageHeight - 7.5, {
+      align: 'right',
+    });
+  }
+
+  const slug = cleanSafeName(contest.concurso || contest.id, 'edital').replace(/\s+/g, '_');
+  const fileName = `edital_${slug}_${localDateIso()}.pdf`;
+  doc.save(fileName);
+
+  return {
+    fileName,
+    totalPoints: points.length,
+    studiedCount,
+    subjectsCount: groupedSubjects.length,
+  };
+}
+
 
 
 

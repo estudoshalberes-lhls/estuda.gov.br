@@ -22,6 +22,7 @@ import {
   paymentDateValue,
   uid,
 } from '../lib/parsers';
+import { exportContestEditalPdf } from '../lib/pdfExport';
 import { readStudyTextFile } from '../lib/pdfExtract';
 import { ContestEditalPoint } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
@@ -29,6 +30,7 @@ import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 export const ContestsPage: React.FC = () => {
   const {
     db,
+    googleUser,
     setActivePage,
     addContest,
     toggleContestPayment,
@@ -308,21 +310,49 @@ export const ContestsPage: React.FC = () => {
                       Datas/Local .txt
                     </button>
                     {ptsCount > 0 && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          void syncContestsAndEditaisTxtToFolder({
-                            contestId: c.id,
-                            downloadEditalContestId: c.id,
-                            silent: false,
-                          })
-                        }
-                        title="Baixar arquivo .txt do edital deste concurso"
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)]"
-                      >
-                        <Download className="w-3 h-3 text-[var(--accent)]" />
-                        Edital .txt
-                      </button>
+                      <>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void syncContestsAndEditaisTxtToFolder({
+                              contestId: c.id,
+                              downloadEditalContestId: c.id,
+                              silent: false,
+                            })
+                          }
+                          title="Baixar arquivo .txt do edital deste concurso"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                        >
+                          <Download className="w-3 h-3 text-[var(--accent)]" />
+                          Edital .txt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            try {
+                              const res = exportContestEditalPdf({
+                                contest: c,
+                                studentName: googleUser?.displayName || googleUser?.email || 'Estudante',
+                                lawsMap: db.laws,
+                                readLawItems: db.readLawItems,
+                              });
+                              toast(`Edital em PDF baixado (${res.fileName}).`);
+                            } catch (err) {
+                              toast(
+                                err instanceof Error
+                                  ? err.message
+                                  : 'Não foi possível gerar o PDF do edital.',
+                                true,
+                              );
+                            }
+                          }}
+                          title="Baixar edital verticalizado em PDF deste concurso"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel)] text-[11px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                        >
+                          <FileText className="w-3 h-3 text-[var(--accent)]" />
+                          Edital PDF
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

@@ -31,12 +31,14 @@ import {
   parseMultiArticleSpec,
   visibleName,
 } from '../lib/parsers';
+import { exportContestEditalPdf } from '../lib/pdfExport';
 import { ContestEditalPoint, EditalLawLink, WeekdayName } from '../types/study';
 import { EmptyState, PageHeader, Panel } from '../components/ui/PageHeader';
 
 export const EditalPage: React.FC = () => {
   const {
     db,
+    googleUser,
     setActivePage,
     selectedEditalContestId,
     setSelectedEditalContestId,
@@ -322,6 +324,32 @@ export const EditalPage: React.FC = () => {
     setEditingPointId(null);
   };
 
+  const studentName = googleUser?.displayName || googleUser?.email || 'Estudante';
+
+  const handleDownloadEditalPdf = (useFiltered = false) => {
+    if (!activeContest) return;
+    try {
+      const filterParts: string[] = [];
+      if (useFiltered) {
+        if (statusFilter === 'pending') filterParts.push('Somente pendentes');
+        else if (statusFilter === 'studied') filterParts.push('Somente estudados');
+        if (subjectFilter !== 'all') filterParts.push(`Matéria: ${subjectFilter}`);
+        if (searchTerm.trim()) filterParts.push(`Busca: "${searchTerm.trim()}"`);
+      }
+      const res = exportContestEditalPdf({
+        contest: activeContest,
+        points: useFiltered ? filteredPoints : points,
+        filterSummary: filterParts.length ? filterParts.join(' · ') : undefined,
+        studentName,
+        lawsMap: db.laws,
+        readLawItems: db.readLawItems,
+      });
+      toast(`Edital em PDF baixado (${res.fileName} · ${res.totalPoints} ponto(s)).`);
+    } catch (err) {
+      toast(err instanceof Error ? err.message : 'Não foi possível gerar o PDF do edital.', true);
+    }
+  };
+
   return (
     <div>
       <PageHeader
@@ -358,6 +386,14 @@ export const EditalPage: React.FC = () => {
                 >
                   <Download className="w-3.5 h-3.5 text-[var(--accent)]" />
                   Baixar Edital (.txt)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleDownloadEditalPdf(false)}
+                  className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[12px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                >
+                  <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
+                  Baixar Edital (PDF)
                 </button>
               </>
             )}
@@ -724,14 +760,24 @@ export const EditalPage: React.FC = () => {
                       </button>
                     </>
                   )}
-                  <button
-                    type="button"
-                    onClick={() => clearContestEdital(activeContest.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)]"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    Limpar edital
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => clearContestEdital(activeContest.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--bad)] hover:border-[var(--bad)]"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      Limpar edital
+                    </button>
+                    {filteredPoints.length > 0 && filteredPoints.length < points.length && (
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadEditalPdf(true)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-[var(--line-strong)] bg-[var(--panel-raised)] text-[11.5px] font-bold text-[var(--text)] hover:border-[var(--accent)] whitespace-nowrap"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-[var(--accent)]" />
+                        PDF filtrados
+                      </button>
+                    )}
                 </div>
               ) : undefined
             }
